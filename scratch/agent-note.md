@@ -1,0 +1,1 @@
+Atelier multi-agent layout verified.

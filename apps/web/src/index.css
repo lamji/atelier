@@ -1,0 +1,220 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.965 0.008 280);
+  --foreground: oklch(0.2 0.015 275);
+  --card: oklch(0.995 0.002 280);
+  --card-foreground: oklch(0.2 0.015 275);
+  --primary: oklch(0.54 0.21 282);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.93 0.01 280);
+  --secondary-foreground: oklch(0.25 0.015 275);
+  --muted: oklch(0.93 0.008 280);
+  --muted-foreground: oklch(0.48 0.015 275);
+  --accent: oklch(0.92 0.025 282);
+  --accent-foreground: oklch(0.32 0.08 282);
+  --destructive: oklch(0.58 0.21 25);
+  --success: oklch(0.6 0.15 160);
+  --cyan: oklch(0.7 0.13 210);
+  --border: oklch(0.89 0.01 280);
+  --input: oklch(0.87 0.01 280);
+  --ring: oklch(0.54 0.21 282);
+  --island: oklch(0.99 0.002 280 / 0.78);
+  --mesh-a: oklch(0.88 0.06 282 / 0.55);
+  --mesh-b: oklch(0.9 0.05 210 / 0.5);
+  --mesh-c: oklch(0.9 0.06 330 / 0.35);
+}
+
+.dark {
+  --background: oklch(0.13 0.02 272);
+  --foreground: oklch(0.95 0.008 280);
+  --card: oklch(0.19 0.022 272);
+  --card-foreground: oklch(0.95 0.008 280);
+  --primary: oklch(0.7 0.19 282);
+  --primary-foreground: oklch(0.12 0.03 282);
+  --secondary: oklch(0.25 0.022 272);
+  --secondary-foreground: oklch(0.95 0.008 280);
+  --muted: oklch(0.23 0.02 272);
+  --muted-foreground: oklch(0.66 0.015 275);
+  --accent: oklch(0.29 0.045 282);
+  --accent-foreground: oklch(0.9 0.03 282);
+  --destructive: oklch(0.62 0.19 25);
+  --success: oklch(0.7 0.14 160);
+  --cyan: oklch(0.75 0.12 210);
+  --border: oklch(0.29 0.025 272);
+  --input: oklch(0.31 0.025 272);
+  --ring: oklch(0.7 0.19 282);
+  --island: oklch(0.18 0.022 272 / 0.72);
+  --mesh-a: oklch(0.35 0.12 282 / 0.5);
+  --mesh-b: oklch(0.3 0.1 210 / 0.4);
+  --mesh-c: oklch(0.32 0.11 330 / 0.3);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-cyan: var(--cyan);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius: 0.75rem;
+  --font-sans: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply text-foreground antialiased;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  background-color: var(--background);
+  background-image:
+    radial-gradient(42rem 30rem at 12% -8%, var(--mesh-a), transparent 60%),
+    radial-gradient(38rem 28rem at 105% 15%, var(--mesh-b), transparent 60%),
+    radial-gradient(44rem 34rem at 55% 115%, var(--mesh-c), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* ---- Isolated feature islands: flat, borderless, no elevation ---- */
+.island {
+  border-radius: 1rem;
+  background: var(--card);
+  overflow: hidden;
+}
+
+.island-header {
+  @apply flex items-center gap-1.5 px-3 py-2;
+}
+
+.island-title {
+  @apply text-[11px] font-semibold uppercase tracking-wider text-muted-foreground;
+}
+
+/* ---- Agentic working indicator: flat pulsing ring ---- */
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1.5px oklch(from var(--primary) l c h / 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 1.5px oklch(from var(--primary) l c h / 0.6);
+  }
+}
+.glow-working {
+  animation: glow-pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.text-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 40%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 60%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.4s linear infinite;
+}
+
+.orb {
+  background: conic-gradient(
+    from 180deg,
+    oklch(0.62 0.21 282),
+    oklch(0.7 0.15 210),
+    oklch(0.66 0.19 330),
+    oklch(0.62 0.21 282)
+  );
+}
+@keyframes orb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.orb-spin {
+  animation: orb-spin 6s linear infinite;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-muted-foreground/25;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/40;
+}
+
+/* Markdown inside chat bubbles */
+.chat-md {
+  @apply text-sm leading-relaxed;
+}
+.chat-md p {
+  @apply mb-2 last:mb-0;
+}
+.chat-md pre {
+  @apply my-2 overflow-x-auto rounded-lg bg-black/85 p-3 text-xs text-white;
+  font-family: var(--font-mono);
+}
+.chat-md code {
+  @apply rounded bg-muted px-1 py-0.5 text-[0.85em];
+  font-family: var(--font-mono);
+}
+.chat-md pre code {
+  @apply bg-transparent p-0;
+}
+.chat-md ul,
+.chat-md ol {
+  @apply mb-2 ml-5 space-y-0.5;
+}
+.chat-md ul {
+  @apply list-disc;
+}
+.chat-md ol {
+  @apply list-decimal;
+}
+.chat-md h1,
+.chat-md h2,
+.chat-md h3 {
+  @apply mb-1.5 mt-3 font-semibold first:mt-0;
+}
+.chat-md a {
+  @apply text-primary underline underline-offset-2;
+}
+.chat-md blockquote {
+  @apply my-2 border-l-2 border-primary/40 pl-3 text-muted-foreground;
+}
