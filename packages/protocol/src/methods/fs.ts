@@ -11,6 +11,11 @@ export const fsMethods = {
     params: z.object({ path: z.string() }),
     result: z.object({ entries: z.array(FileEntry) }),
   },
+  /** Flat list of workspace-relative file paths for the "@" mention menu. */
+  "fs.files": {
+    params: z.object({}).optional(),
+    result: z.object({ files: z.array(z.string()) }),
+  },
   "fs.stat": {
     params: z.object({ path: z.string() }),
     result: z.object({ entry: FileEntry }),

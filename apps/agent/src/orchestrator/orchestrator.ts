@@ -1,35 +1,16 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Logger } from "pino";
+import type { ImageAttachment } from "@atelier/protocol";
 import { newId } from "@atelier/shared";
-import type { AgentConfig } from "../config/agent-config.js";
 import type { EventBus } from "../events/event-bus.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
-import type { ToolRegistry } from "../tools/registry.js";
 import { isAuthError } from "./auth-status.js";
 import {
-  createAtelierMcpServer,
-  MCP_SERVER_NAME,
-  type SdkToolContext,
-} from "./sdk-tools.js";
-
-/**
- * Built-in SDK tools are disabled: every capability the model gets must go
- * through Atelier's own tool registry (Phase 2+) so hooks, diffs, and events
- * are never bypassed.
- */
-const DISABLED_BUILTINS = [
-  "Read",
-  "Write",
-  "Edit",
-  "Bash",
-  "Glob",
-  "Grep",
-  "WebSearch",
-  "WebFetch",
-  "Task",
-  "TodoWrite",
-  "NotebookEdit",
-];
+  HookBlockedError,
+  PipelineExecutor,
+  type PipelineDeps,
+  type TaskContext,
+} from "./pipeline-executor.js";
+import type { PlanTracker } from "./plan-tracker.js";
 
 interface RunningTask {
   taskId: string;
@@ -41,23 +22,36 @@ export interface TaskOptions {
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   planMode?: boolean;
+  /** Images the model should see on the first turn of this task. */
+  images?: ImageAttachment[];
+}
+
+export interface OrchestratorDeps extends PipelineDeps {
+  conversations: ConversationRepo;
+  planTracker: PlanTracker;
+  log: Logger;
 }
 
 /**
- * Phase 1 orchestrator: a plain streaming pass-through to the Claude Agent
- * SDK. The 9-stage pipeline executor replaces the direct call path in
- * Phase 6; the surface (startTask/cancelTask) stays the same.
+ * Task lifecycle owner: persistence, events, cancellation. Every task
+ * body runs through the 9-stage PipelineExecutor — the SDK is never
+ * invoked outside a pipeline stage.
  */
 export class Orchestrator {
   private running = new Map<string, RunningTask>();
+  private pipeline: PipelineExecutor;
+  private bus: EventBus;
+  private conversations: ConversationRepo;
+  private planTracker: PlanTracker;
+  private log: Logger;
 
-  constructor(
-    private config: AgentConfig,
-    private bus: EventBus,
-    private conversations: ConversationRepo,
-    private tools: ToolRegistry,
-    private log: Logger
-  ) {}
+  constructor(deps: OrchestratorDeps) {
+    this.pipeline = new PipelineExecutor(deps);
+    this.bus = deps.bus;
+    this.conversations = deps.conversations;
+    this.planTracker = deps.planTracker;
+    this.log = deps.log;
+  }
 
   startTask(
     conversationId: string,
@@ -132,96 +126,43 @@ export class Orchestrator {
     const startedAt = Date.now();
     const conversation = this.conversations.get(conversationId);
     const messageId = newId("msg");
-    let assistantText = "";
-    let sdkSessionId: string | null = conversation?.sdkSessionId ?? null;
 
     this.bus.publish("task.started", { conversationId, prompt }, taskId);
     this.bus.publish("agent.status", { status: "working" }, taskId);
-    const sdkContext: SdkToolContext = { taskId, signal: abort.signal };
-    const mcpServer = createAtelierMcpServer(this.tools, () => sdkContext);
+
+    // The current user turn is already persisted (added on enqueue), so it is
+    // the last user message — drop it and keep a short recent tail as the
+    // retrieval anchor for follow-ups that omit the subject.
+    const userTurns = this.conversations
+      .getMessages(conversationId)
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    const priorPrompts = userTurns.slice(0, -1).slice(-3);
+
+    const ctx: TaskContext = {
+      taskId,
+      conversationId,
+      prompt,
+      priorPrompts,
+      messageId,
+      opts,
+      abort,
+      sdkSessionId: conversation?.sdkSessionId ?? null,
+      onSdkSessionId: (sid) =>
+        this.conversations.setSdkSessionId(conversationId, sid),
+      collectedText: "",
+    };
 
     try {
-      const stream = query({
-        prompt,
-        options: {
-          cwd: this.config.workspaceRoot,
-          systemPrompt: {
-            type: "preset",
-            preset: "claude_code",
-            append:
-              "STRICT WORKSPACE CONFINEMENT: You may only read, create, " +
-              "modify, search, and run commands INSIDE the current workspace " +
-              "directory. Never reference absolute paths, parent directories " +
-              "(..), the user's home directory, or environment path variables " +
-              "that point outside the workspace. All file paths must be " +
-              "workspace-relative. Requests to work outside the workspace " +
-              "must be declined with a short explanation.",
-          },
-          permissionMode: opts.planMode ? "plan" : "bypassPermissions",
-          ...(opts.model ? { model: opts.model } : {}),
-          ...(opts.effort ? { effort: opts.effort } : {}),
-          disallowedTools: DISABLED_BUILTINS,
-          mcpServers: { [MCP_SERVER_NAME]: mcpServer },
-          // Only Atelier's own MCP server — never the user's global MCP config.
-          strictMcpConfig: true,
-          allowedTools: [`mcp__${MCP_SERVER_NAME}__*`],
-          includePartialMessages: true,
-          settingSources: [],
-          abortController: abort,
-          ...(sdkSessionId ? { resume: sdkSessionId } : {}),
-        },
-      });
-
-      for await (const message of stream) {
-        const m = message as Record<string, unknown>;
-
-        if (m.type === "system" && m.subtype === "init") {
-          const sid = m.session_id as string | undefined;
-          if (sid && sid !== sdkSessionId) {
-            sdkSessionId = sid;
-            this.conversations.setSdkSessionId(conversationId, sid);
-          }
-        }
-
-        if (m.type === "stream_event") {
-          const event = m.event as {
-            type?: string;
-            delta?: { type?: string; text?: string; thinking?: string };
-          };
-          if (event?.type === "content_block_delta" && event.delta) {
-            if (event.delta.type === "text_delta" && event.delta.text) {
-              assistantText += event.delta.text;
-              this.bus.publish(
-                "chat.message.delta",
-                { conversationId, messageId, delta: event.delta.text },
-                taskId
-              );
-            } else if (
-              event.delta.type === "thinking_delta" &&
-              event.delta.thinking
-            ) {
-              this.bus.publish(
-                "agent.thinking.delta",
-                { conversationId, delta: event.delta.thinking },
-                taskId
-              );
-            }
-          }
-        }
-
-        if (m.type === "result") {
-          const resultText = m.result as string | undefined;
-          if (!assistantText && resultText) assistantText = resultText;
-        }
-      }
-
-      this.finishTask(taskId, conversationId, messageId, assistantText, {
+      const outcome = await this.pipeline.run(ctx);
+      this.finishTask(taskId, conversationId, messageId, outcome.assistantText, {
         status: "completed",
         startedAt,
       });
     } catch (error) {
       if (abort.signal.aborted) {
-        this.finishTask(taskId, conversationId, messageId, assistantText, {
+        this.planTracker.cancelPending(taskId);
+        this.finishTask(taskId, conversationId, messageId, ctx.collectedText, {
           status: "cancelled",
           startedAt,
         });
@@ -237,14 +178,15 @@ export class Orchestrator {
           taskId
         );
       }
+      const message =
+        error instanceof HookBlockedError
+          ? `Blocked by hook: ${error.message}`
+          : String(error);
       this.log.error({ err: error, taskId }, "task failed");
-      this.bus.publish(
-        "task.error",
-        { conversationId, message: String(error) },
-        taskId
-      );
+      this.bus.publish("task.error", { conversationId, message }, taskId);
       this.conversations.updateTaskStatus(taskId, "error", Date.now());
       this.running.delete(taskId);
+      this.planTracker.clear(taskId);
       this.publishGlobalStatus();
     }
   }
@@ -274,6 +216,7 @@ export class Orchestrator {
     this.conversations.touch(conversationId);
     this.conversations.updateTaskStatus(taskId, outcome.status, Date.now());
     this.running.delete(taskId);
+    this.planTracker.clear(taskId);
     if (outcome.status === "completed") {
       this.bus.publish(
         "task.completed",

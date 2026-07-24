@@ -40,12 +40,13 @@ export function useTerminalViewModel() {
     }
   }, []);
 
-  const mount = useCallback(
-    (termId: string, container: HTMLElement) => {
-      terminalRegistry.mount(termId, container, theme === "dark");
-    },
-    [theme]
-  );
+  // Stable across theme changes — the registry updates live terminals'
+  // theme via setTheme(), so mount reads the theme lazily and never needs
+  // to re-run (a new mount reference would wrongly re-trigger effects).
+  const mount = useCallback((termId: string, container: HTMLElement) => {
+    const dark = useThemeStore.getState().theme === "dark";
+    terminalRegistry.mount(termId, container, dark);
+  }, []);
 
   const refit = useCallback((termId: string) => {
     terminalRegistry.fitAndSync(termId);

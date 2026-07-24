@@ -1,6 +1,17 @@
 import { newId } from "@atelier/shared";
 import type { EventBus } from "../events/event-bus.js";
 
+/** Hook gate contract (implemented by HooksEngine). */
+export interface ToolGate {
+  evaluateToolUse(
+    toolName: string,
+    input: unknown,
+    taskId: string,
+    /** Lets a hook that waits on the user give up when the task stops. */
+    signal?: AbortSignal
+  ): Promise<{ allowed: boolean; reason?: string }>;
+}
+
 export interface ToolContext {
   taskId: string;
   signal: AbortSignal;
@@ -19,8 +30,14 @@ export type ToolImpl<I = unknown, O = unknown> = (
  */
 export class ToolRegistry {
   private tools = new Map<string, ToolImpl>();
+  private gate: ToolGate | null = null;
 
   constructor(private bus: EventBus) {}
+
+  /** Installed once at startup; every run() then flows through hooks. */
+  setGate(gate: ToolGate): void {
+    this.gate = gate;
+  }
 
   register<I, O>(name: string, impl: ToolImpl<I, O>): void {
     if (this.tools.has(name)) throw new Error(`Tool already registered: ${name}`);
@@ -42,6 +59,23 @@ export class ToolRegistry {
     const toolCallId = newId("tc");
     const startedAt = Date.now();
     this.bus.publish("tool.started", { toolCallId, name, input }, taskId);
+    if (this.gate) {
+      const decision = await this.gate.evaluateToolUse(
+        name,
+        input,
+        taskId,
+        signal
+      );
+      if (!decision.allowed) {
+        const error = `Blocked by hook: ${decision.reason ?? "no reason given"}`;
+        this.bus.publish(
+          "tool.failed",
+          { toolCallId, name, error, durationMs: Date.now() - startedAt },
+          taskId
+        );
+        throw new Error(error);
+      }
+    }
     const ctx: ToolContext = {
       taskId,
       signal,

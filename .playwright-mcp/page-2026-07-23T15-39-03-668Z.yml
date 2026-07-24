@@ -1,0 +1,51 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: A
+      - generic [ref=e8]:
+        - paragraph [ref=e9]: Atelier
+        - paragraph [ref=e10]: agentic engineering
+    - navigation [ref=e11]:
+      - button "Chat" [ref=e12]
+      - button "Editor" [ref=e17]
+      - button "Diffs" [ref=e24]
+      - button "Terminal" [ref=e28]
+      - button "Graph" [ref=e33]
+      - button "RAG" [ref=e40]
+      - button "Activity" [ref=e49]
+  - generic [ref=e53]:
+    - generic [ref=e55]:
+      - button "Agents" [ref=e56]
+      - button "Explorer" [ref=e61]
+      - button "Git" [ref=e66]
+      - button "Knowledge" [ref=e71]
+      - button "Hooks" [ref=e77]
+      - button "Monitor" [ref=e82]
+      - button "Settings" [ref=e85]
+      - button "Switch to dark mode" [ref=e89]
+    - generic [ref=e92]:
+      - generic [ref=e96]:
+        - generic [ref=e97]: Agents
+        - button "New" [ref=e102]
+      - separator [ref=e105]
+      - generic [ref=e111]:
+        - generic [ref=e112]: No session
+        - generic [ref=e127]:
+          - paragraph [ref=e128]: Connecting to local agent…
+          - paragraph [ref=e129]: Make sure the agent process is running.
+        - generic [ref=e133]:
+          - generic [ref=e134]:
+            - textbox "Describe a task for this agent…" [disabled] [ref=e135]
+            - button "Send (Enter)" [disabled] [ref=e136]
+          - generic [ref=e139]:
+            - button "Select a file in the explorer to attach it" [disabled] [ref=e140]
+            - 'button "Model: default" [ref=e144] [cursor=pointer]'
+            - 'button "Reasoning: default" [ref=e149] [cursor=pointer]'
+            - generic [ref=e153] [cursor=pointer]:
+              - checkbox "Plan mode" [ref=e154]
+              - text: Plan mode
+            - generic [ref=e158]: Enter ↵ · Shift+Enter newline
+  - generic [ref=e160]:
+    - generic [ref=e161]: Connected
+    - generic [ref=e168]: agent idle
+    - generic [ref=e170]: C:\Users\akrizu\atelier

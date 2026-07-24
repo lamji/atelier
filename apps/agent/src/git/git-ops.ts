@@ -13,12 +13,25 @@ export interface OpIo {
   signal?: AbortSignal;
 }
 
-/** Push flags the UI may request; anything else is rejected. */
-const PUSH_FLAG_ALLOWLIST = new Set([
-  "--no-verify",
-  "--force-with-lease",
-  "--tags",
+/**
+ * Free-form push flags from the UI: must look like options, and the
+ * ones that point git at an arbitrary executable are rejected.
+ */
+const PUSH_FLAG_RE = /^-{1,2}[A-Za-z0-9][\w=./:@^~,-]*$/;
+const PUSH_FLAG_DENYLIST = new Set([
+  "--exec",
+  "--receive-pack",
+  "--upload-pack",
 ]);
+
+function assertPushFlags(flags: string[]): void {
+  for (const flag of flags) {
+    const name = flag.split("=")[0] ?? flag;
+    if (!PUSH_FLAG_RE.test(flag) || PUSH_FLAG_DENYLIST.has(name)) {
+      throw new Error(`Push flag not allowed: ${flag}`);
+    }
+  }
+}
 
 /** Retained output is capped to this tail; streaming is unaffected. */
 const MAX_OUTPUT_CHARS = 64_000;
@@ -36,8 +49,12 @@ function runStreaming(
   io: OpIo
 ): Promise<GitOpResult> {
   return new Promise((resolve, reject) => {
+    // Echo the resolved command so the UI shows exactly what ran — the
+    // caller can't know the branch/upstream arguments added here.
+    const echo = `$ ${cmd} ${args.join(" ")}\n`;
+    io.onChunk(echo);
     const child = spawn(cmd, args, { cwd, windowsHide: true, env: NO_PROMPT_ENV });
-    let output = "";
+    let output = echo;
 
     const onData = (data: Buffer) => {
       const text = data.toString("utf8").replace(ANSI_RE, "");
@@ -104,20 +121,23 @@ export async function commitRun(
 }
 
 /**
- * Pushes the current branch. Sets upstream automatically on first push.
- * Flags come from the UI and are checked against the allowlist.
+ * Pushes the current branch. The branch is named explicitly unless the
+ * branch already tracks a remote branch of the SAME name — otherwise a
+ * bare `git push` either fails ("upstream branch does not match the name
+ * of your current branch") or, worse, pushes to a differently-named
+ * branch. Flags come from the UI free-form and are shape-checked above.
  */
 export async function pushRun(
   root: string,
   flags: string[],
   io: OpIo
 ): Promise<GitOpResult> {
-  const bad = flags.find((f) => !PUSH_FLAG_ALLOWLIST.has(f));
-  if (bad) throw new Error(`Push flag not allowed: ${bad}`);
+  assertPushFlags(flags);
 
   const args = ["push", ...flags];
-  if (!(await hasUpstream(root))) {
-    args.push("-u", "origin", await currentBranch(root));
+  const branch = await currentBranch(root);
+  if ((await upstreamBranch(root, branch)) !== branch) {
+    args.push("-u", "origin", branch);
   }
   return runStreaming("git", args, root, io);
 }
@@ -220,6 +240,20 @@ async function currentBranch(root: string): Promise<string> {
   );
   if (code !== 0 || !out) throw new Error("Could not resolve current branch");
   return out;
+}
+
+/** Remote branch this branch tracks ("main"), or null when untracked. */
+async function upstreamBranch(
+  root: string,
+  branch: string
+): Promise<string | null> {
+  const { code, out } = await capture(
+    "git",
+    ["config", "--get", `branch.${branch}.merge`],
+    root
+  );
+  if (code !== 0 || !out) return null;
+  return out.replace(/^refs\/heads\//, "");
 }
 
 async function hasUpstream(root: string): Promise<boolean> {

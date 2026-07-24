@@ -1,5 +1,8 @@
 import type { z } from "zod";
 import { sessionMethods } from "./session.js";
+
+export { SlashCommand } from "./session.js";
+export { ImageAttachment } from "./task.js";
 import { taskMethods } from "./task.js";
 import { fsMethods } from "./fs.js";
 import { terminalMethods } from "./terminal.js";
@@ -8,6 +11,9 @@ import { validationMethods } from "./validation.js";
 import { knowledgeMethods } from "./knowledge.js";
 import { hooksMethods } from "./hooks.js";
 import { settingsMethods } from "./settings.js";
+import { usageMethods } from "./usage.js";
+import { modelsMethods } from "./models.js";
+import { projectsMethods } from "./projects.js";
 
 export const methods = {
   ...sessionMethods,
@@ -19,6 +25,9 @@ export const methods = {
   ...knowledgeMethods,
   ...hooksMethods,
   ...settingsMethods,
+  ...usageMethods,
+  ...modelsMethods,
+  ...projectsMethods,
 } as const;
 
 export type Methods = typeof methods;
@@ -44,4 +53,12 @@ export {
   knowledgeMethods,
   hooksMethods,
   settingsMethods,
+  usageMethods,
+  modelsMethods,
+  projectsMethods,
 };
+export {
+  ProjectInfo,
+  ProjectStatus,
+  ProjectEndpoint,
+} from "./projects.js";

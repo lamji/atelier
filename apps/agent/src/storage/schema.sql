@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS features (
   detail_md TEXT,
   status TEXT NOT NULL DEFAULT 'building',
   model_version TEXT,
+  chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
   updated_at INTEGER NOT NULL
 );
 
@@ -185,6 +186,37 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
   embedding BLOB NOT NULL,
   dims INTEGER NOT NULL
 );
+
+-- Episodic knowledge: distilled lessons from past work (confirmed bug
+-- fixes, gotchas, patterns). Tiny rows; the lesson text lives as a chunk
+-- (kind 'lesson', file_id NULL so file re-indexing never wipes it) and is
+-- retrieved through the normal RAG arms.
+CREATE TABLE IF NOT EXISTS lessons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  body_md TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'gotcha',
+  task_id TEXT,
+  chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
+  confidence REAL NOT NULL DEFAULT 0.7,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER
+);
+
+-- Links anchor lessons to code. stable_key survives re-indexing (same
+-- mechanism that preserves symbol ids); file_path survives file renames
+-- of ids while staying human-readable.
+CREATE TABLE IF NOT EXISTS lesson_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+  stable_key TEXT,
+  symbol_name TEXT,
+  file_path TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_lesson_links_lesson ON lesson_links(lesson_id);
+CREATE INDEX IF NOT EXISTS idx_lesson_links_key ON lesson_links(stable_key);
+CREATE INDEX IF NOT EXISTS idx_lesson_links_path ON lesson_links(file_path);
 
 CREATE TABLE IF NOT EXISTS index_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

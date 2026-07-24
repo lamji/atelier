@@ -129,6 +129,138 @@ export function createAtelierMcpServer(
       (input) => run("git", input)
     ),
     tool(
+      "retrieve_knowledge",
+      "Answer 'where/how is X handled?' questions from the workspace " +
+        "knowledge index (symbols, call graph, embeddings). Returns scored " +
+        "code chunks with paths and line ranges plus matched symbols. " +
+        "Prefer this over search_workspace for conceptual questions.",
+      {
+        query: z.string().describe("Natural-language or symbol query"),
+        k: z.number().optional().describe("Max chunks to return (default 12)"),
+        pathGlob: z
+          .string()
+          .optional()
+          .describe("Restrict results to paths matching this glob"),
+      },
+      (input) => run("retrieve_knowledge", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "query_knowledge_graph",
+      "Query the code graph: imports, call edges, and symbols. Scopes: " +
+        "'workspace' (file import graph), 'file' (one file's imports, " +
+        "importers, and symbols; target = workspace-relative path), " +
+        "'symbol' (callers/callees; target = symbol name or id), 'feature'.",
+      {
+        scope: z.enum(["file", "symbol", "feature", "workspace"]),
+        target: z.string().optional().describe("Path, symbol name, or slug"),
+        depth: z.number().optional().describe("Neighborhood depth (default 1)"),
+      },
+      (input) => run("query_knowledge_graph", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "search_symbols",
+      "Fuzzy-search indexed symbols by name. Returns kind, path, line " +
+        "range, and signature for each match.",
+      {
+        query: z.string().describe("Symbol name or fragment"),
+        limit: z.number().optional(),
+      },
+      (input) => run("search_symbols", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "impact_of_edit",
+      "BEFORE editing a specific place, check who uses it. Given a file " +
+        "and the line you're about to change (or the symbol name), returns " +
+        "the enclosing symbol, whether it's exported, and every call / " +
+        "reference / import of it — same-file and cross-file — plus a " +
+        "verdict: isolated, local, or shared. Use it to decide whether to " +
+        "update the callers too or keep the contract stable and isolate.",
+      {
+        path: z.string().describe("Workspace-relative file you're editing"),
+        line: z
+          .number()
+          .optional()
+          .describe("1-based line you're about to change"),
+        symbol: z
+          .string()
+          .optional()
+          .describe("Symbol name at the edit site (instead of line)"),
+      },
+      (input) => run("impact_of_edit", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "analyze_impact",
+      "Coarser, file-level check: find what depends on whole files — " +
+        "importers, callers, transitive ripple, and risk lessons. For a " +
+        "precise 'who uses this exact symbol' check, prefer impact_of_edit.",
+      {
+        files: z
+          .array(z.string())
+          .optional()
+          .describe("Workspace-relative paths you plan to change"),
+        symbols: z
+          .array(z.string())
+          .optional()
+          .describe("Symbol names you plan to change (e.g. convertCurrency)"),
+        depth: z
+          .number()
+          .optional()
+          .describe("Ripple depth 1-3 (default 1 = direct dependents)"),
+      },
+      (input) => run("analyze_impact", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "update_plan_step",
+      "Report progress on the current task plan. Call when you start a " +
+        "step (in-progress) and when you finish it (done/failed/skipped). " +
+        "Step ids appear in the PLAN section of your context.",
+      {
+        stepId: z.string().describe("The [step_...] id from the plan"),
+        status: z.enum([
+          "pending",
+          "in-progress",
+          "done",
+          "failed",
+          "cancelled",
+          "skipped",
+        ]),
+        note: z.string().optional().describe("Optional short note"),
+      },
+      (input) => run("update_plan_step", input)
+    ),
+    tool(
+      "save_lesson",
+      "Persist a distilled, reusable insight into the knowledge engine so " +
+        "it is never re-discovered the hard way. Call this when a fix is " +
+        "confirmed working after real difficulty (wrong attempts, multiple " +
+        "follow-ups), or when you hit a non-obvious gotcha or project " +
+        "convention. Keep it tiny: title one line, lesson <= 500 chars " +
+        "stating the trap and the correct approach. Anchor it with the " +
+        "symbols/files involved — future tasks touching them will retrieve " +
+        "it automatically.",
+      {
+        title: z.string().describe("One-line summary of the insight"),
+        lesson: z
+          .string()
+          .describe("The distilled lesson: the trap + the correct approach"),
+        kind: z.enum(["bug-fix", "gotcha", "pattern", "preference"]).optional(),
+        symbols: z
+          .array(z.string())
+          .optional()
+          .describe("Symbol names this applies to (e.g. convertCurrency)"),
+        files: z
+          .array(z.string())
+          .optional()
+          .describe("Workspace-relative file paths this applies to"),
+      },
+      (input) => run("save_lesson", input)
+    ),
+    tool(
       "run_terminal",
       "Run a shell command (PowerShell on Windows) in the workspace and " +
         "return its output and exit code. Use for builds, tests, git, and " +

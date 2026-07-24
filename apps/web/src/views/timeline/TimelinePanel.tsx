@@ -1,20 +1,22 @@
-import { useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   CheckCircle2,
+  Database,
   FileDiff,
   FileText,
   GitBranch,
   ListChecks,
   Network,
   Play,
+  Radar,
   TerminalSquare,
   Webhook,
   Wrench,
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { useStickToTop } from "@/hooks/useStickToBottom";
 import type { TimelineEntryVm } from "@/types";
 
 export interface TimelinePanelProps {
@@ -22,16 +24,18 @@ export interface TimelinePanelProps {
 }
 
 export function TimelinePanel({ entries }: TimelinePanelProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [entries]);
+  // Newest first, pinned to the top — but only while you're already there,
+  // so scrolling down to read older entries isn't interrupted.
+  const { ref: scrollRef, onScroll } = useStickToTop<HTMLDivElement>([entries]);
+  const newestFirst = [...entries].reverse();
 
   return (
     <div className="flex h-full flex-col">
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="min-h-0 flex-1 overflow-y-auto p-2"
+      >
         {entries.length === 0 && (
           <p className="pt-8 text-center text-xs text-muted-foreground/70">
             Agent actions appear here as they happen.
@@ -39,7 +43,7 @@ export function TimelinePanel({ entries }: TimelinePanelProps) {
         )}
         <div className="space-y-1">
           <AnimatePresence initial={false}>
-            {entries.map((entry) => (
+            {newestFirst.map((entry) => (
               <TimelineCard key={entry.key} entry={entry} />
             ))}
           </AnimatePresence>
@@ -55,8 +59,24 @@ interface TopicStyle {
 }
 
 function styleFor(topic: string): TopicStyle {
-  if (topic.startsWith("tool.failed") || topic === "task.error") {
+  if (
+    topic.startsWith("tool.failed") ||
+    topic === "task.error" ||
+    topic === "hook.blocked"
+  ) {
     return { icon: XCircle, tone: "destructive" };
+  }
+  if (topic === "summary.created") {
+    return { icon: CheckCircle2, tone: "success" };
+  }
+  if (topic.startsWith("validation.")) {
+    return { icon: ListChecks, tone: "primary" };
+  }
+  if (topic === "impact.radius" || topic === "edit.impact") {
+    return { icon: Radar, tone: "destructive" };
+  }
+  if (topic === "intent.resolved" || topic === "impact.analyzed") {
+    return { icon: Network, tone: "primary" };
   }
   if (topic === "task.completed") return { icon: CheckCircle2, tone: "success" };
   if (topic === "task.started") return { icon: Play, tone: "primary" };
@@ -68,6 +88,7 @@ function styleFor(topic: string): TopicStyle {
   if (topic.startsWith("terminal.")) {
     return { icon: TerminalSquare, tone: "default" };
   }
+  if (topic.startsWith("db.")) return { icon: Database, tone: "primary" };
   if (topic.startsWith("git.")) return { icon: GitBranch, tone: "default" };
   if (topic.startsWith("knowledge.")) return { icon: Network, tone: "default" };
   if (topic.startsWith("hook.")) return { icon: Webhook, tone: "default" };
@@ -129,6 +150,62 @@ function TimelineCard({ entry }: { entry: TimelineEntryVm }) {
 function summarize(entry: TimelineEntryVm): string {
   const p = entry.payload as Record<string, unknown> | null;
   if (!p) return "";
+  // Typed pipeline cards.
+  switch (entry.topic) {
+    case "pipeline.stage.started":
+      return `stage: ${String(p.stage)}`;
+    case "pipeline.stage.completed": {
+      const ok = p.ok ? "✓" : "✗";
+      const detail = typeof p.detail === "string" ? ` — ${p.detail}` : "";
+      return `${ok} ${String(p.stage)} (${Number(p.durationMs)}ms)${detail}`;
+    }
+    case "intent.resolved":
+      return `${String(p.kind)}: ${String(p.summary ?? "").slice(0, 120)}`;
+    case "knowledge.retrieved": {
+      const chunks = Array.isArray(p.chunks) ? p.chunks.length : 0;
+      return `${String(p.strategy)} · ${chunks} chunks`;
+    }
+    case "impact.analyzed": {
+      const files = Array.isArray(p.affectedFiles) ? p.affectedFiles.length : 0;
+      const risks = Array.isArray(p.riskNotes) ? p.riskNotes.length : 0;
+      return `${files} dependent file(s)` + (risks ? ` · ${risks} risk note(s)` : "");
+    }
+    case "impact.radius":
+      return String(p.summary ?? "");
+    case "edit.impact":
+      return `${String(p.symbol ?? "")} · ${String(p.reach ?? "")} · ${String(p.summary ?? "").slice(0, 90)}`;
+    case "plan.created": {
+      const steps = Array.isArray(p.steps) ? p.steps.length : 0;
+      return `${String(p.goal ?? "").slice(0, 100)} · ${steps} steps`;
+    }
+    case "plan.step.updated":
+      return `${String(p.status)}${p.note ? ` — ${String(p.note)}` : ""}`;
+    case "validation.result": {
+      const findings = Array.isArray(p.findings) ? p.findings.length : 0;
+      return `${String(p.kind)}: ${p.ok ? "green" : `${findings} finding(s)`} (${Number(p.durationMs)}ms)`;
+    }
+    case "summary.created":
+      return String(p.text ?? "").slice(0, 160);
+    case "hook.blocked":
+      return `${String(p.name)}: ${String(p.reason ?? "").slice(0, 120)}`;
+    case "review.checked": {
+      const similar = Array.isArray(p.similar) ? p.similar.length : 0;
+      const companions = Array.isArray(p.companionFiles)
+        ? p.companionFiles.length
+        : 0;
+      return `${similar} similar file(s), ${companions} companion(s)`;
+    }
+    case "git.flow.requested":
+      return `awaiting confirmation — ${String(p.command ?? "").slice(0, 120)}`;
+    case "db.approval.requested":
+      return `${String(p.operation)} — ${String(p.command ?? "").slice(0, 100)}`;
+    case "db.approval.resolved":
+      return String(p.outcome);
+    case "knowledge.lesson.saved": {
+      const lesson = p.lesson as Record<string, unknown> | undefined;
+      return String(lesson?.title ?? "").slice(0, 120);
+    }
+  }
   if (typeof p.prompt === "string") return p.prompt.slice(0, 140);
   if (typeof p.name === "string") {
     const path =

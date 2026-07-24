@@ -10,6 +10,11 @@ export interface AgentConfig {
   host: string;
   port: number;
   agentVersion: string;
+  /**
+   * Built web UI directory to serve over HTTP on the same port (packaged
+   * mode). Undefined in dev, where Vite serves the UI separately.
+   */
+  webDistPath?: string;
 }
 
 function defaultDataDir(): string {
@@ -24,11 +29,15 @@ export function loadConfig(): AgentConfig {
   );
   const dataDir = process.env.ATELIER_DATA_DIR ?? defaultDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
+  const webDistEnv = process.env.ATELIER_WEB_DIST;
+  const webDistPath =
+    webDistEnv && fs.existsSync(webDistEnv) ? webDistEnv : undefined;
   return {
     workspaceRoot,
     dataDir,
     host: "127.0.0.1",
     port: Number(process.env.ATELIER_PORT ?? 43110),
     agentVersion: "0.1.0",
+    webDistPath,
   };
 }

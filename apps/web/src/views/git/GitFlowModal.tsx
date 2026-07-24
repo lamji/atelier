@@ -1,28 +1,36 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Check,
   CircleAlert,
   ExternalLink,
   GitBranch,
+  GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
   Loader2,
+  ShieldAlert,
   Sparkles,
   Wand2,
   X,
 } from "lucide-react";
 import Markdown from "react-markdown";
 import { cn } from "@/lib/cn";
+import { STAGE_LABELS } from "@/lib/stage-labels";
+import { useElapsed } from "@/hooks/useElapsed";
+import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import type { GitFlowRequest } from "@atelier/protocol";
 import type { GitFlowViewModel } from "@/hooks/useGitFlowViewModel";
 import type { FlowStage } from "@/state/git-flow.store";
 import type { SessionVm } from "@/state/sessions.store";
 
 const STAGE_TITLES: Record<FlowStage, string> = {
   idle: "",
+  confirm: "The agent wants to run git",
   branch: "Create feature branch",
   commit: "Committing…",
   "commit-fix": "Commit failed",
@@ -39,7 +47,7 @@ const STAGE_TITLES: Record<FlowStage, string> = {
 
 /** Commit → Push → PR progress dots. */
 function stepIndex(stage: FlowStage): number {
-  if (["branch", "commit", "commit-fix"].includes(stage)) return 0;
+  if (["confirm", "branch", "commit", "commit-fix"].includes(stage)) return 0;
   if (["push", "push-fix"].includes(stage)) return 1;
   if (stage === "done") return 3;
   return 2;
@@ -98,7 +106,18 @@ function Header({ vm }: { vm: GitFlowViewModel }) {
   const step = stepIndex(flow.stage);
   return (
     <div className="flex items-center gap-3 border-b border-white/5 px-4 py-3">
-      <span className="text-sm font-medium">{STAGE_TITLES[flow.stage]}</span>
+      <span className="shrink-0 text-sm font-medium">
+        {STAGE_TITLES[flow.stage]}
+      </span>
+      {flow.info?.branch && (
+        <span
+          title="Current branch"
+          className="flex min-w-0 items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+        >
+          <GitBranch className="h-3 w-3 shrink-0 text-primary/70" />
+          <span className="truncate">{flow.info.branch}</span>
+        </span>
+      )}
       <span className="ml-auto flex items-center gap-1.5">
         {["Commit", "Push", "PR"].map((label, i) => (
           <span key={label} className="flex items-center gap-1">
@@ -143,6 +162,8 @@ function StageBody({
 }) {
   const { flow } = vm;
   switch (flow.stage) {
+    case "confirm":
+      return <ConfirmStage vm={vm} />;
     case "branch":
       return <BranchStage vm={vm} />;
     case "commit":
@@ -176,6 +197,64 @@ function StageBody({
     default:
       return null;
   }
+}
+
+const OPERATION_LABELS: Record<GitFlowRequest["operation"], string> = {
+  commit: "commit your changes",
+  push: "push this branch",
+  pr: "open a pull request",
+};
+
+/**
+ * Gate stage: the git-flow hook refused the agent's own commit/push/PR.
+ * Nothing has run yet — the user reviews the attempt, edits the message,
+ * and either takes over the flow or dismisses it.
+ */
+function ConfirmStage({ vm }: { vm: GitFlowViewModel }) {
+  const { flow } = vm;
+  const request = flow.request;
+  return (
+    <div className="space-y-3">
+      <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+        <ShieldAlert className="mt-px h-3.5 w-3.5 shrink-0 text-primary/70" />
+        <span>
+          The agent tried to{" "}
+          {request ? OPERATION_LABELS[request.operation] : "run git"} on its
+          own. Atelier blocked it — the git flow only runs when you say so.
+        </span>
+      </p>
+      {request && (
+        <pre className="overflow-x-auto rounded-lg bg-black/40 p-2.5 font-mono text-[11px] text-muted-foreground">
+          $ {request.command}
+        </pre>
+      )}
+      <div className="space-y-1.5">
+        <label className="text-[11px] text-muted-foreground">
+          Commit message
+        </label>
+        <Textarea
+          value={flow.commitMessage}
+          onChange={(e) => vm.setCommitMessage(e.target.value)}
+          placeholder="feat: describe the change"
+          rows={2}
+          className="min-h-0 resize-none text-xs"
+        />
+      </div>
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          disabled={!flow.commitMessage.trim()}
+          onClick={() => void vm.confirmRequest()}
+        >
+          <GitCommitHorizontal className="mr-1.5 h-3.5 w-3.5" />
+          Continue git flow
+        </Button>
+        <Button size="sm" variant="secondary" onClick={vm.close}>
+          Not now
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function BranchStage({ vm }: { vm: GitFlowViewModel }) {
@@ -219,19 +298,20 @@ function PushStage({ vm }: { vm: GitFlowViewModel }) {
       {flow.running ? (
         <RunningLine text="Pushing…" running />
       ) : (
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <Button size="sm" onClick={() => void vm.runPush()}>
             Push
           </Button>
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs">
-            <input
-              type="checkbox"
-              checked={flow.noVerify}
-              onChange={(e) => vm.setNoVerify(e.target.checked)}
-              className="accent-[var(--primary)]"
-            />
-            <span className="font-mono text-muted-foreground">--no-verify</span>
-          </label>
+          <Input
+            value={flow.flagsText}
+            onChange={(e) => vm.setFlagsText(e.target.value)}
+            placeholder="--no-verify --tags …"
+            title="Extra flags passed to git push"
+            className="h-8 flex-1 font-mono text-xs"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void vm.runPush();
+            }}
+          />
         </div>
       )}
       <OutputPane output={flow.output} />
@@ -285,19 +365,14 @@ function PrDescribeStage({ vm }: { vm: GitFlowViewModel }) {
         <span className="text-muted-foreground">
           <span className="font-mono">{flow.info?.branch}</span> →
         </span>
-        <select
+        <Select
           value={flow.prBase}
-          onChange={(e) => vm.setPrBase(e.target.value)}
-          className="rounded-lg bg-secondary px-2 py-1.5 font-mono text-xs"
-        >
-          {flow.remoteBranches
+          onChange={vm.setPrBase}
+          className="h-7 font-mono"
+          options={flow.remoteBranches
             .filter((b) => b !== flow.info?.branch)
-            .map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-        </select>
+            .map((b) => ({ value: b, label: b }))}
+        />
         <Button
           size="sm"
           className="ml-auto"
@@ -379,6 +454,55 @@ function DoneStage({ vm }: { vm: GitFlowViewModel }) {
   );
 }
 
+/**
+ * Live trace of the repair task: the model stays silent while it reads
+ * and edits, so without this the fix chat looks frozen. Shows the current
+ * pipeline stage, the last few tool calls, and the elapsed time.
+ */
+function FixProgress({ session }: { session: SessionVm }) {
+  const elapsed = useElapsed(session.taskStartedAt);
+  const recent = session.actions.slice(-4);
+  const running = recent.find((a) => a.status === "running");
+  const headline =
+    running?.label ??
+    (session.stage ? STAGE_LABELS[session.stage] : "starting…");
+
+  return (
+    <div className="rounded-lg bg-secondary/30 px-2.5 py-2">
+      <div className="flex items-center gap-1.5">
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
+          {headline}
+        </span>
+        {session.taskStartedAt !== null && (
+          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
+            {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
+          </span>
+        )}
+      </div>
+      {recent.length > 0 && (
+        <div className="mt-1 space-y-0.5">
+          {recent.map((action) => (
+            <p
+              key={action.id}
+              className="flex items-center gap-1.5 truncate font-mono text-[10px] text-muted-foreground"
+            >
+              {action.status === "running" ? (
+                <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-primary/70" />
+              ) : action.status === "done" ? (
+                <Check className="h-2.5 w-2.5 shrink-0 text-emerald-500" />
+              ) : (
+                <CircleAlert className="h-2.5 w-2.5 shrink-0 text-destructive" />
+              )}
+              <span className="truncate">{action.label}</span>
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RunningLine({ text, running }: { text: string; running: boolean }) {
   return (
     <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -388,16 +512,13 @@ function RunningLine({ text, running }: { text: string; running: boolean }) {
   );
 }
 
-/** Read-only terminal-style pane; follows the stream to the bottom. */
+/** Read-only terminal-style pane; follows the stream unless you scroll up. */
 function OutputPane({ output, compact }: { output: string; compact?: boolean }) {
-  const ref = useRef<HTMLPreElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [output]);
+  const { ref, onScroll } = useStickToBottom<HTMLPreElement>([output]);
   return (
     <pre
       ref={ref}
+      onScroll={onScroll}
       className={cn(
         "overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-black/40",
         "p-3 font-mono text-[11px] leading-relaxed text-muted-foreground",
@@ -422,14 +543,12 @@ function FixChat({
   session: SessionVm | null;
 }) {
   const [prompt, setPrompt] = useState("");
-  const endRef = useRef<HTMLDivElement>(null);
   const working = session?.status === "working";
   const hasRun = (session?.items.length ?? 0) > 0;
   const reRunLabel = RERUN_LABELS[vm.flow.stage] ?? "Re-run";
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [session?.items]);
+  const { ref: listRef, onScroll } = useStickToBottom<HTMLDivElement>([
+    session?.items,
+  ]);
 
   const doFix = () => {
     void vm.startFix(prompt);
@@ -439,7 +558,11 @@ function FixChat({
   return (
     <div className="flex min-h-0 flex-col gap-2">
       {session && session.items.length > 0 && (
-        <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg bg-secondary/30 p-2.5">
+        <div
+          ref={listRef}
+          onScroll={onScroll}
+          className="max-h-56 space-y-2 overflow-y-auto rounded-lg bg-secondary/30 p-2.5"
+        >
           {session.items.map((item) => (
             <div
               key={item.id}
@@ -465,9 +588,10 @@ function FixChat({
               {session.thinking.slice(-200)}
             </p>
           )}
-          <div ref={endRef} />
         </div>
       )}
+
+      {working && session && <FixProgress session={session} />}
 
       <Textarea
         value={prompt}

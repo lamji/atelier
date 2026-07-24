@@ -12,6 +12,24 @@ import { newId } from "@atelier/shared";
 declare const __ATELIER_BRIDGE_PORT__: string;
 declare const __ATELIER_BRIDGE_TOKEN__: string;
 
+/** Injected by a WebHost when it serves the packaged UI. */
+interface InjectedEndpoint {
+  port: number | string;
+  token: string;
+}
+declare global {
+  interface Window {
+    __ATELIER_BRIDGE__?: InjectedEndpoint;
+  }
+}
+
+/** Resolves where a client connects. Returns null when unknown yet. */
+export type EndpointResolver = () => { url: string; token: string } | null;
+
+export interface BridgeClientOptions {
+  resolveEndpoint: EndpointResolver;
+}
+
 export type EventHandler = (frame: EventFrame) => void;
 export type StatusHandler = (
   state:
@@ -53,15 +71,29 @@ export class BridgeClient {
   private statusHandlers = new Set<StatusHandler>();
   private reconnectAttempt = 0;
   private closedByUser = false;
+  /** Runtime endpoint override (set when switching projects). */
+  private override: { url: string; token: string } | null = null;
   hello: { workspaceRoot: string; authStatus: string } | null = null;
 
+  constructor(private opts: BridgeClientOptions) {}
+
+  /**
+   * Point the client at a specific agent (project switch). Takes effect on
+   * the next connect(); callers should disconnect() then connect().
+   */
+  setEndpoint(endpoint: { port: number | string; token: string }): void {
+    this.override = {
+      url: `ws://127.0.0.1:${endpoint.port}`,
+      token: endpoint.token,
+    };
+  }
+
+  clearEndpoint(): void {
+    this.override = null;
+  }
+
   private getEndpoint(): { url: string; token: string } | null {
-    const port =
-      __ATELIER_BRIDGE_PORT__ || localStorage.getItem("atelier.port") || "";
-    const token =
-      __ATELIER_BRIDGE_TOKEN__ || localStorage.getItem("atelier.token") || "";
-    if (!port || !token) return null;
-    return { url: `ws://127.0.0.1:${port}`, token };
+    return this.override ?? this.opts.resolveEndpoint();
   }
 
   connect(): void {
@@ -110,7 +142,21 @@ export class BridgeClient {
 
   disconnect(): void {
     this.closedByUser = true;
-    this.ws?.close();
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      // Detach handlers so the stale socket's onclose can't schedule a
+      // reconnect — important when switching projects (disconnect → connect
+      // back-to-back against a new endpoint).
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      ws.close();
+    }
+    this.failAllPending();
+    this.reconnectAttempt = 0;
+    this.emitStatus("disconnected");
   }
 
   onStatus(handler: StatusHandler): () => void {
@@ -233,4 +279,24 @@ function topicMatches(pattern: string, topic: string): boolean {
   return false;
 }
 
-export const bridge = new BridgeClient();
+/**
+ * Legacy single-agent discovery: the agent's own WebHost global, or the dev
+ * define / manual paste. Under the supervisor the bridge endpoint is set at
+ * runtime via setEndpoint(), so this returns null and is simply unused.
+ */
+function defaultBridgeEndpoint(): { url: string; token: string } | null {
+  const injected = window.__ATELIER_BRIDGE__;
+  if (injected?.port && injected.token) {
+    return { url: `ws://127.0.0.1:${injected.port}`, token: injected.token };
+  }
+  const port =
+    __ATELIER_BRIDGE_PORT__ || localStorage.getItem("atelier.port") || "";
+  const token =
+    __ATELIER_BRIDGE_TOKEN__ || localStorage.getItem("atelier.token") || "";
+  if (!port || !token) return null;
+  return { url: `ws://127.0.0.1:${port}`, token };
+}
+
+export const bridge = new BridgeClient({
+  resolveEndpoint: defaultBridgeEndpoint,
+});

@@ -14,13 +14,17 @@
     "dev:web": "pnpm --filter @atelier/web dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "atelier": "pnpm --filter @atelier/cli exec tsx src/index.ts"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "esbuild",
-      "@tailwindcss/oxide"
+      "@tailwindcss/oxide",
+      "onnxruntime-node",
+      "protobufjs",
+      "sharp"
     ]
   }
 }

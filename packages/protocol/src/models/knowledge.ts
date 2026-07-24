@@ -37,13 +37,15 @@ export const GraphNode = z.object({
   label: z.string(),
   kind: z.string(),
   path: z.string().optional(),
+  /** Container node id (symbols nest inside their file's group node). */
+  parentId: z.string().optional(),
 });
 export type GraphNode = z.infer<typeof GraphNode>;
 
 export const GraphEdge = z.object({
   source: z.string(),
   target: z.string(),
-  kind: z.enum(["import", "call", "ref", "feature"]),
+  kind: z.enum(["import", "call", "ref", "feature", "lesson"]),
 });
 export type GraphEdge = z.infer<typeof GraphEdge>;
 
@@ -65,10 +67,31 @@ export const Feature = z.object({
 });
 export type Feature = z.infer<typeof Feature>;
 
+export const LessonKind = z.enum(["bug-fix", "gotcha", "pattern", "preference"]);
+export type LessonKind = z.infer<typeof LessonKind>;
+
+/**
+ * Episodic knowledge: a distilled, reusable insight from past work (a
+ * confirmed bug fix, a gotcha, a proven pattern). Stored tiny (~100
+ * tokens), linked to symbols/files, retrieved only when relevant.
+ */
+export const Lesson = z.object({
+  id: z.number(),
+  title: z.string(),
+  body: z.string(),
+  kind: LessonKind,
+  confidence: z.number(),
+  useCount: z.number(),
+  createdAt: z.number(),
+  /** Symbol names / file paths this lesson is anchored to. */
+  links: z.array(z.string()).default([]),
+});
+export type Lesson = z.infer<typeof Lesson>;
+
 export const RetrievedChunk = z.object({
   id: z.number(),
   path: z.string(),
-  kind: z.enum(["code", "doc", "feature-summary"]),
+  kind: z.enum(["code", "doc", "feature-summary", "lesson"]),
   score: z.number(),
   preview: z.string(),
   startRow: z.number().optional(),
@@ -91,6 +114,9 @@ export const IndexStats = z.object({
   chunks: z.number(),
   embedded: z.number(),
   features: z.number(),
+  lessons: z.number().default(0),
+  /** Files still queued for (re)indexing; > 0 means indexing is active. */
+  queued: z.number().default(0),
   lastIndexedAt: z.number().nullable(),
 });
 export type IndexStats = z.infer<typeof IndexStats>;

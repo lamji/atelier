@@ -13,6 +13,9 @@ export const useTimelineStore = create<TimelineStore>((set) => ({
   entries: [],
   add: (entry) =>
     set((s) => {
+      // Reconnect replays events from the last seen seq; keys are
+      // topic:seq so duplicates drop instead of doubling the timeline.
+      if (s.entries.some((e) => e.key === entry.key)) return s;
       const entries = [...s.entries, entry];
       return {
         entries:

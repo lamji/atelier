@@ -39,17 +39,19 @@ export function useGitFlowViewModel() {
     if (useGitFlowStore.getState().open) useGitFlowStore.getState().set(p);
   };
 
-  /** Streams one git/gh run into the output pane; returns the result. */
+  /**
+   * Streams one git/gh run into the output pane; returns the result. The
+   * agent echoes the resolved command itself, so what the pane shows is
+   * exactly what ran (including branch/upstream arguments).
+   */
   const streamRun = useCallback(
     async <
       M extends "git.commitRun" | "git.pushRun" | "git.mergeRun" | "git.createPr",
     >(
       method: M,
-      params: MethodParams<M>,
-      header: string
+      params: MethodParams<M>
     ) => {
       useGitFlowStore.getState().clearOutput();
-      useGitFlowStore.getState().appendOutput(`$ ${header}\n`);
       patch({ running: true, error: null });
       const { result } = await bridge.rpc(method, params, (p) => {
         if (p.chunk) useGitFlowStore.getState().appendOutput(p.chunk);
@@ -66,11 +68,10 @@ export function useGitFlowViewModel() {
     async (stageAll: boolean) => {
       patch({ stage: "commit" });
       try {
-        const result = await streamRun(
-          "git.commitRun",
-          { message: state().commitMessage, stageAll },
-          stageAll ? "git add -A && git commit" : "git commit"
-        );
+        const result = await streamRun("git.commitRun", {
+          message: state().commitMessage,
+          stageAll,
+        });
         useGitStore.getState().bumpStateVersion();
         if (result.ok) {
           patch({ running: false, stage: "push" });
@@ -106,14 +107,10 @@ export function useGitFlowViewModel() {
   }, []);
 
   const runPush = useCallback(async () => {
-    const flags = state().noVerify ? ["--no-verify"] : [];
+    const flags = state().flagsText.split(/\s+/).filter(Boolean);
     patch({ stage: "push" });
     try {
-      const result = await streamRun(
-        "git.pushRun",
-        { flags },
-        `git push ${flags.join(" ")}`.trim()
-      );
+      const result = await streamRun("git.pushRun", { flags });
       useGitStore.getState().bumpStateVersion();
       if (!result.ok) {
         patch({
@@ -132,7 +129,10 @@ export function useGitFlowViewModel() {
         patch({ running: false, stage: "pr-ask" });
       }
     } catch (e) {
-      patch({ running: false, stage: "push-fix", error: errText(e) });
+      const text = errText(e);
+      // A rejected flag is an input mistake — stay on the push screen.
+      const stage = text.includes("flag not allowed") ? "push" : "push-fix";
+      patch({ running: false, stage, error: text });
     }
   }, [streamRun, validatePr]);
 
@@ -168,6 +168,16 @@ export function useGitFlowViewModel() {
     [runCommit]
   );
 
+  /**
+   * Confirm stage: the user accepted the flow the agent was blocked from
+   * running. From here it is an ordinary user-driven flow.
+   */
+  const confirmRequest = useCallback(async () => {
+    const message = state().commitMessage.trim();
+    if (!message) return;
+    await startFlow(message, true);
+  }, [startFlow]);
+
   /** Branch stage: create the feature branch, then commit on it. */
   const confirmBranch = useCallback(async () => {
     const name = state().branchName.trim();
@@ -176,6 +186,9 @@ export function useGitFlowViewModel() {
     try {
       await bridge.rpc("git.checkout", { ref: name, create: true });
       useGitStore.getState().bumpStateVersion();
+      // The header shows the branch — keep it truthful after the switch.
+      const info = state().info;
+      if (info) patch({ info: { ...info, branch: name } });
       await runCommit(state().stageAllFirst);
     } catch (e) {
       patch({ running: false, error: errText(e) });
@@ -240,11 +253,11 @@ export function useGitFlowViewModel() {
     const s = state();
     patch({ stage: "pr-create" });
     try {
-      const result = await streamRun(
-        "git.createPr",
-        { base: s.prBase, title: s.prTitle, body: s.prBody },
-        `gh pr create --base ${s.prBase}`
-      );
+      const result = await streamRun("git.createPr", {
+        base: s.prBase,
+        title: s.prTitle,
+        body: s.prBody,
+      });
       if (result.ok) {
         patch({ running: false, stage: "done", prUrl: result.url ?? null });
       } else {
@@ -263,7 +276,7 @@ export function useGitFlowViewModel() {
   const resolveConflicts = useCallback(async () => {
     const base = state().prBase;
     try {
-      const result = await streamRun("git.mergeRun", { base }, `git merge origin/${base}`);
+      const result = await streamRun("git.mergeRun", { base });
       useGitStore.getState().bumpStateVersion();
       if (result.ok) {
         // Base merged cleanly after all — push the merge and re-validate.
@@ -314,6 +327,7 @@ export function useGitFlowViewModel() {
     flow,
     fixSession,
     startFlow,
+    confirmRequest,
     confirmBranch,
     runPush,
     startFix,
@@ -322,8 +336,9 @@ export function useGitFlowViewModel() {
     skipPr,
     validatePr,
     resolveConflicts,
+    setCommitMessage: (v: string) => patch({ commitMessage: v }),
     setBranchName: (name: string) => patch({ branchName: name }),
-    setNoVerify: (v: boolean) => patch({ noVerify: v }),
+    setFlagsText: (v: string) => patch({ flagsText: v }),
     setPrTitle: (v: string) => patch({ prTitle: v }),
     setPrBody: (v: string) => patch({ prBody: v }),
     setPrBase: (v: string) => patch({ prBase: v }),

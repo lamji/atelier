@@ -4,6 +4,7 @@ import type { AgentConfig } from "../config/agent-config.js";
 import type { TimelineStore } from "../events/timeline-store.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import { probeAuth } from "../orchestrator/auth-status.js";
+import { listSlashCommands } from "../orchestrator/command-catalog.js";
 import type { Router } from "../bridge/router.js";
 import { RpcError } from "../bridge/router.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
@@ -53,11 +54,16 @@ export function registerSessionHandlers(
     messages: conversations.getMessages(params.conversationId),
   }));
 
+  router.register("session.listCommands", () => ({
+    commands: listSlashCommands(config.workspaceRoot),
+  }));
+
   router.register("task.start", (params) => {
     const taskId = orchestrator.startTask(params.conversationId, params.prompt, {
       model: params.model,
       effort: params.effort,
       planMode: params.planMode,
+      images: params.images,
     });
     return { taskId };
   });

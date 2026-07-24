@@ -15,6 +15,11 @@ interface GitStore {
   branches: GitBranch[];
   /** Bumped by git.state.changed events to trigger a refetch. */
   stateVersion: number;
+  /**
+   * Branch + dirtiness straight from git.state.changed — always current,
+   * even when the Git panel is closed, so the status bar can show it.
+   */
+  live: { branch: string; isClean: boolean; changedFiles: number } | null;
   gitDiff: GitDiffView | null;
   error: string | null;
   setData: (
@@ -23,6 +28,7 @@ interface GitStore {
     branches: GitBranch[]
   ) => void;
   bumpStateVersion: () => void;
+  setLive: (live: GitStore["live"]) => void;
   setGitDiff: (diff: GitDiffView | null) => void;
   setError: (error: string | null) => void;
 }
@@ -32,12 +38,14 @@ export const useGitStore = create<GitStore>((set) => ({
   commits: [],
   branches: [],
   stateVersion: 0,
+  live: null,
   gitDiff: null,
   error: null,
 
   setData: (status, commits, branches) =>
     set({ status, commits, branches, error: null }),
   bumpStateVersion: () => set((s) => ({ stateVersion: s.stateVersion + 1 })),
+  setLive: (live) => set({ live }),
   setGitDiff: (gitDiff) => set({ gitDiff }),
   setError: (error) => set({ error }),
 }));

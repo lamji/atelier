@@ -18,7 +18,6 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useGitFlowViewModel } from "@/hooks/useGitFlowViewModel";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
-import { GitFlowModal } from "./GitFlowModal";
 import type { GitFileStatus } from "@atelier/protocol";
 
 export interface GitPanelProps {
@@ -35,6 +34,8 @@ export function GitPanel({ vm }: GitPanelProps) {
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Same store as the shell-mounted modal (GitFlowHost) — this instance
+  // only starts the flow; the host renders it.
   const flowVm = useGitFlowViewModel();
 
   if (vm.error) {
@@ -72,11 +73,13 @@ export function GitPanel({ vm }: GitPanelProps) {
   /**
    * Commit runs through the wizard (streamed hooks, push, PR). With
    * nothing staged, the wizard stages everything on its first commit.
+   * The message box clears — the wizard holds the message from here.
    */
   const doCommit = () => {
     const msg = message.trim();
     if (!msg) return;
     void flowVm.startFlow(msg, staged.length === 0);
+    setMessage("");
   };
 
   /**
@@ -126,7 +129,7 @@ export function GitPanel({ vm }: GitPanelProps) {
             onChange={(e) => setMessage(e.target.value)}
             placeholder="Commit message"
             rows={2}
-            className="min-h-0 resize-none pr-8 text-xs"
+            className="max-h-60 min-h-14 resize-y pr-8 text-xs"
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) doCommit();
             }}
@@ -233,8 +236,6 @@ export function GitPanel({ vm }: GitPanelProps) {
       />
 
       <HistorySection commits={vm.commits} />
-
-      <GitFlowModal vm={flowVm} />
     </div>
   );
 }
@@ -376,7 +377,7 @@ function FileSection(props: {
 }) {
   const [open, setOpen] = useState(true);
   return (
-    <div>
+    <div className="border-t border-white/5 pt-1">
       <div className="flex items-center gap-1 px-1 py-1">
         <button
           onClick={() => setOpen((v) => !v)}
@@ -459,7 +460,7 @@ function HistorySection(props: { commits: GitViewModel["commits"] }) {
   const [open, setOpen] = useState(true);
   if (props.commits.length === 0) return null;
   return (
-    <div className="min-h-0">
+    <div className="min-h-0 border-t border-white/5 pt-1">
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1 px-1 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"

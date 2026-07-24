@@ -1,0 +1,843 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: A
+      - generic [ref=e8]:
+        - paragraph [ref=e9]: Atelier
+        - paragraph [ref=e10]: agentic engineering
+    - navigation [ref=e11]:
+      - button "Chat" [ref=e12]
+      - button "Editor" [ref=e17]
+      - button "Diffs" [ref=e24]
+      - button "Terminal" [ref=e28]
+      - button "Graph" [ref=e33]
+      - button "RAG" [ref=e40]
+      - button "Activity" [ref=e49]
+  - generic [ref=e53]:
+    - generic [ref=e55]:
+      - button "Agents" [ref=e56]
+      - button "Explorer" [ref=e61]
+      - button "Git" [ref=e66]
+      - button "Knowledge" [ref=e71]
+      - button "Hooks" [ref=e77]
+      - button "Monitor" [ref=e82]
+      - button "Settings" [ref=e85]
+      - button "Switch to dark mode" [ref=e89]
+    - generic [ref=e92]:
+      - generic [ref=e414]:
+        - generic [ref=e415]:
+          - heading "Knowledge" [level=2] [ref=e420]
+          - button "Sync" [ref=e421]
+        - generic [ref=e427]:
+          - generic [ref=e428]:
+            - generic [ref=e429]: Files
+            - paragraph [ref=e436]: "141"
+          - generic [ref=e437]:
+            - generic [ref=e438]: Symbols
+            - paragraph [ref=e443]: "687"
+          - generic [ref=e444]:
+            - generic [ref=e445]: Call edges
+            - paragraph [ref=e451]: "4773"
+          - generic [ref=e452]:
+            - generic [ref=e453]: Chunks
+            - paragraph [ref=e462]: "632"
+          - generic [ref=e463]:
+            - generic [ref=e464]: Embedded
+            - paragraph [ref=e468]: "632"
+          - generic [ref=e469]:
+            - generic [ref=e470]: Features
+            - paragraph [ref=e477]: "0"
+        - paragraph [ref=e478]: Last indexed 11:38:12 PM
+        - generic [ref=e479]:
+          - button "Graph" [active] [ref=e480]
+          - button "RAG" [ref=e486]
+        - generic [ref=e494]:
+          - heading "Recent updates" [level=3] [ref=e495]
+          - paragraph [ref=e496]: Knowledge deltas appear here as code changes.
+        - button "Force full re-index" [ref=e497]
+      - separator [ref=e105]
+      - generic [ref=e500]:
+        - generic [ref=e501]:
+          - button "Workspace" [ref=e507]
+          - button "File" [ref=e508]
+          - button "Symbol" [ref=e509]
+          - textbox "path or symbol…" [ref=e510]
+          - button "Load" [ref=e511]
+        - application [ref=e513]:
+          - generic [ref=e515]:
+            - generic:
+              - generic:
+                - img:
+                  - group "Edge from file:2 to file:14" [ref=e516] [cursor=pointer]
+                - img:
+                  - group "Edge from file:2 to file:17" [ref=e519] [cursor=pointer]
+                - img:
+                  - group "Edge from file:2 to file:19" [ref=e522] [cursor=pointer]
+                - img:
+                  - group "Edge from file:3 to file:14" [ref=e525] [cursor=pointer]
+                - img:
+                  - group "Edge from file:3 to file:18" [ref=e528] [cursor=pointer]
+                - img:
+                  - group "Edge from file:3 to file:19" [ref=e531] [cursor=pointer]
+                - img:
+                  - group "Edge from file:4 to file:14" [ref=e534] [cursor=pointer]
+                - img:
+                  - group "Edge from file:4 to file:19" [ref=e537] [cursor=pointer]
+                - img:
+                  - group "Edge from file:9 to file:14" [ref=e540] [cursor=pointer]
+                - img:
+                  - group "Edge from file:9 to file:15" [ref=e543] [cursor=pointer]
+                - img:
+                  - group "Edge from file:9 to file:8" [ref=e546] [cursor=pointer]
+                - img:
+                  - group "Edge from file:11 to file:12" [ref=e549] [cursor=pointer]
+                - img:
+                  - group "Edge from file:11 to file:13" [ref=e552] [cursor=pointer]
+                - img:
+                  - group "Edge from file:11 to file:8" [ref=e555] [cursor=pointer]
+                - img:
+                  - group "Edge from file:11 to file:9" [ref=e558] [cursor=pointer]
+                - img:
+                  - group "Edge from file:11 to file:10" [ref=e561] [cursor=pointer]
+                - img:
+                  - group "Edge from file:13 to file:12" [ref=e564] [cursor=pointer]
+                - img:
+                  - group "Edge from file:15 to file:46" [ref=e567] [cursor=pointer]
+                - img:
+                  - group "Edge from file:15 to file:14" [ref=e570] [cursor=pointer]
+                - img:
+                  - group "Edge from file:16 to file:18" [ref=e573] [cursor=pointer]
+                - img:
+                  - group "Edge from file:16 to file:19" [ref=e576] [cursor=pointer]
+                - img:
+                  - group "Edge from file:17 to file:16" [ref=e579] [cursor=pointer]
+                - img:
+                  - group "Edge from file:17 to file:19" [ref=e582] [cursor=pointer]
+                - img:
+                  - group "Edge from file:18 to file:19" [ref=e585] [cursor=pointer]
+                - img:
+                  - group "Edge from file:20 to file:10" [ref=e588] [cursor=pointer]
+                - img:
+                  - group "Edge from file:20 to file:16" [ref=e591] [cursor=pointer]
+                - img:
+                  - group "Edge from file:20 to file:17" [ref=e594] [cursor=pointer]
+                - img:
+                  - group "Edge from file:20 to file:19" [ref=e597] [cursor=pointer]
+                - img:
+                  - group "Edge from file:20 to file:18" [ref=e600] [cursor=pointer]
+                - img:
+                  - group "Edge from file:21 to file:46" [ref=e603] [cursor=pointer]
+                - img:
+                  - group "Edge from file:21 to file:14" [ref=e606] [cursor=pointer]
+                - img:
+                  - group "Edge from file:22 to file:32" [ref=e609] [cursor=pointer]
+                - img:
+                  - group "Edge from file:24 to file:46" [ref=e612] [cursor=pointer]
+                - img:
+                  - group "Edge from file:25 to file:46" [ref=e615] [cursor=pointer]
+                - img:
+                  - group "Edge from file:25 to file:14" [ref=e618] [cursor=pointer]
+                - img:
+                  - group "Edge from file:26 to file:46" [ref=e621] [cursor=pointer]
+                - img:
+                  - group "Edge from file:27 to file:46" [ref=e624] [cursor=pointer]
+                - img:
+                  - group "Edge from file:30 to file:29" [ref=e627] [cursor=pointer]
+                - img:
+                  - group "Edge from file:32 to file:31" [ref=e630] [cursor=pointer]
+                - img:
+                  - group "Edge from file:32 to file:33" [ref=e633] [cursor=pointer]
+                - img:
+                  - group "Edge from file:32 to file:30" [ref=e636] [cursor=pointer]
+                - img:
+                  - group "Edge from file:32 to file:29" [ref=e639] [cursor=pointer]
+                - img:
+                  - group "Edge from file:34 to file:46" [ref=e642] [cursor=pointer]
+                - img:
+                  - group "Edge from file:40 to file:14" [ref=e645] [cursor=pointer]
+                - img:
+                  - group "Edge from file:41 to file:54" [ref=e648] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:12" [ref=e651] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:13" [ref=e654] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:14" [ref=e657] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:15" [ref=e660] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:46" [ref=e663] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:47" [ref=e666] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:48" [ref=e669] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:10" [ref=e672] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:9" [ref=e675] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:11" [ref=e678] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:39" [ref=e681] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:37" [ref=e684] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:45" [ref=e687] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:44" [ref=e690] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:54" [ref=e693] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:51" [ref=e696] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:52" [ref=e699] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:55" [ref=e702] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:19" [ref=e705] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:20" [ref=e708] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:50" [ref=e711] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:49" [ref=e714] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:59" [ref=e717] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:58" [ref=e720] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:57" [ref=e723] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:60" [ref=e726] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:61" [ref=e729] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:21" [ref=e732] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:34" [ref=e735] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:28" [ref=e738] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:27" [ref=e741] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:25" [ref=e744] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:23" [ref=e747] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:24" [ref=e750] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:53" [ref=e753] [cursor=pointer]
+                - img:
+                  - group "Edge from file:35 to file:42" [ref=e756] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:10" [ref=e759] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:21" [ref=e762] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:34" [ref=e765] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:28" [ref=e768] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:27" [ref=e771] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:25" [ref=e774] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:42" [ref=e777] [cursor=pointer]
+                - img:
+                  - group "Edge from file:44 to file:48" [ref=e780] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:12" [ref=e783] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:15" [ref=e786] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:39" [ref=e789] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:37" [ref=e792] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:38" [ref=e795] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:10" [ref=e798] [cursor=pointer]
+                - img:
+                  - group "Edge from file:45 to file:47" [ref=e801] [cursor=pointer]
+                - img:
+                  - group "Edge from file:47 to file:46" [ref=e804] [cursor=pointer]
+                - img:
+                  - group "Edge from file:48 to file:46" [ref=e807] [cursor=pointer]
+                - img:
+                  - group "Edge from file:49 to file:10" [ref=e810] [cursor=pointer]
+                - img:
+                  - group "Edge from file:49 to file:50" [ref=e813] [cursor=pointer]
+                - img:
+                  - group "Edge from file:50 to file:46" [ref=e816] [cursor=pointer]
+                - img:
+                  - group "Edge from file:50 to file:14" [ref=e819] [cursor=pointer]
+                - img:
+                  - group "Edge from file:51 to file:57" [ref=e822] [cursor=pointer]
+                - img:
+                  - group "Edge from file:51 to file:54" [ref=e825] [cursor=pointer]
+                - img:
+                  - group "Edge from file:52 to file:19" [ref=e828] [cursor=pointer]
+                - img:
+                  - group "Edge from file:52 to file:54" [ref=e831] [cursor=pointer]
+                - img:
+                  - group "Edge from file:53 to file:54" [ref=e834] [cursor=pointer]
+                - img:
+                  - group "Edge from file:53 to file:42" [ref=e837] [cursor=pointer]
+                - img:
+                  - group "Edge from file:53 to file:27" [ref=e840] [cursor=pointer]
+                - img:
+                  - group "Edge from file:53 to file:34" [ref=e843] [cursor=pointer]
+                - img:
+                  - group "Edge from file:54 to file:14" [ref=e846] [cursor=pointer]
+                - img:
+                  - group "Edge from file:55 to file:59" [ref=e849] [cursor=pointer]
+                - img:
+                  - group "Edge from file:55 to file:54" [ref=e852] [cursor=pointer]
+                - img:
+                  - group "Edge from file:56 to file:36" [ref=e855] [cursor=pointer]
+                - img:
+                  - group "Edge from file:57 to file:14" [ref=e858] [cursor=pointer]
+                - img:
+                  - group "Edge from file:57 to file:59" [ref=e861] [cursor=pointer]
+                - img:
+                  - group "Edge from file:57 to file:58" [ref=e864] [cursor=pointer]
+                - img:
+                  - group "Edge from file:60 to file:10" [ref=e867] [cursor=pointer]
+                - img:
+                  - group "Edge from file:60 to file:57" [ref=e870] [cursor=pointer]
+                - img:
+                  - group "Edge from file:61 to file:14" [ref=e873] [cursor=pointer]
+                - img:
+                  - group "Edge from file:61 to file:59" [ref=e876] [cursor=pointer]
+                - img:
+                  - group "Edge from file:61 to file:58" [ref=e879] [cursor=pointer]
+                - img:
+                  - group "Edge from file:62 to file:98" [ref=e882] [cursor=pointer]
+                - img:
+                  - group "Edge from file:62 to file:79" [ref=e885] [cursor=pointer]
+                - img:
+                  - group "Edge from file:63 to file:76" [ref=e888] [cursor=pointer]
+                - img:
+                  - group "Edge from file:64 to file:76" [ref=e891] [cursor=pointer]
+                - img:
+                  - group "Edge from file:65 to file:76" [ref=e894] [cursor=pointer]
+                - img:
+                  - group "Edge from file:66 to file:76" [ref=e897] [cursor=pointer]
+                - img:
+                  - group "Edge from file:67 to file:76" [ref=e900] [cursor=pointer]
+                - img:
+                  - group "Edge from file:68 to file:78" [ref=e903] [cursor=pointer]
+                - img:
+                  - group "Edge from file:68 to file:81" [ref=e906] [cursor=pointer]
+                - img:
+                  - group "Edge from file:69 to file:88" [ref=e909] [cursor=pointer]
+                - img:
+                  - group "Edge from file:69 to file:86" [ref=e912] [cursor=pointer]
+                - img:
+                  - group "Edge from file:70 to file:78" [ref=e915] [cursor=pointer]
+                - img:
+                  - group "Edge from file:70 to file:81" [ref=e918] [cursor=pointer]
+                - img:
+                  - group "Edge from file:70 to file:83" [ref=e921] [cursor=pointer]
+                - img:
+                  - group "Edge from file:70 to file:88" [ref=e924] [cursor=pointer]
+                - img:
+                  - group "Edge from file:71 to file:78" [ref=e927] [cursor=pointer]
+                - img:
+                  - group "Edge from file:71 to file:82" [ref=e930] [cursor=pointer]
+                - img:
+                  - group "Edge from file:71 to file:83" [ref=e933] [cursor=pointer]
+                - img:
+                  - group "Edge from file:71 to file:84" [ref=e936] [cursor=pointer]
+                - img:
+                  - group "Edge from file:72 to file:78" [ref=e939] [cursor=pointer]
+                - img:
+                  - group "Edge from file:72 to file:81" [ref=e942] [cursor=pointer]
+                - img:
+                  - group "Edge from file:72 to file:83" [ref=e945] [cursor=pointer]
+                - img:
+                  - group "Edge from file:72 to file:88" [ref=e948] [cursor=pointer]
+                - img:
+                  - group "Edge from file:73 to file:78" [ref=e951] [cursor=pointer]
+                - img:
+                  - group "Edge from file:73 to file:81" [ref=e954] [cursor=pointer]
+                - img:
+                  - group "Edge from file:73 to file:84" [ref=e957] [cursor=pointer]
+                - img:
+                  - group "Edge from file:73 to file:88" [ref=e960] [cursor=pointer]
+                - img:
+                  - group "Edge from file:74 to file:78" [ref=e963] [cursor=pointer]
+                - img:
+                  - group "Edge from file:74 to file:80" [ref=e966] [cursor=pointer]
+                - img:
+                  - group "Edge from file:74 to file:81" [ref=e969] [cursor=pointer]
+                - img:
+                  - group "Edge from file:74 to file:85" [ref=e972] [cursor=pointer]
+                - img:
+                  - group "Edge from file:74 to file:86" [ref=e975] [cursor=pointer]
+                - img:
+                  - group "Edge from file:75 to file:84" [ref=e978] [cursor=pointer]
+                - img:
+                  - group "Edge from file:75 to file:87" [ref=e981] [cursor=pointer]
+                - img:
+                  - group "Edge from file:75 to file:89" [ref=e984] [cursor=pointer]
+                - img:
+                  - group "Edge from file:77 to file:62" [ref=e987] [cursor=pointer]
+                - img:
+                  - group "Edge from file:80 to file:78" [ref=e990] [cursor=pointer]
+                - img:
+                  - group "Edge from file:81 to file:89" [ref=e993] [cursor=pointer]
+                - img:
+                  - group "Edge from file:84 to file:89" [ref=e996] [cursor=pointer]
+                - img:
+                  - group "Edge from file:87 to file:89" [ref=e999] [cursor=pointer]
+                - img:
+                  - group "Edge from file:90 to file:76" [ref=e1002] [cursor=pointer]
+                - img:
+                  - group "Edge from file:90 to file:66" [ref=e1005] [cursor=pointer]
+                - img:
+                  - group "Edge from file:90 to file:89" [ref=e1008] [cursor=pointer]
+                - img:
+                  - group "Edge from file:90 to file:84" [ref=e1011] [cursor=pointer]
+                - img:
+                  - group "Edge from file:90 to file:73" [ref=e1014] [cursor=pointer]
+                - img:
+                  - group "Edge from file:91 to file:76" [ref=e1017] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:76" [ref=e1020] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:64" [ref=e1023] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:65" [ref=e1026] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:66" [ref=e1029] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:67" [ref=e1032] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:71" [ref=e1035] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:82" [ref=e1038] [cursor=pointer]
+                - img:
+                  - group "Edge from file:92 to file:84" [ref=e1041] [cursor=pointer]
+                - img:
+                  - group "Edge from file:93 to file:76" [ref=e1044] [cursor=pointer]
+                - img:
+                  - group "Edge from file:93 to file:64" [ref=e1047] [cursor=pointer]
+                - img:
+                  - group "Edge from file:93 to file:67" [ref=e1050] [cursor=pointer]
+                - img:
+                  - group "Edge from file:93 to file:71" [ref=e1053] [cursor=pointer]
+                - img:
+                  - group "Edge from file:93 to file:72" [ref=e1056] [cursor=pointer]
+                - img:
+                  - group "Edge from file:93 to file:92" [ref=e1059] [cursor=pointer]
+                - img:
+                  - group "Edge from file:94 to file:96" [ref=e1062] [cursor=pointer]
+                - img:
+                  - group "Edge from file:94 to file:84" [ref=e1065] [cursor=pointer]
+                - img:
+                  - group "Edge from file:96 to file:76" [ref=e1068] [cursor=pointer]
+                - img:
+                  - group "Edge from file:96 to file:84" [ref=e1071] [cursor=pointer]
+                - img:
+                  - group "Edge from file:97 to file:76" [ref=e1074] [cursor=pointer]
+                - img:
+                  - group "Edge from file:97 to file:86" [ref=e1077] [cursor=pointer]
+                - img:
+                  - group "Edge from file:99 to file:64" [ref=e1080] [cursor=pointer]
+                - img:
+                  - group "Edge from file:99 to file:65" [ref=e1083] [cursor=pointer]
+                - img:
+                  - group "Edge from file:99 to file:89" [ref=e1086] [cursor=pointer]
+                - img:
+                  - group "Edge from file:102 to file:76" [ref=e1089] [cursor=pointer]
+                - img:
+                  - group "Edge from file:102 to file:89" [ref=e1092] [cursor=pointer]
+                - img:
+                  - group "Edge from file:103 to file:76" [ref=e1095] [cursor=pointer]
+                - img:
+                  - group "Edge from file:104 to file:76" [ref=e1098] [cursor=pointer]
+                - img:
+                  - group "Edge from file:104 to file:89" [ref=e1101] [cursor=pointer]
+                - img:
+                  - group "Edge from file:107 to file:125" [ref=e1104] [cursor=pointer]
+                - img:
+                  - group "Edge from file:107 to file:120" [ref=e1107] [cursor=pointer]
+                - img:
+                  - group "Edge from file:107 to file:124" [ref=e1110] [cursor=pointer]
+                - img:
+                  - group "Edge from file:107 to file:127" [ref=e1113] [cursor=pointer]
+                - img:
+                  - group "Edge from file:109 to file:121" [ref=e1116] [cursor=pointer]
+                - img:
+                  - group "Edge from file:109 to file:120" [ref=e1119] [cursor=pointer]
+                - img:
+                  - group "Edge from file:110 to file:122" [ref=e1122] [cursor=pointer]
+                - img:
+                  - group "Edge from file:111 to file:123" [ref=e1125] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:114" [ref=e1128] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:116" [ref=e1131] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:109" [ref=e1134] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:117" [ref=e1137] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:110" [ref=e1140] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:118" [ref=e1143] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:113" [ref=e1146] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:111" [ref=e1149] [cursor=pointer]
+                - img:
+                  - group "Edge from file:112 to file:115" [ref=e1152] [cursor=pointer]
+                - img:
+                  - group "Edge from file:113 to file:124" [ref=e1155] [cursor=pointer]
+                - img:
+                  - group "Edge from file:114 to file:107" [ref=e1158] [cursor=pointer]
+                - img:
+                  - group "Edge from file:114 to file:119" [ref=e1161] [cursor=pointer]
+                - img:
+                  - group "Edge from file:116 to file:119" [ref=e1164] [cursor=pointer]
+                - img:
+                  - group "Edge from file:116 to file:106" [ref=e1167] [cursor=pointer]
+                - img:
+                  - group "Edge from file:117 to file:126" [ref=e1170] [cursor=pointer]
+                - img:
+                  - group "Edge from file:118 to file:127" [ref=e1173] [cursor=pointer]
+                - img:
+                  - group "Edge from file:39 to file:12" [ref=e1176] [cursor=pointer]
+                - img:
+                  - group "Edge from file:39 to file:14" [ref=e1179] [cursor=pointer]
+                - img:
+                  - group "Edge from file:39 to file:47" [ref=e1182] [cursor=pointer]
+                - img:
+                  - group "Edge from file:39 to file:54" [ref=e1185] [cursor=pointer]
+                - img:
+                  - group "Edge from file:39 to file:37" [ref=e1188] [cursor=pointer]
+                - img:
+                  - group "Edge from file:39 to file:41" [ref=e1191] [cursor=pointer]
+                - img:
+                  - group "Edge from file:138 to file:78" [ref=e1194] [cursor=pointer]
+                - img:
+                  - group "Edge from file:138 to file:136" [ref=e1197] [cursor=pointer]
+                - img:
+                  - group "Edge from file:138 to file:81" [ref=e1200] [cursor=pointer]
+                - img:
+                  - group "Edge from file:138 to file:88" [ref=e1203] [cursor=pointer]
+                - img:
+                  - group "Edge from file:139 to file:78" [ref=e1206] [cursor=pointer]
+                - img:
+                  - group "Edge from file:139 to file:136" [ref=e1209] [cursor=pointer]
+                - img:
+                  - group "Edge from file:139 to file:81" [ref=e1212] [cursor=pointer]
+                - img:
+                  - group "Edge from file:139 to file:88" [ref=e1215] [cursor=pointer]
+                - img:
+                  - group "Edge from file:140 to file:64" [ref=e1218] [cursor=pointer]
+                - img:
+                  - group "Edge from file:140 to file:76" [ref=e1221] [cursor=pointer]
+                - img:
+                  - group "Edge from file:140 to file:138" [ref=e1224] [cursor=pointer]
+                - img:
+                  - group "Edge from file:141 to file:64" [ref=e1227] [cursor=pointer]
+                - img:
+                  - group "Edge from file:141 to file:65" [ref=e1230] [cursor=pointer]
+                - img:
+                  - group "Edge from file:141 to file:76" [ref=e1233] [cursor=pointer]
+                - img:
+                  - group "Edge from file:141 to file:137" [ref=e1236] [cursor=pointer]
+                - img:
+                  - group "Edge from file:141 to file:138" [ref=e1239] [cursor=pointer]
+                - img:
+                  - group "Edge from file:141 to file:136" [ref=e1242] [cursor=pointer]
+                - img:
+                  - group "Edge from file:143 to file:63" [ref=e1245] [cursor=pointer]
+                - img:
+                  - group "Edge from file:143 to file:64" [ref=e1248] [cursor=pointer]
+                - img:
+                  - group "Edge from file:143 to file:65" [ref=e1251] [cursor=pointer]
+                - img:
+                  - group "Edge from file:143 to file:139" [ref=e1254] [cursor=pointer]
+                - img:
+                  - group "Edge from file:100 to file:76" [ref=e1257] [cursor=pointer]
+                - img:
+                  - group "Edge from file:100 to file:88" [ref=e1260] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:76" [ref=e1263] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:103" [ref=e1266] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:104" [ref=e1269] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:141" [ref=e1272] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:143" [ref=e1275] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:88" [ref=e1278] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:83" [ref=e1281] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:89" [ref=e1284] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:138" [ref=e1287] [cursor=pointer]
+                - img:
+                  - group "Edge from file:95 to file:139" [ref=e1290] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:100" [ref=e1293] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:97" [ref=e1296] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:102" [ref=e1299] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:101" [ref=e1302] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:99" [ref=e1305] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:90" [ref=e1308] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:91" [ref=e1311] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:93" [ref=e1314] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:96" [ref=e1317] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:94" [ref=e1320] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:140" [ref=e1323] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:95" [ref=e1326] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:74" [ref=e1329] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:73" [ref=e1332] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:68" [ref=e1335] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:75" [ref=e1338] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:70" [ref=e1341] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:69" [ref=e1344] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:72" [ref=e1347] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:138" [ref=e1350] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:139" [ref=e1353] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:86" [ref=e1356] [cursor=pointer]
+                - img:
+                  - group "Edge from file:98 to file:76" [ref=e1359] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:78" [ref=e1362] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:80" [ref=e1365] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:81" [ref=e1368] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:83" [ref=e1371] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:136" [ref=e1374] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:84" [ref=e1377] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:85" [ref=e1380] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:87" [ref=e1383] [cursor=pointer]
+                - img:
+                  - group "Edge from file:79 to file:88" [ref=e1386] [cursor=pointer]
+                - img:
+                  - group "Edge from file:19 to file:14" [ref=e1389] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:46" [ref=e1392] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:14" [ref=e1395] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:59" [ref=e1398] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:58" [ref=e1401] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:32" [ref=e1404] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:31" [ref=e1407] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:26" [ref=e1410] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:23" [ref=e1413] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:24" [ref=e1416] [cursor=pointer]
+                - img:
+                  - group "Edge from file:28 to file:22" [ref=e1419] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:46" [ref=e1422] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:14" [ref=e1425] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:59" [ref=e1428] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:58" [ref=e1431] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:23" [ref=e1434] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:24" [ref=e1437] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:28" [ref=e1440] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:34" [ref=e1443] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:27" [ref=e1446] [cursor=pointer]
+                - img:
+                  - group "Edge from file:159 to file:42" [ref=e1449] [cursor=pointer]
+              - generic:
+                - group [ref=e1452]: incremental-indexer.ts
+                - group [ref=e1453]: git-service.ts
+                - group [ref=e1454]: envelope.ts
+                - group [ref=e1455]: bridge-client.ts
+                - group [ref=e1456]: file-service.ts
+                - group [ref=e1457]: knowledge.ts
+                - group [ref=e1458]: conversations.ts
+                - group [ref=e1459]: extractor.ts
+                - group [ref=e1460]: git-ops.ts
+                - group [ref=e1461]: terminal-manager.ts
+                - group [ref=e1462]: GitPanel.tsx
+                - group [ref=e1463]: GitFlowModal.tsx
+                - group [ref=e1464]: vector-store.ts
+                - group [ref=e1465]: git.ts
+                - group [ref=e1466]: embedder.ts
+                - group [ref=e1467]: symbol-graph.ts
+                - group [ref=e1468]: retriever.ts
+                - group [ref=e1469]: events.ts
+                - group [ref=e1470]: conversation.ts
+                - group [ref=e1471]: command-catalog.ts
+                - group [ref=e1472]: orchestrator.ts
+                - group [ref=e1473]: terminal-registry.ts
+                - group [ref=e1474]: server.ts
+                - group [ref=e1475]: resolver.ts
+                - group [ref=e1476]: ChatPanel.tsx
+                - group [ref=e1477]: RightDock.tsx
+                - group [ref=e1478]: router.ts
+                - group [ref=e1479]: knowledge-query.ts
+                - group [ref=e1480]: watcher.ts
+                - group [ref=e1481]: ai-drafts.ts
+                - group [ref=e1482]: hooks-engine.ts
+                - group [ref=e1483]: parser-pool.ts
+                - group [ref=e1484]: registry.ts
+                - group [ref=e1485]: sessions.store.ts
+                - group [ref=e1486]: TimelinePanel.tsx
+                - group [ref=e1487]: fs.ts
+                - group [ref=e1488]: hooks.ts
+                - group [ref=e1489]: plan.ts
+                - group [ref=e1490]: validation.ts
+                - group [ref=e1491]: dev.mjs
+                - group [ref=e1492]: bridge-smoke.ts
+                - group [ref=e1493]: connection.ts
+                - group [ref=e1494]: event-hub.ts
+                - group [ref=e1495]: event-bus.ts
+                - group [ref=e1496]: timeline-store.ts
+                - group [ref=e1497]: feature-model.ts
+                - group [ref=e1498]: extracted.ts
+                - group [ref=e1499]: useGitFlowViewModel.ts
+                - group [ref=e1500]: useSessionsViewModel.ts
+                - group [ref=e1501]: theme.store.ts
+                - group [ref=e1502]: index.ts
+                - group [ref=e1503]: paths.ts
+                - group [ref=e1504]: result.ts
+                - group [ref=e1505]: knowledge.store.ts
+                - group [ref=e1506]: chunker.ts
+                - group [ref=e1507]: parser.ts
+                - group [ref=e1508]: sdk-tools.ts
+                - group [ref=e1509]: knowledge-tools.ts
+                - group [ref=e1510]: terminal-tools.ts
+                - group [ref=e1511]: runners.ts
+                - group [ref=e1512]: git-flow.store.ts
+                - group [ref=e1513]: FileTreePanel.tsx
+                - group [ref=e1514]: SessionListPanel.tsx
+                - group [ref=e1515]: diff.ts
+                - group [ref=e1516]: KnowledgePanel.tsx
+                - group [ref=e1517]: phase2-smoke.ts
+                - group [ref=e1518]: agent-config.ts
+                - group [ref=e1519]: token.ts
+                - group [ref=e1520]: commit-message.ts
+                - group [ref=e1521]: languages.ts
+                - group [ref=e1522]: auth-status.ts
+                - group [ref=e1523]: pipeline-executor.ts
+                - group [ref=e1524]: db.ts
+                - group [ref=e1525]: settings.ts
+                - group [ref=e1526]: git-tools.ts
+                - group [ref=e1527]: ignore.ts
+                - group [ref=e1528]: path-guard.ts
+                - group [ref=e1529]: select.tsx
+                - group [ref=e1530]: event-dispatcher.ts
+                - group [ref=e1531]: git.store.ts
+                - group [ref=e1532]: workspace.store.ts
+                - group [ref=e1533]: index.ts
+                - group [ref=e1534]: ActivityBar.tsx
+                - group [ref=e1535]: HeaderBar.tsx
+                - group [ref=e1536]: session.ts
+                - group [ref=e1537]: settings.ts
+                - group [ref=e1538]: git-flow-smoke.ts
+                - group [ref=e1539]: parallel-smoke.ts
+                - group [ref=e1540]: badge.tsx
+                - group [ref=e1541]: button.tsx
+                - group [ref=e1542]: input.tsx
+                - group [ref=e1543]: textarea.tsx
+                - group [ref=e1544]: useEditorViewModel.ts
+                - group [ref=e1545]: useGitViewModel.ts
+                - group [ref=e1546]: connection.store.ts
+                - group [ref=e1547]: terminal.store.ts
+                - group [ref=e1548]: timeline.store.ts
+                - group [ref=e1549]: MonitorPanel.tsx
+                - group [ref=e1550]: AppShell.tsx
+                - group [ref=e1551]: ConnectPanel.tsx
+                - group [ref=e1552]: PlaceholderPanel.tsx
+                - group [ref=e1553]: StatusBar.tsx
+                - group [ref=e1554]: TerminalPanel.tsx
+                - group [ref=e1555]: terminal.ts
+                - group [ref=e1556]: graph-layout.ts
+                - group [ref=e1557]: GraphPane.tsx
+                - group [ref=e1558]: RagInspectorPane.tsx
+                - group [ref=e1559]: commit-msg-smoke.ts
+                - group [ref=e1560]: git-smoke.ts
+                - group [ref=e1561]: native-smoke.ts
+                - group [ref=e1562]: register-git-handlers.ts
+                - group [ref=e1563]: main.ts
+                - group [ref=e1564]: not-implemented.ts
+                - group [ref=e1565]: register-handlers.ts
+                - group [ref=e1566]: session-manager.ts
+                - group [ref=e1567]: register-terminal-handlers.ts
+                - group [ref=e1568]: fs-tools.ts
+                - group [ref=e1569]: register-fs-handlers.ts
+                - group [ref=e1570]: App.tsx
+                - group [ref=e1571]: useConnectionViewModel.ts
+                - group [ref=e1572]: useFileExplorerViewModel.ts
+                - group [ref=e1573]: useTerminalViewModel.ts
+                - group [ref=e1574]: useTimelineViewModel.ts
+                - group [ref=e1575]: cn.ts
+                - group [ref=e1576]: vite.config.ts
+                - group [ref=e1577]: fs.ts
+                - group [ref=e1578]: git.ts
+                - group [ref=e1579]: hooks.ts
+                - group [ref=e1580]: knowledge.ts
+                - group [ref=e1581]: task.ts
+                - group [ref=e1582]: terminal.ts
+                - group [ref=e1583]: validation.ts
+                - group [ref=e1584]: version.ts
+                - group [ref=e1585]: debounce.ts
+                - group [ref=e1586]: ids.ts
+                - group [ref=e1587]: useKnowledgeViewModel.ts
+                - group [ref=e1588]: useRagInspectorViewModel.ts
+                - group [ref=e1589]: knowledge-smoke.ts
+                - group [ref=e1590]: main.tsx
+                - group [ref=e1591]: index.ts
+                - group [ref=e1592]: index.ts
+          - generic "Control Panel" [ref=e1593]:
+            - button "Zoom In" [ref=e1594] [cursor=pointer]
+            - button "Zoom Out" [ref=e1597] [cursor=pointer]
+            - button "Fit View" [ref=e1600] [cursor=pointer]
+  - generic [ref=e160]:
+    - generic [ref=e161]: Connected
+    - generic [ref=e168]: agent idle
+    - generic [ref=e170]: C:\Users\akrizu\atelier

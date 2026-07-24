@@ -37,4 +37,6 @@ export interface ChatItemVm {
   role: "user" | "assistant";
   text: string;
   streaming?: boolean;
+  /** Data-URL thumbnails of images sent with a user message. */
+  images?: string[];
 }

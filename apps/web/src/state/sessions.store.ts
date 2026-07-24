@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { PipelineStage, Plan, PlanStepStatus } from "@atelier/protocol";
 import type { ChatItemVm, Conversation } from "@/types";
 
 export type SessionStatus = "idle" | "working" | "error";
@@ -18,6 +19,14 @@ export interface SessionVm {
   lastError: string | null;
   /** Live feed of what the agent is doing right now. */
   actions: AgentAction[];
+  /** Current task plan (pipeline stage 4) with live step statuses. */
+  plan: Plan | null;
+  /** Pipeline stage the running task is in — the live progress line. */
+  stage: PipelineStage | null;
+  /** When the running task started, for the elapsed counter. */
+  taskStartedAt: number | null;
+  /** A cancel was sent; the task has not stopped yet. */
+  cancelling: boolean;
   /** Messages loaded from the agent at least once. */
   hydrated: boolean;
 }
@@ -36,7 +45,12 @@ interface SessionsStore {
   mapTask: (taskId: string, conversationId: string) => void;
   conversationForTask: (taskId: string) => string | undefined;
 
-  addUserMessage: (conversationId: string, id: string, text: string) => void;
+  addUserMessage: (
+    conversationId: string,
+    id: string,
+    text: string,
+    images?: string[]
+  ) => void;
   appendAssistantDelta: (
     conversationId: string,
     messageId: string,
@@ -54,11 +68,20 @@ interface SessionsStore {
     id: string,
     status: "done" | "failed"
   ) => void;
+  setStage: (conversationId: string, stage: PipelineStage) => void;
+  taskCancelling: (conversationId: string) => void;
   taskStarted: (conversationId: string, taskId: string, title?: string) => void;
   taskEnded: (
     conversationId: string,
     outcome: "completed" | "cancelled" | "error",
     error?: string
+  ) => void;
+  setPlan: (conversationId: string, plan: Plan) => void;
+  updatePlanStep: (
+    conversationId: string,
+    stepId: string,
+    status: PlanStepStatus,
+    note?: string
   ) => void;
 }
 
@@ -95,6 +118,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
             status: "idle",
             lastError: null,
             actions: [],
+            plan: null,
+            stage: null,
+            taskStartedAt: null,
+            cancelling: false,
             hydrated: false,
           };
           order.push(conversation.id);
@@ -116,6 +143,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           status: "idle",
           lastError: null,
           actions: [],
+          plan: null,
+          stage: null,
+          taskStartedAt: null,
+          cancelling: false,
           hydrated: true,
         },
       },
@@ -138,10 +169,13 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
   conversationForTask: (taskId) => get().taskMap[taskId],
 
-  addUserMessage: (conversationId, id, text) =>
+  addUserMessage: (conversationId, id, text, images) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
-        items: [...session.items, { id, role: "user", text }],
+        items: [
+          ...session.items,
+          { id, role: "user", text, ...(images?.length ? { images } : {}) },
+        ],
       })),
     })),
 
@@ -201,6 +235,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
     })),
 
+  setStage: (conversationId, stage) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, () => ({ stage })),
+    })),
+
+  /** Optimistic: the stop button reacts before the task actually ends. */
+  taskCancelling: (conversationId) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, () => ({ cancelling: true })),
+    })),
+
   taskStarted: (conversationId, taskId, title) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
@@ -208,6 +253,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         status: "working",
         lastError: null,
         actions: [],
+        plan: null,
+        stage: null,
+        taskStartedAt: Date.now(),
+        cancelling: false,
         conversation: title
           ? { ...session.conversation, title }
           : session.conversation,
@@ -220,8 +269,32 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions: patch(s.sessions, conversationId, () => ({
         activeTaskId: null,
         thinking: "",
+        stage: null,
+        taskStartedAt: null,
+        cancelling: false,
         status: outcome === "error" ? "error" : "idle",
         lastError: outcome === "error" ? (error ?? "task failed") : null,
+      })),
+    })),
+
+  setPlan: (conversationId, plan) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, () => ({ plan })),
+    })),
+
+  updatePlanStep: (conversationId, stepId, status, note) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, (session) => ({
+        plan: session.plan
+          ? {
+              ...session.plan,
+              steps: session.plan.steps.map((step) =>
+                step.id === stepId
+                  ? { ...step, status, note: note ?? step.note }
+                  : step
+              ),
+            }
+          : null,
       })),
     })),
 }));

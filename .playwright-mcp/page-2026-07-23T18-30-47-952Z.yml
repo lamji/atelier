@@ -1,0 +1,45 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: A
+      - generic [ref=e8]:
+        - paragraph [ref=e9]: Atelier
+        - paragraph [ref=e10]: agentic engineering
+    - navigation [ref=e11]:
+      - button "Chat" [ref=e12]
+      - button "Editor" [ref=e17]
+      - button "Diffs" [ref=e24]
+      - button "Terminal" [ref=e28]
+      - button "Activity" [ref=e33]
+  - generic [ref=e37]:
+    - generic [ref=e39]:
+      - button "Agents" [ref=e40]
+      - button "Explorer" [ref=e45]
+      - button "Git" [ref=e50]
+      - button "Knowledge" [ref=e55]
+      - button "Hooks" [ref=e61]
+      - button "Monitor" [ref=e66]
+      - button "Settings" [ref=e69]
+      - button "Switch to dark mode" [ref=e73]
+    - generic [ref=e76]:
+      - generic [ref=e80]:
+        - generic [ref=e81]: Agents
+        - button "New" [ref=e86]
+      - separator [ref=e89]
+      - generic [ref=e96]:
+        - heading "Connect to Local Agent" [level=2] [ref=e104]
+        - paragraph [ref=e105]:
+          - text: Start the agent with
+          - code [ref=e106]: pnpm dev:agent
+          - text: ", then restart this dev server — or paste the port and token from"
+          - code [ref=e107]: "%LOCALAPPDATA%\\atelier\\bridge.json"
+          - text: .
+        - generic [ref=e108]:
+          - textbox "Port (e.g. 43110)" [ref=e109]
+          - textbox "Token" [ref=e110]
+          - button "Connect" [ref=e111]
+        - paragraph [ref=e112]: "state: unauthorized"
+  - generic [ref=e114]:
+    - generic [ref=e115]: Unauthorized
+    - generic [ref=e118]: agent idle
+    - generic [ref=e120]: no workspace

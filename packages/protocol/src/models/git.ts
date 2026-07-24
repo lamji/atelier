@@ -44,6 +44,24 @@ export const GitOpResult = z.object({
 });
 export type GitOpResult = z.infer<typeof GitOpResult>;
 
+/** The step of the flow the agent tried to run on its own. */
+export const GitFlowOperation = z.enum(["commit", "push", "pr"]);
+export type GitFlowOperation = z.infer<typeof GitFlowOperation>;
+
+/**
+ * A git-flow step the agent was blocked from running by itself. Raised so
+ * the UI can open the wizard and let the user drive commit → push → PR.
+ */
+export const GitFlowRequest = z.object({
+  operation: GitFlowOperation,
+  /** The command (or git tool call) the agent attempted, for display. */
+  command: z.string(),
+  /** Commit message parsed off the attempt, when it carried one. */
+  commitMessage: z.string().optional(),
+  reason: z.string(),
+});
+export type GitFlowRequest = z.infer<typeof GitFlowRequest>;
+
 /** Everything the commit→push→PR wizard needs to pick its starting stage. */
 export const GitFlowInfo = z.object({
   branch: z.string(),

@@ -26,3 +26,35 @@ export const HookConfig = z.object({
   argument: z.string().optional(),
 });
 export type HookConfig = z.infer<typeof HookConfig>;
+
+/**
+ * A database operation the agent is holding on, waiting for the user to
+ * approve it in the UI. The tool call stays parked until the answer (or
+ * the deadline) arrives.
+ */
+export const DbApprovalRequest = z.object({
+  id: z.string(),
+  /** Short label: "migration", "database client", "SQL statement", … */
+  operation: z.string(),
+  /** The command the agent wants to run, as typed. */
+  command: z.string(),
+  /** Why it was held — the rule that matched. */
+  detail: z.string(),
+  /** Epoch ms after which the request auto-denies. */
+  expiresAt: z.number(),
+});
+export type DbApprovalRequest = z.infer<typeof DbApprovalRequest>;
+
+export const DbApprovalOutcome = z.enum([
+  "approved",
+  "denied",
+  "expired",
+  "cancelled",
+]);
+export type DbApprovalOutcome = z.infer<typeof DbApprovalOutcome>;
+
+export const DbApprovalResolved = z.object({
+  id: z.string(),
+  outcome: DbApprovalOutcome,
+});
+export type DbApprovalResolved = z.infer<typeof DbApprovalResolved>;

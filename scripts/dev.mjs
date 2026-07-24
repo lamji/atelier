@@ -1,11 +1,12 @@
-// Sequential dev runner: start the agent, wait until its bridge port is
-// listening, then start the web UI. If the agent fails to start, exit
+// Sequential dev runner: start the supervisor (which serves the projects.*
+// control API and spawns one agent per project), wait until its hub port is
+// listening, then start the web UI. If the supervisor fails to start, exit
 // loudly instead of letting Vite run against nothing.
 import { spawn, execSync } from "node:child_process";
 import net from "node:net";
 
-const AGENT_PORT = Number(process.env.ATELIER_PORT ?? 43110);
-const AGENT_READY_TIMEOUT_MS = 30_000;
+const HUB_PORT = Number(process.env.ATELIER_HUB_PORT ?? 43100);
+const HUB_READY_TIMEOUT_MS = 30_000;
 const isWindows = process.platform === "win32";
 
 /** @type {import("node:child_process").ChildProcess[]} */
@@ -67,23 +68,22 @@ function tryConnect(port) {
   });
 }
 
-async function waitForAgent(agent) {
-  const deadline = Date.now() + AGENT_READY_TIMEOUT_MS;
+async function waitForHub(supervisor) {
+  const deadline = Date.now() + HUB_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (agent.exitCode !== null) {
+    if (supervisor.exitCode !== null) {
       console.error(
-        `\n[dev] agent exited with code ${agent.exitCode} before ` +
-          "it was ready. Fix the agent error above, then rerun."
+        `\n[dev] supervisor exited with code ${supervisor.exitCode} before ` +
+          "it was ready. Fix the error above, then rerun."
       );
       shutdown(1);
     }
-    if (await tryConnect(AGENT_PORT)) return;
+    if (await tryConnect(HUB_PORT)) return;
     await new Promise((r) => setTimeout(r, 250));
   }
   console.error(
-    `\n[dev] agent did not listen on port ${AGENT_PORT} within ` +
-      `${AGENT_READY_TIMEOUT_MS / 1000}s. It may be hung — check the ` +
-      "agent output above."
+    `\n[dev] supervisor did not listen on port ${HUB_PORT} within ` +
+      `${HUB_READY_TIMEOUT_MS / 1000}s. Check the output above.`
   );
   shutdown(1);
 }
@@ -91,33 +91,33 @@ async function waitForAgent(agent) {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-if (await tryConnect(AGENT_PORT)) {
+if (await tryConnect(HUB_PORT)) {
   console.error(
-    `[dev] port ${AGENT_PORT} is already in use — another agent ` +
-      "instance is running. Stop it first, then rerun."
+    `[dev] port ${HUB_PORT} is already in use — a supervisor is ` +
+      "already running. Stop it first, then rerun."
   );
   process.exit(1);
 }
 
-// The agent's workspace = the folder `npm run dev` was invoked from
-// (INIT_CWD), not apps/agent (pnpm sets cwd to the package dir).
-// An explicit ATELIER_WORKSPACE env var still wins.
+// The first project = the folder `npm run dev` was invoked from (INIT_CWD).
+// The supervisor auto-registers and starts it; more are added in the UI.
 const workspace =
   process.env.ATELIER_WORKSPACE ?? process.env.INIT_CWD ?? process.cwd();
 
-console.log(`[dev] starting agent (workspace: ${workspace})...`);
-const agent = run("agent", ["--filter", "@atelier/agent", "dev"], {
-  ATELIER_WORKSPACE: workspace,
+console.log(`[dev] starting supervisor (initial project: ${workspace})...`);
+const supervisor = run("hub", ["--filter", "@atelier/agent", "supervisor"], {
+  ATELIER_HUB_PORT: String(HUB_PORT),
+  ATELIER_INITIAL_PROJECT: workspace,
 });
-agent.on("exit", (code) => {
+supervisor.on("exit", (code) => {
   if (!shuttingDown) {
-    console.error(`\n[dev] agent exited unexpectedly (code ${code})`);
+    console.error(`\n[dev] supervisor exited unexpectedly (code ${code})`);
     shutdown(code ?? 1);
   }
 });
 
-await waitForAgent(agent);
-console.log(`[dev] agent ready on port ${AGENT_PORT}, starting web...`);
+await waitForHub(supervisor);
+console.log(`[dev] supervisor ready on port ${HUB_PORT}, starting web...`);
 
 const web = run("web", ["--filter", "@atelier/web", "dev"]);
 web.on("exit", (code) => {

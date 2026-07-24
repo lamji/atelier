@@ -6,6 +6,8 @@ import { bridge } from "./bridge-client.js";
 interface Entry {
   term: Terminal;
   fit: FitAddon;
+  /** The DOM element the terminal is currently opened into. */
+  element: HTMLElement | null;
 }
 
 /**
@@ -16,21 +18,32 @@ class TerminalRegistry {
   private entries = new Map<string, Entry>();
 
   themeFor(dark: boolean) {
+    // cursor = the block colour, cursorAccent = the glyph UNDER the block.
+    // Without a solid accent the character vanishes on a transparent bg,
+    // which read as an "invisible white cursor".
     return dark
       ? {
           background: "#00000000",
           foreground: "#e6e6f0",
-          cursor: "#a5a0ff",
+          cursor: "#ffffff",
+          cursorAccent: "#1b1b26",
           selectionBackground: "#4d4a8a66",
         }
       : {
           background: "#00000000",
           foreground: "#22222e",
-          cursor: "#5b50e0",
+          cursor: "#000000",
+          cursorAccent: "#ffffff",
           selectionBackground: "#c9c5f866",
         };
   }
 
+  /**
+   * Opens the terminal into its persistent container exactly once. Called
+   * again with the same container (re-renders, theme toggles) it is a
+   * no-op, so scrollback and rendered content survive. Each terminal keeps
+   * its own container for its whole life — nothing is ever wiped.
+   */
   mount(termId: string, container: HTMLElement, dark: boolean): Entry {
     let entry = this.entries.get(termId);
     if (!entry) {
@@ -48,7 +61,7 @@ class TerminalRegistry {
       term.onData((data) => {
         void bridge.rpc("terminal.write", { termId, data }).catch(() => {});
       });
-      entry = { term, fit };
+      entry = { term, fit, element: null };
       this.entries.set(termId, entry);
       void bridge
         .rpc("terminal.getHistory", { termId })
@@ -57,8 +70,12 @@ class TerminalRegistry {
         })
         .catch(() => {});
     }
-    entry.term.open(container);
-    this.fitAndSync(termId);
+    // Only (re)open when the target element actually changed.
+    if (entry.element !== container) {
+      entry.term.open(container);
+      entry.element = container;
+      this.fitAndSync(termId);
+    }
     return entry;
   }
 
@@ -87,9 +104,15 @@ class TerminalRegistry {
   dispose(termId: string): void {
     const entry = this.entries.get(termId);
     if (entry) {
+      entry.element = null;
       entry.term.dispose();
       this.entries.delete(termId);
     }
+  }
+
+  /** Tear down every terminal — used when switching projects. */
+  disposeAll(): void {
+    for (const termId of [...this.entries.keys()]) this.dispose(termId);
   }
 }
 

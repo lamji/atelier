@@ -1,0 +1,1207 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: A
+      - generic [ref=e8]:
+        - paragraph [ref=e9]: Atelier
+        - paragraph [ref=e10]: agentic engineering
+    - navigation [ref=e11]:
+      - button "Chat" [ref=e12]
+      - button "Editor" [ref=e17]
+      - button "Diffs" [ref=e24]
+      - button "Terminal" [ref=e28]
+      - button "Activity" [ref=e33]
+  - generic [ref=e37]:
+    - generic [ref=e39]:
+      - button "Agents" [ref=e40]
+      - button "Explorer" [ref=e45]
+      - button "Git" [ref=e50]
+      - button "Knowledge" [ref=e55]
+      - button "Hooks" [ref=e61]
+      - button "Monitor" [ref=e66]
+      - button "Settings" [ref=e69]
+      - button "Switch to dark mode" [ref=e73]
+    - generic [ref=e76]:
+      - generic [ref=e159]:
+        - generic [ref=e160]:
+          - heading "Knowledge" [level=2] [ref=e165]
+          - button "Sync" [ref=e166]
+        - generic [ref=e172]:
+          - generic [ref=e173]:
+            - generic [ref=e174]: Files
+            - paragraph [ref=e181]: "144"
+          - generic [ref=e182]:
+            - generic [ref=e183]: Symbols
+            - paragraph [ref=e188]: "723"
+          - generic [ref=e189]:
+            - generic [ref=e190]: Call edges
+            - paragraph [ref=e196]: "5310"
+          - generic [ref=e197]:
+            - generic [ref=e198]: Chunks
+            - paragraph [ref=e207]: "660"
+          - generic [ref=e208]:
+            - generic [ref=e209]: Embedded
+            - paragraph [ref=e213]: "660"
+          - generic [ref=e214]:
+            - generic [ref=e215]: Features
+            - paragraph [ref=e222]: "0"
+          - generic [ref=e223]:
+            - generic [ref=e224]: Lessons
+            - paragraph [ref=e229]: "0"
+        - paragraph [ref=e230]: Last indexed 12:26:28 AM
+        - generic [ref=e231]:
+          - button "View graph" [active] [ref=e232]
+          - button "RAG inspector" [ref=e238]
+        - generic [ref=e246]:
+          - heading "Recent updates" [level=3] [ref=e247]
+          - paragraph [ref=e248]: Knowledge deltas appear here as code changes.
+        - button "Force full re-index" [ref=e249]
+      - separator [ref=e89]
+      - generic [ref=e448]:
+        - generic [ref=e449]:
+          - button "Workspace" [ref=e455]
+          - button "File" [ref=e456]
+          - button "Symbol" [ref=e457]
+          - 'textbox "filter: path or symbol + Enter…" [ref=e458]'
+          - paragraph [ref=e459]: click a file to open it · click a function for callers/callees
+        - application [ref=e461]:
+          - generic [ref=e463]:
+            - generic:
+              - generic:
+                - img:
+                  - group "Edge from file:2 to file:14" [ref=e464] [cursor=pointer]:
+                    - generic [ref=e467]: imports
+                - img:
+                  - group "Edge from file:2 to file:17" [ref=e469] [cursor=pointer]:
+                    - generic [ref=e472]: imports
+                - img:
+                  - group "Edge from file:2 to file:19" [ref=e474] [cursor=pointer]:
+                    - generic [ref=e477]: imports
+                - img:
+                  - group "Edge from file:3 to file:14" [ref=e479] [cursor=pointer]:
+                    - generic [ref=e482]: imports
+                - img:
+                  - group "Edge from file:3 to file:18" [ref=e484] [cursor=pointer]:
+                    - generic [ref=e487]: imports
+                - img:
+                  - group "Edge from file:3 to file:19" [ref=e489] [cursor=pointer]:
+                    - generic [ref=e492]: imports
+                - img:
+                  - group "Edge from file:4 to file:14" [ref=e494] [cursor=pointer]:
+                    - generic [ref=e497]: imports
+                - img:
+                  - group "Edge from file:4 to file:19" [ref=e499] [cursor=pointer]:
+                    - generic [ref=e502]: imports
+                - img:
+                  - group "Edge from file:9 to file:14" [ref=e504] [cursor=pointer]:
+                    - generic [ref=e505]: imports
+                - img:
+                  - group "Edge from file:9 to file:15" [ref=e507] [cursor=pointer]:
+                    - generic [ref=e508]: imports
+                - img:
+                  - group "Edge from file:9 to file:8" [ref=e510] [cursor=pointer]:
+                    - generic [ref=e513]: imports
+                - img:
+                  - group "Edge from file:11 to file:12" [ref=e515] [cursor=pointer]:
+                    - generic [ref=e516]: imports
+                - img:
+                  - group "Edge from file:11 to file:13" [ref=e518] [cursor=pointer]:
+                    - generic [ref=e519]: imports
+                - img:
+                  - group "Edge from file:11 to file:8" [ref=e521] [cursor=pointer]:
+                    - generic [ref=e524]: imports
+                - img:
+                  - group "Edge from file:11 to file:9" [ref=e526] [cursor=pointer]:
+                    - generic [ref=e527]: imports
+                - img:
+                  - group "Edge from file:11 to file:10" [ref=e529] [cursor=pointer]:
+                    - generic [ref=e530]: imports
+                - img:
+                  - group "Edge from file:13 to file:12" [ref=e532] [cursor=pointer]:
+                    - generic [ref=e533]: imports
+                - img:
+                  - group "Edge from file:15 to file:46" [ref=e535] [cursor=pointer]:
+                    - generic [ref=e536]: imports
+                - img:
+                  - group "Edge from file:15 to file:14" [ref=e538] [cursor=pointer]:
+                    - generic [ref=e539]: imports
+                - img:
+                  - group "Edge from file:16 to file:18" [ref=e541] [cursor=pointer]:
+                    - generic [ref=e544]: imports
+                - img:
+                  - group "Edge from file:16 to file:19" [ref=e546] [cursor=pointer]:
+                    - generic [ref=e549]: imports
+                - img:
+                  - group "Edge from file:17 to file:16" [ref=e551] [cursor=pointer]:
+                    - generic [ref=e554]: imports
+                - img:
+                  - group "Edge from file:17 to file:19" [ref=e556] [cursor=pointer]:
+                    - generic [ref=e557]: imports
+                - img:
+                  - group "Edge from file:18 to file:19" [ref=e559] [cursor=pointer]:
+                    - generic [ref=e560]: imports
+                - img:
+                  - group "Edge from file:20 to file:10" [ref=e562] [cursor=pointer]:
+                    - generic [ref=e563]: imports
+                - img:
+                  - group "Edge from file:20 to file:16" [ref=e565] [cursor=pointer]:
+                    - generic [ref=e568]: imports
+                - img:
+                  - group "Edge from file:20 to file:17" [ref=e570] [cursor=pointer]:
+                    - generic [ref=e571]: imports
+                - img:
+                  - group "Edge from file:20 to file:19" [ref=e573] [cursor=pointer]:
+                    - generic [ref=e574]: imports
+                - img:
+                  - group "Edge from file:20 to file:18" [ref=e576] [cursor=pointer]:
+                    - generic [ref=e577]: imports
+                - img:
+                  - group "Edge from file:22 to file:32" [ref=e579] [cursor=pointer]:
+                    - generic [ref=e580]: imports
+                - img:
+                  - group "Edge from file:24 to file:46" [ref=e582] [cursor=pointer]:
+                    - generic [ref=e583]: imports
+                - img:
+                  - group "Edge from file:25 to file:46" [ref=e585] [cursor=pointer]:
+                    - generic [ref=e586]: imports
+                - img:
+                  - group "Edge from file:25 to file:14" [ref=e588] [cursor=pointer]:
+                    - generic [ref=e589]: imports
+                - img:
+                  - group "Edge from file:26 to file:46" [ref=e591] [cursor=pointer]:
+                    - generic [ref=e594]: imports
+                - img:
+                  - group "Edge from file:30 to file:29" [ref=e596] [cursor=pointer]:
+                    - generic [ref=e599]: imports
+                - img:
+                  - group "Edge from file:32 to file:31" [ref=e601] [cursor=pointer]:
+                    - generic [ref=e602]: imports
+                - img:
+                  - group "Edge from file:32 to file:33" [ref=e604] [cursor=pointer]:
+                    - generic [ref=e607]: imports
+                - img:
+                  - group "Edge from file:32 to file:30" [ref=e609] [cursor=pointer]:
+                    - generic [ref=e612]: imports
+                - img:
+                  - group "Edge from file:32 to file:29" [ref=e614] [cursor=pointer]:
+                    - generic [ref=e615]: imports
+                - img:
+                  - group "Edge from file:40 to file:14" [ref=e617] [cursor=pointer]:
+                    - generic [ref=e620]: imports
+                - img:
+                  - group "Edge from file:45 to file:12" [ref=e622] [cursor=pointer]:
+                    - generic [ref=e623]: imports
+                - img:
+                  - group "Edge from file:45 to file:15" [ref=e625] [cursor=pointer]:
+                    - generic [ref=e626]: imports
+                - img:
+                  - group "Edge from file:45 to file:39" [ref=e628] [cursor=pointer]:
+                    - generic [ref=e629]: imports
+                - img:
+                  - group "Edge from file:45 to file:37" [ref=e631] [cursor=pointer]:
+                    - generic [ref=e632]: imports
+                - img:
+                  - group "Edge from file:45 to file:38" [ref=e634] [cursor=pointer]:
+                    - generic [ref=e637]: imports
+                - img:
+                  - group "Edge from file:45 to file:10" [ref=e639] [cursor=pointer]:
+                    - generic [ref=e640]: imports
+                - img:
+                  - group "Edge from file:45 to file:47" [ref=e642] [cursor=pointer]:
+                    - generic [ref=e643]: imports
+                - img:
+                  - group "Edge from file:47 to file:46" [ref=e645] [cursor=pointer]:
+                    - generic [ref=e646]: imports
+                - img:
+                  - group "Edge from file:48 to file:46" [ref=e648] [cursor=pointer]:
+                    - generic [ref=e649]: imports
+                - img:
+                  - group "Edge from file:49 to file:10" [ref=e651] [cursor=pointer]:
+                    - generic [ref=e652]: imports
+                - img:
+                  - group "Edge from file:49 to file:50" [ref=e654] [cursor=pointer]:
+                    - generic [ref=e655]: imports
+                - img:
+                  - group "Edge from file:50 to file:46" [ref=e657] [cursor=pointer]:
+                    - generic [ref=e658]: imports
+                - img:
+                  - group "Edge from file:50 to file:14" [ref=e660] [cursor=pointer]:
+                    - generic [ref=e661]: imports
+                - img:
+                  - group "Edge from file:51 to file:57" [ref=e663] [cursor=pointer]:
+                    - generic [ref=e664]: imports
+                - img:
+                  - group "Edge from file:51 to file:54" [ref=e666] [cursor=pointer]:
+                    - generic [ref=e667]: imports
+                - img:
+                  - group "Edge from file:52 to file:19" [ref=e669] [cursor=pointer]:
+                    - generic [ref=e670]: imports
+                - img:
+                  - group "Edge from file:52 to file:54" [ref=e672] [cursor=pointer]:
+                    - generic [ref=e673]: imports
+                - img:
+                  - group "Edge from file:54 to file:14" [ref=e675] [cursor=pointer]:
+                    - generic [ref=e676]: imports
+                - img:
+                  - group "Edge from file:55 to file:59" [ref=e678] [cursor=pointer]:
+                    - generic [ref=e679]: imports
+                - img:
+                  - group "Edge from file:55 to file:54" [ref=e681] [cursor=pointer]:
+                    - generic [ref=e682]: imports
+                - img:
+                  - group "Edge from file:56 to file:36" [ref=e684] [cursor=pointer]:
+                    - generic [ref=e687]: imports
+                - img:
+                  - group "Edge from file:60 to file:10" [ref=e689] [cursor=pointer]:
+                    - generic [ref=e690]: imports
+                - img:
+                  - group "Edge from file:60 to file:57" [ref=e692] [cursor=pointer]:
+                    - generic [ref=e693]: imports
+                - img:
+                  - group "Edge from file:61 to file:14" [ref=e695] [cursor=pointer]:
+                    - generic [ref=e696]: imports
+                - img:
+                  - group "Edge from file:61 to file:59" [ref=e698] [cursor=pointer]:
+                    - generic [ref=e699]: imports
+                - img:
+                  - group "Edge from file:61 to file:58" [ref=e701] [cursor=pointer]:
+                    - generic [ref=e702]: imports
+                - img:
+                  - group "Edge from file:62 to file:98" [ref=e704] [cursor=pointer]:
+                    - generic [ref=e707]: imports
+                - img:
+                  - group "Edge from file:62 to file:79" [ref=e709] [cursor=pointer]:
+                    - generic [ref=e712]: imports
+                - img:
+                  - group "Edge from file:63 to file:76" [ref=e714] [cursor=pointer]:
+                    - generic [ref=e717]: imports
+                - img:
+                  - group "Edge from file:64 to file:76" [ref=e719] [cursor=pointer]:
+                    - generic [ref=e722]: imports
+                - img:
+                  - group "Edge from file:65 to file:76" [ref=e724] [cursor=pointer]:
+                    - generic [ref=e727]: imports
+                - img:
+                  - group "Edge from file:66 to file:76" [ref=e729] [cursor=pointer]:
+                    - generic [ref=e732]: imports
+                - img:
+                  - group "Edge from file:67 to file:76" [ref=e734] [cursor=pointer]:
+                    - generic [ref=e737]: imports
+                - img:
+                  - group "Edge from file:68 to file:78" [ref=e739] [cursor=pointer]:
+                    - generic [ref=e740]: imports
+                - img:
+                  - group "Edge from file:68 to file:81" [ref=e742] [cursor=pointer]:
+                    - generic [ref=e743]: imports
+                - img:
+                  - group "Edge from file:69 to file:88" [ref=e745] [cursor=pointer]:
+                    - generic [ref=e746]: imports
+                - img:
+                  - group "Edge from file:69 to file:86" [ref=e748] [cursor=pointer]:
+                    - generic [ref=e749]: imports
+                - img:
+                  - group "Edge from file:70 to file:78" [ref=e751] [cursor=pointer]:
+                    - generic [ref=e752]: imports
+                - img:
+                  - group "Edge from file:70 to file:81" [ref=e754] [cursor=pointer]:
+                    - generic [ref=e755]: imports
+                - img:
+                  - group "Edge from file:70 to file:83" [ref=e757] [cursor=pointer]:
+                    - generic [ref=e758]: imports
+                - img:
+                  - group "Edge from file:70 to file:88" [ref=e760] [cursor=pointer]:
+                    - generic [ref=e761]: imports
+                - img:
+                  - group "Edge from file:71 to file:78" [ref=e763] [cursor=pointer]:
+                    - generic [ref=e766]: imports
+                - img:
+                  - group "Edge from file:71 to file:82" [ref=e768] [cursor=pointer]:
+                    - generic [ref=e771]: imports
+                - img:
+                  - group "Edge from file:71 to file:83" [ref=e773] [cursor=pointer]:
+                    - generic [ref=e776]: imports
+                - img:
+                  - group "Edge from file:71 to file:84" [ref=e778] [cursor=pointer]:
+                    - generic [ref=e781]: imports
+                - img:
+                  - group "Edge from file:72 to file:78" [ref=e783] [cursor=pointer]:
+                    - generic [ref=e784]: imports
+                - img:
+                  - group "Edge from file:72 to file:81" [ref=e786] [cursor=pointer]:
+                    - generic [ref=e787]: imports
+                - img:
+                  - group "Edge from file:72 to file:83" [ref=e789] [cursor=pointer]:
+                    - generic [ref=e790]: imports
+                - img:
+                  - group "Edge from file:72 to file:88" [ref=e792] [cursor=pointer]:
+                    - generic [ref=e793]: imports
+                - img:
+                  - group "Edge from file:73 to file:78" [ref=e795] [cursor=pointer]:
+                    - generic [ref=e796]: imports
+                - img:
+                  - group "Edge from file:73 to file:81" [ref=e798] [cursor=pointer]:
+                    - generic [ref=e799]: imports
+                - img:
+                  - group "Edge from file:73 to file:84" [ref=e801] [cursor=pointer]:
+                    - generic [ref=e802]: imports
+                - img:
+                  - group "Edge from file:73 to file:88" [ref=e804] [cursor=pointer]:
+                    - generic [ref=e805]: imports
+                - img:
+                  - group "Edge from file:74 to file:78" [ref=e807] [cursor=pointer]:
+                    - generic [ref=e808]: imports
+                - img:
+                  - group "Edge from file:74 to file:80" [ref=e810] [cursor=pointer]:
+                    - generic [ref=e811]: imports
+                - img:
+                  - group "Edge from file:74 to file:81" [ref=e813] [cursor=pointer]:
+                    - generic [ref=e814]: imports
+                - img:
+                  - group "Edge from file:74 to file:85" [ref=e816] [cursor=pointer]:
+                    - generic [ref=e817]: imports
+                - img:
+                  - group "Edge from file:74 to file:86" [ref=e819] [cursor=pointer]:
+                    - generic [ref=e820]: imports
+                - img:
+                  - group "Edge from file:75 to file:84" [ref=e822] [cursor=pointer]:
+                    - generic [ref=e823]: imports
+                - img:
+                  - group "Edge from file:75 to file:87" [ref=e825] [cursor=pointer]:
+                    - generic [ref=e826]: imports
+                - img:
+                  - group "Edge from file:75 to file:89" [ref=e828] [cursor=pointer]:
+                    - generic [ref=e831]: imports
+                - img:
+                  - group "Edge from file:77 to file:62" [ref=e833] [cursor=pointer]:
+                    - generic [ref=e836]: imports
+                - img:
+                  - group "Edge from file:80 to file:78" [ref=e838] [cursor=pointer]:
+                    - generic [ref=e839]: imports
+                - img:
+                  - group "Edge from file:81 to file:89" [ref=e841] [cursor=pointer]:
+                    - generic [ref=e844]: imports
+                - img:
+                  - group "Edge from file:84 to file:89" [ref=e846] [cursor=pointer]:
+                    - generic [ref=e849]: imports
+                - img:
+                  - group "Edge from file:87 to file:89" [ref=e851] [cursor=pointer]:
+                    - generic [ref=e854]: imports
+                - img:
+                  - group "Edge from file:90 to file:76" [ref=e856] [cursor=pointer]:
+                    - generic [ref=e857]: imports
+                - img:
+                  - group "Edge from file:90 to file:66" [ref=e859] [cursor=pointer]:
+                    - generic [ref=e862]: imports
+                - img:
+                  - group "Edge from file:90 to file:89" [ref=e864] [cursor=pointer]:
+                    - generic [ref=e867]: imports
+                - img:
+                  - group "Edge from file:90 to file:84" [ref=e869] [cursor=pointer]:
+                    - generic [ref=e870]: imports
+                - img:
+                  - group "Edge from file:90 to file:73" [ref=e872] [cursor=pointer]:
+                    - generic [ref=e873]: imports
+                - img:
+                  - group "Edge from file:91 to file:76" [ref=e875] [cursor=pointer]:
+                    - generic [ref=e876]: imports
+                - img:
+                  - group "Edge from file:92 to file:76" [ref=e878] [cursor=pointer]:
+                    - generic [ref=e881]: imports
+                - img:
+                  - group "Edge from file:92 to file:64" [ref=e883] [cursor=pointer]:
+                    - generic [ref=e884]: imports
+                - img:
+                  - group "Edge from file:92 to file:65" [ref=e886] [cursor=pointer]:
+                    - generic [ref=e887]: imports
+                - img:
+                  - group "Edge from file:92 to file:66" [ref=e889] [cursor=pointer]:
+                    - generic [ref=e890]: imports
+                - img:
+                  - group "Edge from file:92 to file:67" [ref=e892] [cursor=pointer]:
+                    - generic [ref=e893]: imports
+                - img:
+                  - group "Edge from file:92 to file:71" [ref=e895] [cursor=pointer]:
+                    - generic [ref=e896]: imports
+                - img:
+                  - group "Edge from file:92 to file:82" [ref=e898] [cursor=pointer]:
+                    - generic [ref=e901]: imports
+                - img:
+                  - group "Edge from file:92 to file:84" [ref=e903] [cursor=pointer]:
+                    - generic [ref=e906]: imports
+                - img:
+                  - group "Edge from file:93 to file:76" [ref=e908] [cursor=pointer]:
+                    - generic [ref=e909]: imports
+                - img:
+                  - group "Edge from file:93 to file:64" [ref=e911] [cursor=pointer]:
+                    - generic [ref=e914]: imports
+                - img:
+                  - group "Edge from file:93 to file:67" [ref=e916] [cursor=pointer]:
+                    - generic [ref=e919]: imports
+                - img:
+                  - group "Edge from file:93 to file:71" [ref=e921] [cursor=pointer]:
+                    - generic [ref=e924]: imports
+                - img:
+                  - group "Edge from file:93 to file:72" [ref=e926] [cursor=pointer]:
+                    - generic [ref=e927]: imports
+                - img:
+                  - group "Edge from file:93 to file:92" [ref=e929] [cursor=pointer]:
+                    - generic [ref=e932]: imports
+                - img:
+                  - group "Edge from file:94 to file:96" [ref=e934] [cursor=pointer]:
+                    - generic [ref=e935]: imports
+                - img:
+                  - group "Edge from file:94 to file:84" [ref=e937] [cursor=pointer]:
+                    - generic [ref=e938]: imports
+                - img:
+                  - group "Edge from file:96 to file:76" [ref=e940] [cursor=pointer]:
+                    - generic [ref=e941]: imports
+                - img:
+                  - group "Edge from file:96 to file:84" [ref=e943] [cursor=pointer]:
+                    - generic [ref=e944]: imports
+                - img:
+                  - group "Edge from file:97 to file:76" [ref=e946] [cursor=pointer]:
+                    - generic [ref=e947]: imports
+                - img:
+                  - group "Edge from file:97 to file:86" [ref=e949] [cursor=pointer]:
+                    - generic [ref=e950]: imports
+                - img:
+                  - group "Edge from file:99 to file:64" [ref=e952] [cursor=pointer]:
+                    - generic [ref=e955]: imports
+                - img:
+                  - group "Edge from file:99 to file:65" [ref=e957] [cursor=pointer]:
+                    - generic [ref=e960]: imports
+                - img:
+                  - group "Edge from file:99 to file:89" [ref=e962] [cursor=pointer]:
+                    - generic [ref=e965]: imports
+                - img:
+                  - group "Edge from file:102 to file:76" [ref=e967] [cursor=pointer]:
+                    - generic [ref=e968]: imports
+                - img:
+                  - group "Edge from file:102 to file:89" [ref=e970] [cursor=pointer]:
+                    - generic [ref=e973]: imports
+                - img:
+                  - group "Edge from file:103 to file:76" [ref=e975] [cursor=pointer]:
+                    - generic [ref=e978]: imports
+                - img:
+                  - group "Edge from file:104 to file:76" [ref=e980] [cursor=pointer]:
+                    - generic [ref=e983]: imports
+                - img:
+                  - group "Edge from file:104 to file:89" [ref=e985] [cursor=pointer]:
+                    - generic [ref=e986]: imports
+                - img:
+                  - group "Edge from file:109 to file:121" [ref=e988] [cursor=pointer]:
+                    - generic [ref=e991]: imports
+                - img:
+                  - group "Edge from file:109 to file:120" [ref=e993] [cursor=pointer]:
+                    - generic [ref=e996]: imports
+                - img:
+                  - group "Edge from file:110 to file:122" [ref=e998] [cursor=pointer]:
+                    - generic [ref=e1001]: imports
+                - img:
+                  - group "Edge from file:111 to file:123" [ref=e1003] [cursor=pointer]:
+                    - generic [ref=e1006]: imports
+                - img:
+                  - group "Edge from file:112 to file:114" [ref=e1008] [cursor=pointer]:
+                    - generic [ref=e1011]: imports
+                - img:
+                  - group "Edge from file:112 to file:116" [ref=e1013] [cursor=pointer]:
+                    - generic [ref=e1016]: imports
+                - img:
+                  - group "Edge from file:112 to file:109" [ref=e1018] [cursor=pointer]:
+                    - generic [ref=e1021]: imports
+                - img:
+                  - group "Edge from file:112 to file:117" [ref=e1023] [cursor=pointer]:
+                    - generic [ref=e1026]: imports
+                - img:
+                  - group "Edge from file:112 to file:110" [ref=e1028] [cursor=pointer]:
+                    - generic [ref=e1031]: imports
+                - img:
+                  - group "Edge from file:112 to file:118" [ref=e1033] [cursor=pointer]:
+                    - generic [ref=e1036]: imports
+                - img:
+                  - group "Edge from file:112 to file:113" [ref=e1038] [cursor=pointer]:
+                    - generic [ref=e1041]: imports
+                - img:
+                  - group "Edge from file:112 to file:111" [ref=e1043] [cursor=pointer]:
+                    - generic [ref=e1046]: imports
+                - img:
+                  - group "Edge from file:112 to file:115" [ref=e1048] [cursor=pointer]:
+                    - generic [ref=e1051]: imports
+                - img:
+                  - group "Edge from file:114 to file:107" [ref=e1053] [cursor=pointer]:
+                    - generic [ref=e1056]: imports
+                - img:
+                  - group "Edge from file:114 to file:119" [ref=e1058] [cursor=pointer]:
+                    - generic [ref=e1061]: imports
+                - img:
+                  - group "Edge from file:116 to file:119" [ref=e1063] [cursor=pointer]:
+                    - generic [ref=e1066]: imports
+                - img:
+                  - group "Edge from file:116 to file:106" [ref=e1068] [cursor=pointer]:
+                    - generic [ref=e1071]: imports
+                - img:
+                  - group "Edge from file:117 to file:126" [ref=e1073] [cursor=pointer]:
+                    - generic [ref=e1076]: imports
+                - img:
+                  - group "Edge from file:118 to file:127" [ref=e1078] [cursor=pointer]:
+                    - generic [ref=e1081]: imports
+                - img:
+                  - group "Edge from file:139 to file:78" [ref=e1083] [cursor=pointer]:
+                    - generic [ref=e1084]: imports
+                - img:
+                  - group "Edge from file:139 to file:136" [ref=e1086] [cursor=pointer]:
+                    - generic [ref=e1087]: imports
+                - img:
+                  - group "Edge from file:139 to file:81" [ref=e1089] [cursor=pointer]:
+                    - generic [ref=e1090]: imports
+                - img:
+                  - group "Edge from file:139 to file:88" [ref=e1092] [cursor=pointer]:
+                    - generic [ref=e1093]: imports
+                - img:
+                  - group "Edge from file:95 to file:76" [ref=e1095] [cursor=pointer]:
+                    - generic [ref=e1096]: imports
+                - img:
+                  - group "Edge from file:95 to file:103" [ref=e1098] [cursor=pointer]:
+                    - generic [ref=e1101]: imports
+                - img:
+                  - group "Edge from file:95 to file:104" [ref=e1103] [cursor=pointer]:
+                    - generic [ref=e1106]: imports
+                - img:
+                  - group "Edge from file:95 to file:141" [ref=e1108] [cursor=pointer]:
+                    - generic [ref=e1111]: imports
+                - img:
+                  - group "Edge from file:95 to file:143" [ref=e1113] [cursor=pointer]:
+                    - generic [ref=e1116]: imports
+                - img:
+                  - group "Edge from file:95 to file:88" [ref=e1118] [cursor=pointer]:
+                    - generic [ref=e1119]: imports
+                - img:
+                  - group "Edge from file:95 to file:83" [ref=e1121] [cursor=pointer]:
+                    - generic [ref=e1122]: imports
+                - img:
+                  - group "Edge from file:95 to file:89" [ref=e1124] [cursor=pointer]:
+                    - generic [ref=e1127]: imports
+                - img:
+                  - group "Edge from file:95 to file:138" [ref=e1129] [cursor=pointer]:
+                    - generic [ref=e1130]: imports
+                - img:
+                  - group "Edge from file:95 to file:139" [ref=e1132] [cursor=pointer]:
+                    - generic [ref=e1133]: imports
+                - img:
+                  - group "Edge from file:98 to file:100" [ref=e1135] [cursor=pointer]:
+                    - generic [ref=e1138]: imports
+                - img:
+                  - group "Edge from file:98 to file:97" [ref=e1140] [cursor=pointer]:
+                    - generic [ref=e1143]: imports
+                - img:
+                  - group "Edge from file:98 to file:102" [ref=e1145] [cursor=pointer]:
+                    - generic [ref=e1148]: imports
+                - img:
+                  - group "Edge from file:98 to file:101" [ref=e1150] [cursor=pointer]:
+                    - generic [ref=e1153]: imports
+                - img:
+                  - group "Edge from file:98 to file:99" [ref=e1155] [cursor=pointer]:
+                    - generic [ref=e1158]: imports
+                - img:
+                  - group "Edge from file:98 to file:90" [ref=e1160] [cursor=pointer]:
+                    - generic [ref=e1163]: imports
+                - img:
+                  - group "Edge from file:98 to file:91" [ref=e1165] [cursor=pointer]:
+                    - generic [ref=e1168]: imports
+                - img:
+                  - group "Edge from file:98 to file:93" [ref=e1170] [cursor=pointer]:
+                    - generic [ref=e1173]: imports
+                - img:
+                  - group "Edge from file:98 to file:96" [ref=e1175] [cursor=pointer]:
+                    - generic [ref=e1178]: imports
+                - img:
+                  - group "Edge from file:98 to file:94" [ref=e1180] [cursor=pointer]:
+                    - generic [ref=e1183]: imports
+                - img:
+                  - group "Edge from file:98 to file:140" [ref=e1185] [cursor=pointer]:
+                    - generic [ref=e1188]: imports
+                - img:
+                  - group "Edge from file:98 to file:95" [ref=e1190] [cursor=pointer]:
+                    - generic [ref=e1193]: imports
+                - img:
+                  - group "Edge from file:98 to file:74" [ref=e1195] [cursor=pointer]:
+                    - generic [ref=e1198]: imports
+                - img:
+                  - group "Edge from file:98 to file:73" [ref=e1200] [cursor=pointer]:
+                    - generic [ref=e1203]: imports
+                - img:
+                  - group "Edge from file:98 to file:68" [ref=e1205] [cursor=pointer]:
+                    - generic [ref=e1208]: imports
+                - img:
+                  - group "Edge from file:98 to file:75" [ref=e1210] [cursor=pointer]:
+                    - generic [ref=e1213]: imports
+                - img:
+                  - group "Edge from file:98 to file:70" [ref=e1215] [cursor=pointer]:
+                    - generic [ref=e1218]: imports
+                - img:
+                  - group "Edge from file:98 to file:69" [ref=e1220] [cursor=pointer]:
+                    - generic [ref=e1223]: imports
+                - img:
+                  - group "Edge from file:98 to file:72" [ref=e1225] [cursor=pointer]:
+                    - generic [ref=e1228]: imports
+                - img:
+                  - group "Edge from file:98 to file:138" [ref=e1230] [cursor=pointer]:
+                    - generic [ref=e1233]: imports
+                - img:
+                  - group "Edge from file:98 to file:139" [ref=e1235] [cursor=pointer]:
+                    - generic [ref=e1238]: imports
+                - img:
+                  - group "Edge from file:98 to file:86" [ref=e1240] [cursor=pointer]:
+                    - generic [ref=e1243]: imports
+                - img:
+                  - group "Edge from file:98 to file:76" [ref=e1245] [cursor=pointer]:
+                    - generic [ref=e1248]: imports
+                - img:
+                  - group "Edge from file:19 to file:14" [ref=e1250] [cursor=pointer]:
+                    - generic [ref=e1251]: imports
+                - img:
+                  - group "Edge from file:28 to file:46" [ref=e1253] [cursor=pointer]:
+                    - generic [ref=e1254]: imports
+                - img:
+                  - group "Edge from file:28 to file:14" [ref=e1256] [cursor=pointer]:
+                    - generic [ref=e1257]: imports
+                - img:
+                  - group "Edge from file:28 to file:59" [ref=e1259] [cursor=pointer]:
+                    - generic [ref=e1260]: imports
+                - img:
+                  - group "Edge from file:28 to file:58" [ref=e1262] [cursor=pointer]:
+                    - generic [ref=e1263]: imports
+                - img:
+                  - group "Edge from file:28 to file:32" [ref=e1265] [cursor=pointer]:
+                    - generic [ref=e1268]: imports
+                - img:
+                  - group "Edge from file:28 to file:31" [ref=e1270] [cursor=pointer]:
+                    - generic [ref=e1273]: imports
+                - img:
+                  - group "Edge from file:28 to file:26" [ref=e1275] [cursor=pointer]:
+                    - generic [ref=e1278]: imports
+                - img:
+                  - group "Edge from file:28 to file:23" [ref=e1280] [cursor=pointer]:
+                    - generic [ref=e1281]: imports
+                - img:
+                  - group "Edge from file:28 to file:24" [ref=e1283] [cursor=pointer]:
+                    - generic [ref=e1284]: imports
+                - img:
+                  - group "Edge from file:28 to file:22" [ref=e1286] [cursor=pointer]:
+                    - generic [ref=e1289]: imports
+                - img:
+                  - group "Edge from file:100 to file:76" [ref=e1291] [cursor=pointer]:
+                    - generic [ref=e1292]: imports
+                - img:
+                  - group "Edge from file:100 to file:88" [ref=e1294] [cursor=pointer]:
+                    - generic [ref=e1295]: imports
+                - img:
+                  - group "Edge from file:107 to file:125" [ref=e1297] [cursor=pointer]:
+                    - generic [ref=e1300]: imports
+                - img:
+                  - group "Edge from file:107 to file:120" [ref=e1302] [cursor=pointer]:
+                    - generic [ref=e1303]: imports
+                - img:
+                  - group "Edge from file:107 to file:124" [ref=e1305] [cursor=pointer]:
+                    - generic [ref=e1306]: imports
+                - img:
+                  - group "Edge from file:107 to file:127" [ref=e1308] [cursor=pointer]:
+                    - generic [ref=e1309]: imports
+                - img:
+                  - group "Edge from file:113 to file:124" [ref=e1311] [cursor=pointer]:
+                    - generic [ref=e1314]: imports
+                - img:
+                  - group "Edge from file:182 to file:46" [ref=e1316] [cursor=pointer]:
+                    - generic [ref=e1317]: imports
+                - img:
+                  - group "Edge from file:182 to file:14" [ref=e1319] [cursor=pointer]:
+                    - generic [ref=e1320]: imports
+                - img:
+                  - group "Edge from file:182 to file:23" [ref=e1322] [cursor=pointer]:
+                    - generic [ref=e1323]: imports
+                - img:
+                  - group "Edge from file:182 to file:24" [ref=e1325] [cursor=pointer]:
+                    - generic [ref=e1326]: imports
+                - img:
+                  - group "Edge from file:42 to file:46" [ref=e1328] [cursor=pointer]:
+                    - generic [ref=e1329]: imports
+                - img:
+                  - group "Edge from file:42 to file:23" [ref=e1331] [cursor=pointer]:
+                    - generic [ref=e1332]: imports
+                - img:
+                  - group "Edge from file:42 to file:24" [ref=e1334] [cursor=pointer]:
+                    - generic [ref=e1335]: imports
+                - img:
+                  - group "Edge from file:42 to file:34" [ref=e1337] [cursor=pointer]:
+                    - generic [ref=e1338]: imports
+                - img:
+                  - group "Edge from file:42 to file:182" [ref=e1340] [cursor=pointer]:
+                    - generic [ref=e1341]: imports
+                - img:
+                  - group "Edge from file:34 to file:46" [ref=e1343] [cursor=pointer]:
+                    - generic [ref=e1344]: imports
+                - img:
+                  - group "Edge from file:53 to file:54" [ref=e1346] [cursor=pointer]:
+                    - generic [ref=e1347]: imports
+                - img:
+                  - group "Edge from file:53 to file:42" [ref=e1349] [cursor=pointer]:
+                    - generic [ref=e1350]: imports
+                - img:
+                  - group "Edge from file:53 to file:27" [ref=e1352] [cursor=pointer]:
+                    - generic [ref=e1353]: imports
+                - img:
+                  - group "Edge from file:53 to file:34" [ref=e1355] [cursor=pointer]:
+                    - generic [ref=e1356]: imports
+                - img:
+                  - group "Edge from file:53 to file:182" [ref=e1358] [cursor=pointer]:
+                    - generic [ref=e1359]: imports
+                - img:
+                  - group "Edge from file:41 to file:54" [ref=e1361] [cursor=pointer]:
+                    - generic [ref=e1364]: imports
+                - img:
+                  - group "Edge from file:44 to file:10" [ref=e1366] [cursor=pointer]:
+                    - generic [ref=e1367]: imports
+                - img:
+                  - group "Edge from file:44 to file:21" [ref=e1369] [cursor=pointer]:
+                    - generic [ref=e1370]: imports
+                - img:
+                  - group "Edge from file:44 to file:34" [ref=e1372] [cursor=pointer]:
+                    - generic [ref=e1373]: imports
+                - img:
+                  - group "Edge from file:44 to file:28" [ref=e1375] [cursor=pointer]:
+                    - generic [ref=e1376]: imports
+                - img:
+                  - group "Edge from file:44 to file:27" [ref=e1378] [cursor=pointer]:
+                    - generic [ref=e1379]: imports
+                - img:
+                  - group "Edge from file:44 to file:25" [ref=e1381] [cursor=pointer]:
+                    - generic [ref=e1382]: imports
+                - img:
+                  - group "Edge from file:44 to file:182" [ref=e1384] [cursor=pointer]:
+                    - generic [ref=e1385]: imports
+                - img:
+                  - group "Edge from file:44 to file:42" [ref=e1387] [cursor=pointer]:
+                    - generic [ref=e1388]: imports
+                - img:
+                  - group "Edge from file:44 to file:48" [ref=e1390] [cursor=pointer]:
+                    - generic [ref=e1391]: imports
+                - img:
+                  - group "Edge from file:159 to file:46" [ref=e1393] [cursor=pointer]:
+                    - generic [ref=e1396]: imports
+                - img:
+                  - group "Edge from file:159 to file:14" [ref=e1398] [cursor=pointer]:
+                    - generic [ref=e1401]: imports
+                - img:
+                  - group "Edge from file:159 to file:59" [ref=e1403] [cursor=pointer]:
+                    - generic [ref=e1406]: imports
+                - img:
+                  - group "Edge from file:159 to file:58" [ref=e1408] [cursor=pointer]:
+                    - generic [ref=e1411]: imports
+                - img:
+                  - group "Edge from file:159 to file:23" [ref=e1413] [cursor=pointer]:
+                    - generic [ref=e1416]: imports
+                - img:
+                  - group "Edge from file:159 to file:24" [ref=e1418] [cursor=pointer]:
+                    - generic [ref=e1421]: imports
+                - img:
+                  - group "Edge from file:159 to file:28" [ref=e1423] [cursor=pointer]:
+                    - generic [ref=e1426]: imports
+                - img:
+                  - group "Edge from file:159 to file:34" [ref=e1428] [cursor=pointer]:
+                    - generic [ref=e1431]: imports
+                - img:
+                  - group "Edge from file:159 to file:27" [ref=e1433] [cursor=pointer]:
+                    - generic [ref=e1436]: imports
+                - img:
+                  - group "Edge from file:159 to file:182" [ref=e1438] [cursor=pointer]:
+                    - generic [ref=e1441]: imports
+                - img:
+                  - group "Edge from file:159 to file:42" [ref=e1443] [cursor=pointer]:
+                    - generic [ref=e1446]: imports
+                - img:
+                  - group "Edge from file:138 to file:78" [ref=e1448] [cursor=pointer]:
+                    - generic [ref=e1449]: imports
+                - img:
+                  - group "Edge from file:138 to file:136" [ref=e1451] [cursor=pointer]:
+                    - generic [ref=e1452]: imports
+                - img:
+                  - group "Edge from file:138 to file:81" [ref=e1454] [cursor=pointer]:
+                    - generic [ref=e1455]: imports
+                - img:
+                  - group "Edge from file:138 to file:88" [ref=e1457] [cursor=pointer]:
+                    - generic [ref=e1458]: imports
+                - img:
+                  - group "Edge from file:79 to file:78" [ref=e1460] [cursor=pointer]:
+                    - generic [ref=e1463]: imports
+                - img:
+                  - group "Edge from file:79 to file:80" [ref=e1465] [cursor=pointer]:
+                    - generic [ref=e1468]: imports
+                - img:
+                  - group "Edge from file:79 to file:81" [ref=e1470] [cursor=pointer]:
+                    - generic [ref=e1473]: imports
+                - img:
+                  - group "Edge from file:79 to file:83" [ref=e1475] [cursor=pointer]:
+                    - generic [ref=e1478]: imports
+                - img:
+                  - group "Edge from file:79 to file:136" [ref=e1480] [cursor=pointer]:
+                    - generic [ref=e1483]: imports
+                - img:
+                  - group "Edge from file:79 to file:84" [ref=e1485] [cursor=pointer]:
+                    - generic [ref=e1488]: imports
+                - img:
+                  - group "Edge from file:79 to file:85" [ref=e1490] [cursor=pointer]:
+                    - generic [ref=e1493]: imports
+                - img:
+                  - group "Edge from file:79 to file:87" [ref=e1495] [cursor=pointer]:
+                    - generic [ref=e1498]: imports
+                - img:
+                  - group "Edge from file:79 to file:88" [ref=e1500] [cursor=pointer]:
+                    - generic [ref=e1503]: imports
+                - img:
+                  - group "Edge from file:140 to file:64" [ref=e1505] [cursor=pointer]:
+                    - generic [ref=e1508]: imports
+                - img:
+                  - group "Edge from file:140 to file:76" [ref=e1510] [cursor=pointer]:
+                    - generic [ref=e1511]: imports
+                - img:
+                  - group "Edge from file:140 to file:138" [ref=e1513] [cursor=pointer]:
+                    - generic [ref=e1514]: imports
+                - img:
+                  - group "Edge from file:143 to file:63" [ref=e1516] [cursor=pointer]:
+                    - generic [ref=e1519]: imports
+                - img:
+                  - group "Edge from file:143 to file:64" [ref=e1521] [cursor=pointer]:
+                    - generic [ref=e1522]: imports
+                - img:
+                  - group "Edge from file:143 to file:65" [ref=e1524] [cursor=pointer]:
+                    - generic [ref=e1525]: imports
+                - img:
+                  - group "Edge from file:143 to file:139" [ref=e1527] [cursor=pointer]:
+                    - generic [ref=e1530]: imports
+                - img:
+                  - group "Edge from file:218 to file:32" [ref=e1532] [cursor=pointer]:
+                    - generic [ref=e1535]: imports
+                - img:
+                  - group "Edge from file:218 to file:29" [ref=e1537] [cursor=pointer]:
+                    - generic [ref=e1540]: imports
+                - img:
+                  - group "Edge from file:21 to file:46" [ref=e1542] [cursor=pointer]:
+                    - generic [ref=e1543]: imports
+                - img:
+                  - group "Edge from file:21 to file:14" [ref=e1545] [cursor=pointer]:
+                    - generic [ref=e1546]: imports
+                - img:
+                  - group "Edge from file:57 to file:14" [ref=e1548] [cursor=pointer]:
+                    - generic [ref=e1549]: imports
+                - img:
+                  - group "Edge from file:57 to file:59" [ref=e1551] [cursor=pointer]:
+                    - generic [ref=e1552]: imports
+                - img:
+                  - group "Edge from file:57 to file:58" [ref=e1554] [cursor=pointer]:
+                    - generic [ref=e1555]: imports
+                - img:
+                  - group "Edge from file:35 to file:12" [ref=e1557] [cursor=pointer]:
+                    - generic [ref=e1560]: imports
+                - img:
+                  - group "Edge from file:35 to file:13" [ref=e1562] [cursor=pointer]:
+                    - generic [ref=e1565]: imports
+                - img:
+                  - group "Edge from file:35 to file:14" [ref=e1567] [cursor=pointer]:
+                    - generic [ref=e1570]: imports
+                - img:
+                  - group "Edge from file:35 to file:15" [ref=e1572] [cursor=pointer]:
+                    - generic [ref=e1575]: imports
+                - img:
+                  - group "Edge from file:35 to file:46" [ref=e1577] [cursor=pointer]:
+                    - generic [ref=e1580]: imports
+                - img:
+                  - group "Edge from file:35 to file:47" [ref=e1582] [cursor=pointer]:
+                    - generic [ref=e1585]: imports
+                - img:
+                  - group "Edge from file:35 to file:48" [ref=e1587] [cursor=pointer]:
+                    - generic [ref=e1590]: imports
+                - img:
+                  - group "Edge from file:35 to file:10" [ref=e1592] [cursor=pointer]:
+                    - generic [ref=e1595]: imports
+                - img:
+                  - group "Edge from file:35 to file:9" [ref=e1597] [cursor=pointer]:
+                    - generic [ref=e1600]: imports
+                - img:
+                  - group "Edge from file:35 to file:11" [ref=e1602] [cursor=pointer]:
+                    - generic [ref=e1605]: imports
+                - img:
+                  - group "Edge from file:35 to file:39" [ref=e1607] [cursor=pointer]:
+                    - generic [ref=e1610]: imports
+                - img:
+                  - group "Edge from file:35 to file:37" [ref=e1612] [cursor=pointer]:
+                    - generic [ref=e1615]: imports
+                - img:
+                  - group "Edge from file:35 to file:45" [ref=e1617] [cursor=pointer]:
+                    - generic [ref=e1620]: imports
+                - img:
+                  - group "Edge from file:35 to file:44" [ref=e1622] [cursor=pointer]:
+                    - generic [ref=e1625]: imports
+                - img:
+                  - group "Edge from file:35 to file:54" [ref=e1627] [cursor=pointer]:
+                    - generic [ref=e1630]: imports
+                - img:
+                  - group "Edge from file:35 to file:51" [ref=e1632] [cursor=pointer]:
+                    - generic [ref=e1635]: imports
+                - img:
+                  - group "Edge from file:35 to file:52" [ref=e1637] [cursor=pointer]:
+                    - generic [ref=e1640]: imports
+                - img:
+                  - group "Edge from file:35 to file:55" [ref=e1642] [cursor=pointer]:
+                    - generic [ref=e1645]: imports
+                - img:
+                  - group "Edge from file:35 to file:19" [ref=e1647] [cursor=pointer]:
+                    - generic [ref=e1650]: imports
+                - img:
+                  - group "Edge from file:35 to file:20" [ref=e1652] [cursor=pointer]:
+                    - generic [ref=e1655]: imports
+                - img:
+                  - group "Edge from file:35 to file:50" [ref=e1657] [cursor=pointer]:
+                    - generic [ref=e1660]: imports
+                - img:
+                  - group "Edge from file:35 to file:49" [ref=e1662] [cursor=pointer]:
+                    - generic [ref=e1665]: imports
+                - img:
+                  - group "Edge from file:35 to file:59" [ref=e1667] [cursor=pointer]:
+                    - generic [ref=e1670]: imports
+                - img:
+                  - group "Edge from file:35 to file:58" [ref=e1672] [cursor=pointer]:
+                    - generic [ref=e1675]: imports
+                - img:
+                  - group "Edge from file:35 to file:57" [ref=e1677] [cursor=pointer]:
+                    - generic [ref=e1680]: imports
+                - img:
+                  - group "Edge from file:35 to file:60" [ref=e1682] [cursor=pointer]:
+                    - generic [ref=e1685]: imports
+                - img:
+                  - group "Edge from file:35 to file:61" [ref=e1687] [cursor=pointer]:
+                    - generic [ref=e1690]: imports
+                - img:
+                  - group "Edge from file:35 to file:21" [ref=e1692] [cursor=pointer]:
+                    - generic [ref=e1695]: imports
+                - img:
+                  - group "Edge from file:35 to file:218" [ref=e1697] [cursor=pointer]:
+                    - generic [ref=e1700]: imports
+                - img:
+                  - group "Edge from file:35 to file:34" [ref=e1702] [cursor=pointer]:
+                    - generic [ref=e1705]: imports
+                - img:
+                  - group "Edge from file:35 to file:28" [ref=e1707] [cursor=pointer]:
+                    - generic [ref=e1710]: imports
+                - img:
+                  - group "Edge from file:35 to file:27" [ref=e1712] [cursor=pointer]:
+                    - generic [ref=e1715]: imports
+                - img:
+                  - group "Edge from file:35 to file:25" [ref=e1717] [cursor=pointer]:
+                    - generic [ref=e1720]: imports
+                - img:
+                  - group "Edge from file:35 to file:23" [ref=e1722] [cursor=pointer]:
+                    - generic [ref=e1725]: imports
+                - img:
+                  - group "Edge from file:35 to file:24" [ref=e1727] [cursor=pointer]:
+                    - generic [ref=e1730]: imports
+                - img:
+                  - group "Edge from file:35 to file:182" [ref=e1732] [cursor=pointer]:
+                    - generic [ref=e1735]: imports
+                - img:
+                  - group "Edge from file:35 to file:53" [ref=e1737] [cursor=pointer]:
+                    - generic [ref=e1740]: imports
+                - img:
+                  - group "Edge from file:35 to file:42" [ref=e1742] [cursor=pointer]:
+                    - generic [ref=e1745]: imports
+                - img:
+                  - group "Edge from file:39 to file:12" [ref=e1747] [cursor=pointer]:
+                    - generic [ref=e1748]: imports
+                - img:
+                  - group "Edge from file:39 to file:14" [ref=e1750] [cursor=pointer]:
+                    - generic [ref=e1751]: imports
+                - img:
+                  - group "Edge from file:39 to file:47" [ref=e1753] [cursor=pointer]:
+                    - generic [ref=e1754]: imports
+                - img:
+                  - group "Edge from file:39 to file:54" [ref=e1756] [cursor=pointer]:
+                    - generic [ref=e1757]: imports
+                - img:
+                  - group "Edge from file:39 to file:37" [ref=e1759] [cursor=pointer]:
+                    - generic [ref=e1760]: imports
+                - img:
+                  - group "Edge from file:39 to file:41" [ref=e1762] [cursor=pointer]:
+                    - generic [ref=e1765]: imports
+                - img:
+                  - group "Edge from file:225 to file:218" [ref=e1767] [cursor=pointer]:
+                    - generic [ref=e1770]: imports
+                - img:
+                  - group "Edge from file:27 to file:46" [ref=e1772] [cursor=pointer]:
+                    - generic [ref=e1773]: imports
+                - img:
+                  - group "Edge from file:141 to file:65" [ref=e1775] [cursor=pointer]:
+                    - generic [ref=e1776]: imports
+                - img:
+                  - group "Edge from file:141 to file:76" [ref=e1778] [cursor=pointer]:
+                    - generic [ref=e1781]: imports
+                - img:
+                  - group "Edge from file:141 to file:137" [ref=e1783] [cursor=pointer]:
+                    - generic [ref=e1786]: imports
+                - img:
+                  - group "Edge from file:141 to file:138" [ref=e1788] [cursor=pointer]:
+                    - generic [ref=e1791]: imports
+                - img:
+                  - group "Edge from file:141 to file:136" [ref=e1793] [cursor=pointer]:
+                    - generic [ref=e1796]: imports
+              - generic:
+                - group [ref=e1798]: incremental-indexer.ts
+                - group [ref=e1799]: git-service.ts
+                - group [ref=e1800]: file-service.ts
+                - group [ref=e1801]: conversations.ts
+                - group [ref=e1802]: lesson-store.ts
+                - group [ref=e1803]: git-ops.ts
+                - group [ref=e1804]: terminal-manager.ts
+                - group [ref=e1805]: vector-store.ts
+                - group [ref=e1806]: symbol-graph.ts
+                - group [ref=e1807]: embedder.ts
+                - group [ref=e1808]: retriever.ts
+                - group [ref=e1809]: orchestrator.ts
+                - group [ref=e1810]: server.ts
+                - group [ref=e1811]: hooks-engine.ts
+                - group [ref=e1812]: router.ts
+                - group [ref=e1813]: knowledge-query.ts
+                - group [ref=e1814]: watcher.ts
+                - group [ref=e1815]: registry.ts
+                - group [ref=e1816]: modularity-guard.ts
+                - group [ref=e1817]: event-hub.ts
+                - group [ref=e1818]: event-bus.ts
+                - group [ref=e1819]: timeline-store.ts
+                - group [ref=e1820]: feature-model.ts
+                - group [ref=e1821]: knowledge-tools.ts
+                - group [ref=e1822]: terminal-tools.ts
+                - group [ref=e1823]: agent-config.ts
+                - group [ref=e1824]: token.ts
+                - group [ref=e1825]: commit-message.ts
+                - group [ref=e1826]: auth-status.ts
+                - group [ref=e1827]: db.ts
+                - group [ref=e1828]: settings.ts
+                - group [ref=e1829]: git-tools.ts
+                - group [ref=e1830]: ignore.ts
+                - group [ref=e1831]: path-guard.ts
+                - group [ref=e1832]: session.ts
+                - group [ref=e1833]: settings.ts
+                - group [ref=e1834]: register-git-handlers.ts
+                - group [ref=e1835]: not-implemented.ts
+                - group [ref=e1836]: register-handlers.ts
+                - group [ref=e1837]: session-manager.ts
+                - group [ref=e1838]: register-terminal-handlers.ts
+                - group [ref=e1839]: fs-tools.ts
+                - group [ref=e1840]: register-fs-handlers.ts
+                - group [ref=e1841]: App.tsx
+                - group [ref=e1842]: fs.ts
+                - group [ref=e1843]: git.ts
+                - group [ref=e1844]: hooks.ts
+                - group [ref=e1845]: knowledge.ts
+                - group [ref=e1846]: task.ts
+                - group [ref=e1847]: terminal.ts
+                - group [ref=e1848]: validation.ts
+                - group [ref=e1849]: envelope.ts
+                - group [ref=e1850]: knowledge.ts
+                - group [ref=e1851]: git.ts
+                - group [ref=e1852]: events.ts
+                - group [ref=e1853]: conversation.ts
+                - group [ref=e1854]: command-catalog.ts
+                - group [ref=e1855]: resolver.ts
+                - group [ref=e1856]: ai-drafts.ts
+                - group [ref=e1857]: parser-pool.ts
+                - group [ref=e1858]: fs.ts
+                - group [ref=e1859]: hooks.ts
+                - group [ref=e1860]: validation.ts
+                - group [ref=e1861]: connection.ts
+                - group [ref=e1862]: extracted.ts
+                - group [ref=e1863]: chunker.ts
+                - group [ref=e1864]: sdk-tools.ts
+                - group [ref=e1865]: diff.ts
+                - group [ref=e1866]: languages.ts
+                - group [ref=e1867]: event-dispatcher.ts
+                - group [ref=e1868]: AppShell.tsx
+                - group [ref=e1869]: terminal.ts
+                - group [ref=e1870]: bridge-client.ts
+                - group [ref=e1871]: extractor.ts
+                - group [ref=e1872]: GitPanel.tsx
+                - group [ref=e1873]: terminal-registry.ts
+                - group [ref=e1874]: ChatPanel.tsx
+                - group [ref=e1875]: RightDock.tsx
+                - group [ref=e1876]: sessions.store.ts
+                - group [ref=e1877]: plan.ts
+                - group [ref=e1878]: useSessionsViewModel.ts
+                - group [ref=e1879]: theme.store.ts
+                - group [ref=e1880]: knowledge.store.ts
+                - group [ref=e1881]: parser.ts
+                - group [ref=e1882]: FileTreePanel.tsx
+                - group [ref=e1883]: SessionListPanel.tsx
+                - group [ref=e1884]: KnowledgePanel.tsx
+                - group [ref=e1885]: git.store.ts
+                - group [ref=e1886]: workspace.store.ts
+                - group [ref=e1887]: ActivityBar.tsx
+                - group [ref=e1888]: HeaderBar.tsx
+                - group [ref=e1889]: useEditorViewModel.ts
+                - group [ref=e1890]: useGitViewModel.ts
+                - group [ref=e1891]: connection.store.ts
+                - group [ref=e1892]: terminal.store.ts
+                - group [ref=e1893]: timeline.store.ts
+                - group [ref=e1894]: MonitorPanel.tsx
+                - group [ref=e1895]: ConnectPanel.tsx
+                - group [ref=e1896]: PlaceholderPanel.tsx
+                - group [ref=e1897]: StatusBar.tsx
+                - group [ref=e1898]: useConnectionViewModel.ts
+                - group [ref=e1899]: useFileExplorerViewModel.ts
+                - group [ref=e1900]: useTerminalViewModel.ts
+                - group [ref=e1901]: useTimelineViewModel.ts
+                - group [ref=e1902]: cn.ts
+                - group [ref=e1903]: useKnowledgeViewModel.ts
+                - group [ref=e1904]: useRagInspectorViewModel.ts
+                - group [ref=e1905]: GitFlowModal.tsx
+                - group [ref=e1906]: TimelinePanel.tsx
+                - group [ref=e1907]: useGitFlowViewModel.ts
+                - group [ref=e1908]: select.tsx
+                - group [ref=e1909]: index.ts
+                - group [ref=e1910]: GraphPane.tsx
+                - group [ref=e1911]: button.tsx
+                - group [ref=e1912]: input.tsx
+                - group [ref=e1913]: textarea.tsx
+                - group [ref=e1914]: TerminalPanel.tsx
+                - group [ref=e1915]: RagInspectorPane.tsx
+                - group [ref=e1916]: dev.mjs
+                - group [ref=e1917]: bridge-smoke.ts
+                - group [ref=e1918]: index.ts
+                - group [ref=e1919]: paths.ts
+                - group [ref=e1920]: result.ts
+                - group [ref=e1921]: runners.ts
+                - group [ref=e1922]: phase2-smoke.ts
+                - group [ref=e1923]: pipeline-executor.ts
+                - group [ref=e1924]: git-flow-smoke.ts
+                - group [ref=e1925]: parallel-smoke.ts
+                - group [ref=e1926]: modularity-smoke.ts
+                - group [ref=e1927]: commit-msg-smoke.ts
+                - group [ref=e1928]: git-smoke.ts
+                - group [ref=e1929]: native-smoke.ts
+                - group [ref=e1930]: main.ts
+                - group [ref=e1931]: vite.config.ts
+                - group [ref=e1932]: version.ts
+                - group [ref=e1933]: debounce.ts
+                - group [ref=e1934]: ids.ts
+                - group [ref=e1935]: knowledge-smoke.ts
+                - group [ref=e1936]: main.tsx
+                - group [ref=e1937]: index.ts
+                - group [ref=e1938]: index.ts
+                - group [ref=e1939]: git-flow.store.ts
+                - group [ref=e1940]: badge.tsx
+                - group [ref=e1941]: graph-layout.ts
+          - generic "Control Panel" [ref=e1942]:
+            - button "Zoom In" [ref=e1943] [cursor=pointer]
+            - button "Zoom Out" [ref=e1946] [cursor=pointer]
+            - button "Fit View" [ref=e1949] [cursor=pointer]
+  - generic [ref=e144]:
+    - generic [ref=e145]: Connected
+    - generic [ref=e152]: agent idle
+    - generic [ref=e154]: C:\Users\akrizu\atelier

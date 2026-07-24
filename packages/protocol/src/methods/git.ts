@@ -88,7 +88,7 @@ export const gitMethods = {
     }),
     result: z.object({ result: GitOpResult }),
   },
-  // Flags are validated server-side against an allowlist (e.g. --no-verify).
+  // Free-form flags (e.g. --no-verify); shape-validated server-side.
   "git.pushRun": {
     params: z.object({ flags: z.array(z.string()) }),
     result: z.object({ result: GitOpResult }),

@@ -14,4 +14,9 @@ export const hooksMethods = {
     params: z.object({ id: z.string() }),
     result: z.object({}),
   },
+  /** Answers a parked database operation. ok=false: already resolved. */
+  "hooks.resolveApproval": {
+    params: z.object({ id: z.string(), approved: z.boolean() }),
+    result: z.object({ ok: z.boolean() }),
+  },
 } as const;

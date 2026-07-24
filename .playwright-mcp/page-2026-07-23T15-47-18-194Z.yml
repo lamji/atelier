@@ -1,0 +1,50 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: A
+      - generic [ref=e8]:
+        - paragraph [ref=e9]: Atelier
+        - paragraph [ref=e10]: agentic engineering
+    - navigation [ref=e11]:
+      - button "Chat" [ref=e12]
+      - button "Editor" [ref=e17]
+      - button "Diffs" [ref=e24]
+      - button "Terminal" [ref=e28]
+      - button "RAG" [ref=e33]
+      - button "Activity" [ref=e42]
+  - generic [ref=e46]:
+    - generic [ref=e48]:
+      - button "Agents" [ref=e49]
+      - button "Explorer" [ref=e54]
+      - button "Git" [ref=e59]
+      - button "Knowledge" [ref=e64]
+      - button "Hooks" [ref=e70]
+      - button "Monitor" [ref=e75]
+      - button "Settings" [ref=e78]
+      - button "Switch to dark mode" [ref=e82]
+    - generic [ref=e85]:
+      - generic [ref=e89]:
+        - generic [ref=e90]: Agents
+        - button "New" [ref=e95]
+      - separator [ref=e98]
+      - generic [ref=e104]:
+        - generic [ref=e105]: No session
+        - generic [ref=e120]:
+          - paragraph [ref=e121]: Connecting to local agent…
+          - paragraph [ref=e122]: Make sure the agent process is running.
+        - generic [ref=e126]:
+          - generic [ref=e127]:
+            - textbox "Describe a task for this agent…" [disabled] [ref=e128]
+            - button "Send (Enter)" [disabled] [ref=e129]
+          - generic [ref=e132]:
+            - button "Select a file in the explorer to attach it" [disabled] [ref=e133]
+            - 'button "Model: default" [ref=e137] [cursor=pointer]'
+            - 'button "Reasoning: default" [ref=e142] [cursor=pointer]'
+            - generic [ref=e146] [cursor=pointer]:
+              - checkbox "Plan mode" [ref=e147]
+              - text: Plan mode
+            - generic [ref=e151]: Enter ↵ · Shift+Enter newline
+  - generic [ref=e153]:
+    - generic [ref=e154]: Connected
+    - generic [ref=e161]: agent idle
+    - generic [ref=e163]: C:\Users\akrizu\atelier

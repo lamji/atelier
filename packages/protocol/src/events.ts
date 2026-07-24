@@ -1,8 +1,13 @@
 import { z } from "zod";
 import { Plan, PlanStepStatus } from "./models/plan.js";
 import { Diff } from "./models/diff.js";
-import { Feature, GraphNode, RetrievalResult } from "./models/knowledge.js";
+import { GitFlowRequest } from "./models/git.js";
+import { DbApprovalRequest, DbApprovalResolved } from "./models/hooks.js";
+import { UsageSnapshot } from "./models/usage.js";
+import { EditImpact, ImpactRadius } from "./models/impact.js";
+import { Feature, GraphNode, Lesson, RetrievalResult } from "./models/knowledge.js";
 import { ValidationKind, ValidationResult } from "./models/validation.js";
+import { ProjectInfo } from "./methods/projects.js";
 
 export const PipelineStage = z.enum([
   "understand",
@@ -13,6 +18,7 @@ export const PipelineStage = z.enum([
   "execute",
   "validate",
   "knowledge",
+  "review",
   "summary",
 ]);
 export type PipelineStage = z.infer<typeof PipelineStage>;
@@ -26,6 +32,7 @@ export const PIPELINE_STAGES: PipelineStage[] = [
   "execute",
   "validate",
   "knowledge",
+  "review",
   "summary",
 ];
 
@@ -56,6 +63,8 @@ export const eventPayloads = {
     status: AgentStatus,
     detail: z.string().optional(),
   }),
+  /** Plan rate-limit usage, pushed whenever it changes. */
+  "usage.updated": UsageSnapshot,
 
   // pipeline
   "pipeline.stage.started": z.object({
@@ -79,6 +88,28 @@ export const eventPayloads = {
     affectedFiles: z.array(z.string()),
     affectedSymbols: z.array(z.string()),
     riskNotes: z.array(z.string()).default([]),
+    /** Same-unit files (template/class/spec) that no import edge links. */
+    companionFiles: z.array(z.string()).default([]),
+  }),
+  /** Pre-edit blast radius: reach, flows, tests, and regression level. */
+  "impact.radius": ImpactRadius,
+  /** Symbol-level impact at a specific edit site (who uses this line). */
+  "edit.impact": EditImpact,
+  /** Post-edit consistency sweep: what the self-review was given. */
+  "review.checked": z.object({
+    changedFiles: z.array(z.string()),
+    /** Untouched files whose code closely resembles a change. */
+    similar: z
+      .array(
+        z.object({
+          path: z.string(),
+          symbol: z.string().optional(),
+          score: z.number(),
+          resembles: z.string(),
+        })
+      )
+      .default([]),
+    companionFiles: z.array(z.string()).default([]),
   }),
   "plan.created": Plan,
   "plan.step.updated": z.object({
@@ -101,6 +132,9 @@ export const eventPayloads = {
     name: z.string(),
     reason: z.string(),
   }),
+  /** A database operation is parked until the user answers in the UI. */
+  "db.approval.requested": DbApprovalRequest,
+  "db.approval.resolved": DbApprovalResolved,
 
   // tools
   "tool.started": z.object({
@@ -143,6 +177,8 @@ export const eventPayloads = {
     isClean: z.boolean(),
     changedFiles: z.number(),
   }),
+  /** The agent tried to commit/push/open a PR — the user must confirm. */
+  "git.flow.requested": GitFlowRequest,
 
   // validation
   "validation.started": z.object({ kind: ValidationKind }),
@@ -162,6 +198,19 @@ export const eventPayloads = {
     embeddingsDelta: z.number(),
   }),
   "knowledge.feature.updated": z.object({ feature: Feature }),
+  /** Progress of a route→feature scan. */
+  "knowledge.features.scan": z.object({
+    phase: z.enum(["discover", "summarize", "done"]),
+    done: z.number(),
+    total: z.number(),
+    /** The route currently being summarized. */
+    current: z.string().optional(),
+  }),
+  "knowledge.lesson.saved": z.object({
+    lesson: Lesson,
+    /** true when the save merged into an existing similar lesson. */
+    merged: z.boolean().default(false),
+  }),
 
   // task lifecycle
   "task.started": z.object({ conversationId: z.string(), prompt: z.string() }),
@@ -171,6 +220,10 @@ export const eventPayloads = {
   }),
   "task.cancelled": z.object({ conversationId: z.string() }),
   "task.error": z.object({ conversationId: z.string(), message: z.string() }),
+
+  // supervisor / projects
+  /** A project's agent changed lifecycle state (started, stopped, crashed). */
+  "project.status": z.object({ project: ProjectInfo }),
   "summary.created": z.object({
     text: z.string(),
     changedFiles: z.array(z.string()).default([]),

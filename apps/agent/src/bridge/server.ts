@@ -1,3 +1,4 @@
+import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import { ClientFrame, CLOSE_UNAUTHORIZED } from "@atelier/protocol";
@@ -6,36 +7,48 @@ import type { AgentConfig } from "../config/agent-config.js";
 import type { BridgeInfo } from "../config/token.js";
 import { Connection } from "./connection.js";
 import type { EventHub } from "./event-hub.js";
+import type { WebHost } from "./web-host.js";
 import { Router, RpcError, type HandlerContext } from "./router.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5000;
 
 export class BridgeServer {
   private wss: WebSocketServer | null = null;
+  private http: http.Server | null = null;
 
   constructor(
     private config: AgentConfig,
     private info: BridgeInfo,
     private router: Router,
     private hub: EventHub,
-    private log: Logger
+    private log: Logger,
+    private webHost: WebHost | null = null
   ) {}
 
   start(): void {
-    this.wss = new WebSocketServer({
-      host: this.config.host,
-      port: this.config.port,
+    // One HTTP server carries both the WS bridge and (packaged mode) the
+    // static web UI, so the whole app lives on a single port.
+    this.http = http.createServer((req, res) => {
+      if (this.webHost) {
+        this.webHost.handle(req, res);
+      } else {
+        res.writeHead(426).end("upgrade required");
+      }
     });
+    this.wss = new WebSocketServer({ server: this.http });
     this.wss.on("connection", (ws, req) => this.onConnection(ws, req));
-    this.wss.on("listening", () => {
+    this.http.listen(this.config.port, this.config.host, () => {
+      const scheme = this.webHost ? "http" : "ws";
       this.log.info(
-        `bridge listening on ws://${this.config.host}:${this.config.port}`
+        `bridge listening on ${scheme}://${this.config.host}:${this.config.port}` +
+          (this.webHost ? " (serving web UI)" : "")
       );
     });
   }
 
   stop(): void {
     this.wss?.close();
+    this.http?.close();
   }
 
   private originAllowed(req: IncomingMessage): boolean {

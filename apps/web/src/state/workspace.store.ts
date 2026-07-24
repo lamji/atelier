@@ -1,7 +1,14 @@
 import { create } from "zustand";
 import type { Diff, FileTreeNode } from "@atelier/protocol";
 
-export type RightTab = "chat" | "editor" | "diffs" | "terminal" | "activity";
+export type RightTab =
+  | "chat"
+  | "editor"
+  | "diffs"
+  | "terminal"
+  | "activity"
+  | "graph"
+  | "rag";
 
 interface WorkspaceStore {
   tree: FileTreeNode | null;

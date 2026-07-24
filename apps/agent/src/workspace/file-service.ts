@@ -22,8 +22,17 @@ export interface WriteOptions {
 /** Callback so the watcher can label agent-originated changes. */
 export type AgentWriteNotifier = (relPath: string) => void;
 
+/** Pre-write gate (hooks): throw to refuse the write before it applies. */
+export type WriteGuard = (
+  relPath: string,
+  nextContent: string,
+  prevContent: string,
+  taskId?: string
+) => Promise<void>;
+
 export class FileService {
   private notifyAgentWrite: AgentWriteNotifier = () => {};
+  private writeGuard: WriteGuard = async () => {};
 
   constructor(
     private guard: PathGuard,
@@ -33,6 +42,10 @@ export class FileService {
 
   onAgentWrite(notifier: AgentWriteNotifier): void {
     this.notifyAgentWrite = notifier;
+  }
+
+  setWriteGuard(guard: WriteGuard): void {
+    this.writeGuard = guard;
   }
 
   async tree(relPath = "", depth = Infinity): Promise<FileTreeNode> {
@@ -89,6 +102,39 @@ export class FileService {
       }
     }
     return nodes;
+  }
+
+  /**
+   * Flat list of every non-ignored file path (workspace-relative), for
+   * the composer's "@" mention picker. Capped so a huge repo can't flood
+   * the wire — the client fuzzy-filters what it gets.
+   */
+  async allFiles(limit = 8000): Promise<string[]> {
+    const out: string[] = [];
+    await this.collectFiles(this.guard.toAbsolute("."), out, limit);
+    return out;
+  }
+
+  private async collectFiles(
+    absDir: string,
+    out: string[],
+    limit: number
+  ): Promise<void> {
+    if (out.length >= limit) return;
+    let entries;
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= limit) return;
+      const abs = path.join(absDir, entry.name);
+      const isDir = entry.isDirectory();
+      if (this.ig.ignoresAbsolute(abs, isDir)) continue;
+      if (isDir) await this.collectFiles(abs, out, limit);
+      else if (entry.isFile()) out.push(this.guard.toRelative(abs));
+    }
   }
 
   async list(relPath: string): Promise<FileEntry[]> {
@@ -191,6 +237,9 @@ export class FileService {
     after: string,
     opts: WriteOptions
   ): Promise<Diff> {
+    // Hooks gate every write path (model tools and UI RPCs alike) before
+    // any diff is created or byte hits disk.
+    await this.writeGuard(wirePath, after, before, opts.taskId);
     const diff: Diff = {
       id: newId("diff"),
       taskId: opts.taskId,

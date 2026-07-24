@@ -15,18 +15,39 @@ export interface TerminalPanelProps {
 }
 
 export function TerminalPanel(props: TerminalPanelProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const { activeTermId, onMount, onRefit } = props;
+  const { sessions, activeTermId, onMount, onRefit } = props;
+  // One persistent DOM container per terminal, kept mounted for the
+  // terminal's whole life. Switching tabs only toggles visibility, so
+  // scrollback and content survive; a theme toggle re-renders without
+  // ever wiping or re-opening any terminal.
+  const containers = useRef<Map<string, HTMLDivElement>>(new Map());
+  const mounted = useRef<Set<string>>(new Set());
 
+  // Mount each terminal once, into its own container.
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el || !activeTermId) return;
-    el.innerHTML = "";
-    onMount(activeTermId, el);
+    for (const session of sessions) {
+      const el = containers.current.get(session.id);
+      if (el && !mounted.current.has(session.id)) {
+        mounted.current.add(session.id);
+        onMount(session.id, el);
+      }
+    }
+    // Forget terminals that no longer exist so a reused id remounts cleanly.
+    for (const id of [...mounted.current]) {
+      if (!sessions.some((s) => s.id === id)) mounted.current.delete(id);
+    }
+  }, [sessions, onMount]);
+
+  // Refit the active terminal when it becomes visible / the panel resizes.
+  useEffect(() => {
+    if (!activeTermId) return;
+    const el = containers.current.get(activeTermId);
+    if (!el) return;
+    onRefit(activeTermId);
     const observer = new ResizeObserver(() => onRefit(activeTermId));
     observer.observe(el);
     return () => observer.disconnect();
-  }, [activeTermId, onMount, onRefit]);
+  }, [activeTermId, onRefit]);
 
   return (
     <div className="flex h-full flex-col">
@@ -63,8 +84,22 @@ export function TerminalPanel(props: TerminalPanelProps) {
           <Plus className="h-3.5 w-3.5" />
         </motion.button>
       </div>
-      {props.activeTermId ? (
-        <div ref={containerRef} className="min-h-0 flex-1 px-2 pb-2 pt-1" />
+      {sessions.length > 0 ? (
+        <div className="relative min-h-0 flex-1">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              ref={(el) => {
+                if (el) containers.current.set(session.id, el);
+                else containers.current.delete(session.id);
+              }}
+              className={cn(
+                "absolute inset-0 px-2 pb-2 pt-1",
+                session.id !== activeTermId && "hidden"
+              )}
+            />
+          ))}
+        </div>
       ) : (
         <button
           onClick={props.onCreate}

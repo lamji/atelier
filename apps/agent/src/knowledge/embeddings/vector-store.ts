@@ -1,4 +1,7 @@
+import { createRequire } from "node:module";
 import type { Db } from "../../storage/db.js";
+
+const require = createRequire(import.meta.url);
 
 export interface VectorHit {
   chunkId: number;
@@ -31,10 +34,8 @@ export class VectorStore {
 
   private tryLoadSqliteVec(): boolean {
     try {
-      // Dynamic require keeps startup working when the native ext is broken.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const requireFn = eval("require") as NodeJS.Require;
-      const sqliteVec = requireFn("sqlite-vec") as {
+      // Dynamic require keeps startup working when the ext is missing.
+      const sqliteVec = require("sqlite-vec") as {
         load: (db: unknown) => void;
       };
       sqliteVec.load(this.db);
@@ -68,7 +69,8 @@ export class VectorStore {
     );
     this.db.transaction(() => {
       del.run();
-      for (const row of rows) ins.run(row.chunk_id, row.embedding);
+      // vec0 requires the INTEGER PRIMARY KEY bound as BigInt.
+      for (const row of rows) ins.run(BigInt(row.chunk_id), row.embedding);
     })();
   }
 
@@ -86,10 +88,12 @@ export class VectorStore {
       )
       .run(chunkId, blob, this.dims);
     if (this.vecAvailable) {
-      this.db.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?").run(chunkId);
+      // vec0 requires the INTEGER PRIMARY KEY bound as BigInt.
+      const key = BigInt(chunkId);
+      this.db.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?").run(key);
       this.db
         .prepare("INSERT INTO vec_chunks(chunk_id, embedding) VALUES (?, ?)")
-        .run(chunkId, blob);
+        .run(key, blob);
     }
     if (this.cacheLoaded) {
       this.cache.set(chunkId, Float32Array.from(embedding));
@@ -102,7 +106,7 @@ export class VectorStore {
     if (this.vecAvailable) {
       const del = this.db.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?");
       this.db.transaction(() => {
-        for (const id of chunkIds) del.run(id);
+        for (const id of chunkIds) del.run(BigInt(id));
       })();
     }
     for (const id of chunkIds) this.cache.delete(id);
@@ -126,8 +130,9 @@ export class VectorStore {
       )
       .all(blob, k) as Array<{ chunk_id: number; distance: number }>;
     // vec0 distance is L2 on normalized vectors: cos = 1 - d^2 / 2.
+    // chunk_id may return as BigInt; normalize to number for callers.
     return rows.map((r) => ({
-      chunkId: r.chunk_id,
+      chunkId: Number(r.chunk_id),
       score: 1 - (r.distance * r.distance) / 2,
     }));
   }

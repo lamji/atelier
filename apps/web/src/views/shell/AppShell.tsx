@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { HeaderBar } from "./HeaderBar";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
@@ -9,8 +9,13 @@ import { ConnectPanel } from "./ConnectPanel";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
+import { GitFlowHost } from "@/views/git/GitFlowHost";
 import { SessionListPanel } from "@/views/sessions/SessionListPanel";
 import { MonitorPanel } from "@/views/monitor/MonitorPanel";
+import { KnowledgePanel } from "@/views/knowledge/KnowledgePanel";
+import { IndexingWelcome } from "@/views/knowledge/IndexingWelcome";
+import { HooksPanel } from "@/views/hooks/HooksPanel";
+import { DbApprovalModal } from "@/views/hooks/DbApprovalModal";
 import { RightDock } from "@/views/right/RightDock";
 import { useTerminalViewModel } from "@/hooks/useTerminalViewModel";
 import { useSessionsViewModel } from "@/hooks/useSessionsViewModel";
@@ -19,15 +24,23 @@ import { useTimelineViewModel } from "@/hooks/useTimelineViewModel";
 import { useFileExplorerViewModel } from "@/hooks/useFileExplorerViewModel";
 import { useEditorViewModel } from "@/hooks/useEditorViewModel";
 import { useGitViewModel } from "@/hooks/useGitViewModel";
+import { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
+import { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
+import { useHooksViewModel } from "@/hooks/useHooksViewModel";
+import { useDbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
+import { useUsageViewModel } from "@/hooks/useUsageViewModel";
+import { bridge } from "@/services/bridge-client";
+import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
 import { cn } from "@/lib/cn";
 
 const SIDE_PANELS: Record<
-  Exclude<ActivityView, "agents" | "explorer" | "git" | "monitor">,
+  Exclude<
+    ActivityView,
+    "agents" | "explorer" | "git" | "monitor" | "knowledge" | "hooks"
+  >,
   { title: string; phase: string }
 > = {
-  knowledge: { title: "Knowledge Graph", phase: "Phase 5" },
-  hooks: { title: "Hook Configuration", phase: "Phase 6" },
   settings: { title: "Settings", phase: "Phase 8" },
 };
 
@@ -68,6 +81,28 @@ export function AppShell() {
   const editor = useEditorViewModel();
   const git = useGitViewModel();
   const terminal = useTerminalViewModel();
+  const knowledge = useKnowledgeViewModel();
+  const rag = useRagInspectorViewModel();
+  const hooksVm = useHooksViewModel();
+  const dbApproval = useDbApprovalViewModel();
+  const usage = useUsageViewModel();
+  const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
+
+  // Wildcard subscriptions do not replay, so seed the branch once on
+  // connect; git.state.changed keeps it live afterward.
+  useEffect(() => {
+    if (connection.state !== "connected") return;
+    void bridge
+      .rpc("git.status", {})
+      .then(({ status }) =>
+        useGitStore.getState().setLive({
+          branch: status.branch,
+          isClean: status.isClean,
+          changedFiles: status.files.length,
+        })
+      )
+      .catch(() => undefined);
+  }, [connection.state]);
 
   const needsManualConnect =
     connection.state === "disconnected" || connection.state === "unauthorized";
@@ -97,6 +132,10 @@ export function AppShell() {
         workingCount={sessions.workingCount}
         onSelect={sessions.selectSession}
       />
+    ) : activeView === "knowledge" ? (
+      <KnowledgePanel vm={knowledge} onOpenRag={() => editor.setRightTab("rag")} />
+    ) : activeView === "hooks" ? (
+      <HooksPanel vm={hooksVm} />
     ) : (
       <PlaceholderPanel
         title={SIDE_PANELS[activeView].title}
@@ -119,14 +158,20 @@ export function AppShell() {
       items={sessions.selected?.items ?? []}
       thinking={sessions.selected?.thinking ?? ""}
       actions={sessions.selected?.actions ?? []}
+      plan={sessions.selected?.plan ?? null}
+      stage={sessions.selected?.stage ?? null}
+      taskStartedAt={sessions.selected?.taskStartedAt ?? null}
+      cancelling={sessions.selected?.cancelling ?? false}
       input={sessions.input}
       busy={busy ?? false}
       connected={sessions.connected && sessions.selected !== null}
       error={sessions.error ?? sessions.selected?.lastError ?? null}
       model={sessions.model}
+      models={sessions.models}
       effort={sessions.effort}
       planMode={sessions.planMode}
       attachments={sessions.attachments}
+      images={sessions.images}
       attachCandidate={editor.selectedPath}
       onInputChange={sessions.setInput}
       onSend={() => void sessions.send()}
@@ -136,6 +181,10 @@ export function AppShell() {
       onPlanModeChange={sessions.setPlanMode}
       onAttach={sessions.addAttachment}
       onRemoveAttachment={sessions.removeAttachment}
+      onAddImages={sessions.addImages}
+      onRemoveImage={sessions.removeImage}
+      slashCommands={sessions.slashCommands}
+      filePaths={sessions.filePaths}
     />
   );
 
@@ -165,7 +214,18 @@ export function AppShell() {
           </Panel>
           <PanelResizeHandle className="w-2" />
           <Panel defaultSize={78} minSize={40}>
-            <Island delay={0.12} className={cn(busy && "glow-working")}>
+            <Island
+              delay={0.12}
+              className={cn("relative", busy && "glow-working")}
+            >
+              <AnimatePresence>
+                {knowledge.indexingActive && !knowledge.welcomeDismissed && (
+                  <IndexingWelcome
+                    vm={knowledge}
+                    workspaceRoot={connection.workspaceRoot}
+                  />
+                )}
+              </AnimatePresence>
               <RightDock
                 rightTab={editor.rightTab}
                 chatPane={chatPane}
@@ -186,17 +246,28 @@ export function AppShell() {
                 onMountTerm={terminal.mount}
                 onRefitTerm={terminal.refit}
                 timelineEntries={timeline.entries}
+                knowledgeVm={knowledge}
+                ragVm={rag}
+                appTheme={theme}
               />
             </Island>
           </Panel>
         </PanelGroup>
       </div>
+      {/* Shell-level: raised by the git panel or by the git-flow hook. */}
+      <GitFlowHost />
+      {/* Shell-level: the agent's DB command waits on this answer. */}
+      <DbApprovalModal vm={dbApproval} />
       <Island className="h-8 shrink-0" delay={0.2}>
         <StatusBar
           connection={connection.state}
           agentStatus={connection.agentStatus}
           agentStatusDetail={connection.agentStatusDetail}
           workspaceRoot={connection.workspaceRoot}
+          branch={branch}
+          usage={usage}
+          indexingActive={knowledge.indexingActive}
+          indexing={knowledge.indexing}
         />
       </Island>
     </div>

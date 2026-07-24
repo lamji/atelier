@@ -4,6 +4,7 @@ import {
   Feature,
   IndexStats,
   KnowledgeGraph,
+  Lesson,
   RetrievalResult,
 } from "../models/knowledge.js";
 
@@ -36,6 +37,15 @@ export const knowledgeMethods = {
   "knowledge.features.list": {
     params: z.object({}).optional(),
     result: z.object({ features: z.array(Feature) }),
+  },
+  /** Scan routes/endpoints and summarize each as a feature (background). */
+  "knowledge.features.scan": {
+    params: z.object({}).optional(),
+    result: z.object({ started: z.boolean(), routes: z.number() }),
+  },
+  "knowledge.lessons.list": {
+    params: z.object({ limit: z.number().optional() }).optional(),
+    result: z.object({ lessons: z.array(Lesson) }),
   },
   "knowledge.symbol": {
     params: z.object({ id: z.number() }),
