@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
-import type { ImageAttachment } from "@atelier/protocol";
+import type { Diff, ImageAttachment } from "@atelier/protocol";
 import { newId } from "@atelier/shared";
-import type { EventBus } from "../events/event-bus.js";
+import type { EventBus, PublishedEvent } from "../events/event-bus.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
 import { isAuthError } from "./auth-status.js";
 import {
@@ -51,6 +51,39 @@ export class Orchestrator {
     this.conversations = deps.conversations;
     this.planTracker = deps.planTracker;
     this.log = deps.log;
+    // Pins diffs and knowledge/impact logs into chat history so they
+    // survive a hydrate (session reload / reconnect), matching what the
+    // live transcript already shows while the task is running.
+    this.bus.subscribe((event) => this.onEvent(event));
+  }
+
+  private onEvent(event: PublishedEvent): void {
+    if (!isPinnedTopic(event.topic)) return;
+    const task = event.taskId ? this.running.get(event.taskId) : undefined;
+    if (!task) return;
+    if (event.topic === "diff.created") {
+      const diff = event.payload as Diff;
+      this.conversations.addMessage({
+        id: diff.id,
+        conversationId: task.conversationId,
+        taskId: event.taskId,
+        role: "diff",
+        text: diff.path,
+        createdAt: Date.now(),
+        diff: { path: diff.path, before: diff.before, after: diff.after },
+      });
+      return;
+    }
+    const payload = event.payload as Record<string, unknown>;
+    this.conversations.addMessage({
+      id: `${event.topic}:${event.seq}`,
+      conversationId: task.conversationId,
+      taskId: event.taskId,
+      role: "log",
+      text: logSummary(event.topic, payload),
+      createdAt: Date.now(),
+      logTopic: event.topic,
+    });
   }
 
   startTask(
@@ -234,5 +267,40 @@ export class Orchestrator {
     this.bus.publish("agent.status", {
       status: this.running.size > 0 ? "working" : "idle",
     });
+  }
+}
+
+const PINNED_TOPICS = new Set([
+  "diff.created",
+  "knowledge.retrieved",
+  "impact.radius",
+  "edit.impact",
+]);
+
+function isPinnedTopic(topic: string): boolean {
+  return PINNED_TOPICS.has(topic);
+}
+
+/**
+ * Summary line for a knowledge/impact log pinned into chat history. Mirrors
+ * apps/web/src/services/event-dispatcher.ts#logSummary so the persisted
+ * text matches what was shown live.
+ */
+function logSummary(topic: string, payload: Record<string, unknown>): string {
+  switch (topic) {
+    case "knowledge.retrieved": {
+      const chunks = Array.isArray(payload.chunks) ? payload.chunks.length : 0;
+      return `Retrieved ${chunks} chunk(s) · ${String(payload.strategy ?? "")}`;
+    }
+    case "impact.radius":
+      return String(payload.summary ?? "Impact radius computed");
+    case "edit.impact": {
+      const symbol = String(payload.symbol ?? "");
+      const reach = String(payload.reach ?? "");
+      const summary = String(payload.summary ?? "").slice(0, 90);
+      return `${symbol} · ${reach} · ${summary}`;
+    }
+    default:
+      return "";
   }
 }

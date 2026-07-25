@@ -8,7 +8,30 @@ export interface AgentAction {
   id: string;
   label: string;
   status: "running" | "done" | "failed";
+  /** Feed ordering, shared with LiveDiff so diffs slot in chronologically. */
+  seq: number;
 }
+
+/**
+ * A file edit shown inline in the live activity feed, right under the
+ * "Editing <path>" action that produced it. Ephemeral: it lives here only
+ * while the task runs, then settles into the transcript (see taskEnded).
+ */
+export interface LiveDiff {
+  id: string;
+  seq: number;
+  path: string;
+  before: string;
+  after: string;
+}
+
+/**
+ * Monotonic feed clock. Actions and live diffs both stamp themselves from
+ * it so the feed can interleave them by insertion order across the two
+ * arrays. Module-level (not store state) — it's write-only ordering, so
+ * React never needs to see it.
+ */
+let feedSeq = 0;
 
 export interface SessionVm {
   conversation: Conversation;
@@ -19,6 +42,8 @@ export interface SessionVm {
   lastError: string | null;
   /** Live feed of what the agent is doing right now. */
   actions: AgentAction[];
+  /** Diffs from the running task, shown inline in the live feed. */
+  liveDiffs: LiveDiff[];
   /** Current task plan (pipeline stage 4) with live step statuses. */
   plan: Plan | null;
   /** Pipeline stage the running task is in — the live progress line. */
@@ -50,6 +75,21 @@ interface SessionsStore {
     id: string,
     text: string,
     images?: string[]
+  ) => void;
+  /** Pins a knowledge/impact log line into the chat transcript. */
+  pinLog: (
+    conversationId: string,
+    id: string,
+    topic: string,
+    text: string
+  ) => void;
+  /** Pins an agent file edit into the chat transcript as an inline diff. */
+  pinDiff: (
+    conversationId: string,
+    id: string,
+    path: string,
+    before: string,
+    after: string
   ) => void;
   appendAssistantDelta: (
     conversationId: string,
@@ -118,6 +158,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
             status: "idle",
             lastError: null,
             actions: [],
+            liveDiffs: [],
             plan: null,
             stage: null,
             taskStartedAt: null,
@@ -143,6 +184,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           status: "idle",
           lastError: null,
           actions: [],
+          liveDiffs: [],
           plan: null,
           stage: null,
           taskStartedAt: null,
@@ -179,20 +221,58 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
     })),
 
+  pinLog: (conversationId, id, topic, text) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, (session) => ({
+        items: [...session.items, { id, role: "log", text, logTopic: topic }],
+      })),
+    })),
+
+  pinDiff: (conversationId, id, path, before, after) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, (session) => {
+        const diff = { path, before, after };
+        // Persist into the transcript for the permanent record (order matters:
+        // the diff belongs between the edit and any later assistant message).
+        const items = [
+          ...session.items,
+          { id, role: "diff" as const, text: path, diff },
+        ];
+        // While the task runs the transcript copy is hidden (ChatPanel skips
+        // ids in liveDiffs) and this live copy renders inside the activity
+        // feed, right under the "Editing <path>" action that produced it —
+        // so the diff shows up where the work is happening, not detached at
+        // the top. On task end liveDiffs clears and the transcript takes over.
+        const liveDiffs = [
+          ...session.liveDiffs,
+          { id, seq: feedSeq++, path, before, after },
+        ];
+        return { items, liveDiffs };
+      }),
+    })),
+
   appendAssistantDelta: (conversationId, messageId, delta) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => {
-        const existing = session.items.find((i) => i.id === messageId);
-        if (existing) {
-          return {
-            items: session.items.map((i) =>
-              i.id === messageId ? { ...i, text: i.text + delta } : i
-            ),
-          };
+        const items = session.items;
+        const lastIndex = items.length - 1;
+        // Common streaming case: the token belongs to the last item, so we
+        // can skip the scan entirely.
+        if (lastIndex >= 0 && items[lastIndex].id === messageId) {
+          const last = items[lastIndex];
+          const updated = items.slice();
+          updated[lastIndex] = { ...last, text: last.text + delta };
+          return { items: updated };
+        }
+        const index = items.findIndex((i) => i.id === messageId);
+        if (index !== -1) {
+          const updated = items.slice();
+          updated[index] = { ...items[index], text: items[index].text + delta };
+          return { items: updated };
         }
         return {
           items: [
-            ...session.items,
+            ...items,
             { id: messageId, role: "assistant", text: delta, streaming: true },
           ],
         };
@@ -222,7 +302,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   actionStarted: (conversationId, id, label) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
-        actions: [...session.actions.slice(-19), { id, label, status: "running" }],
+        actions: [
+          ...session.actions.slice(-19),
+          { id, label, status: "running", seq: feedSeq++ },
+        ],
       })),
     })),
 
@@ -253,6 +336,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         status: "working",
         lastError: null,
         actions: [],
+        liveDiffs: [],
         plan: null,
         stage: null,
         taskStartedAt: Date.now(),
@@ -272,6 +356,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         stage: null,
         taskStartedAt: null,
         cancelling: false,
+        // Run over: drop the live copies so the (chronologically-placed)
+        // transcript diffs become the visible record again.
+        liveDiffs: [],
         status: outcome === "error" ? "error" : "idle",
         lastError: outcome === "error" ? (error ?? "task failed") : null,
       })),

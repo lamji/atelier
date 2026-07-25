@@ -51,7 +51,12 @@ export async function run(opts: RunOptions): Promise<void> {
   }
 }
 
-/** Spawn the supervisor detached so it outlives this CLI invocation. */
+/**
+ * Spawn the supervisor detached so it outlives this CLI invocation. On
+ * Windows this opens its own console window on purpose: it's the running
+ * project's terminal, and closing it stops the supervisor (and the agents
+ * it spawned, which share that console). Do NOT set windowsHide.
+ */
 function startSupervisor(
   entry: string,
   hubPort: number,
@@ -60,7 +65,6 @@ function startSupervisor(
   const child = spawn(process.execPath, [entry], {
     detached: true,
     stdio: "ignore",
-    windowsHide: true,
     env: {
       ...process.env,
       ATELIER_HUB_PORT: String(hubPort),

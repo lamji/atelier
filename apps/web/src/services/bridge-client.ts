@@ -71,6 +71,10 @@ export class BridgeClient {
   private statusHandlers = new Set<StatusHandler>();
   private reconnectAttempt = 0;
   private closedByUser = false;
+  /** Event frames queued for the next coalesced flush (see onFrame). */
+  private eventQueue: Array<{ handler: EventHandler; frame: EventFrame }> = [];
+  private flushHandle: number | null = null;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** Runtime endpoint override (set when switching projects). */
   private override: { url: string; token: string } | null = null;
   hello: { workspaceRoot: string; authStatus: string } | null = null;
@@ -155,8 +159,22 @@ export class BridgeClient {
       ws.close();
     }
     this.failAllPending();
+    this.clearEventQueue();
     this.reconnectAttempt = 0;
     this.emitStatus("disconnected");
+  }
+
+  /** Drops any queued event frames and cancels the pending flush. */
+  private clearEventQueue(): void {
+    this.eventQueue = [];
+    if (this.flushHandle !== null) {
+      cancelAnimationFrame(this.flushHandle);
+      this.flushHandle = null;
+    }
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
   }
 
   onStatus(handler: StatusHandler): () => void {
@@ -244,10 +262,39 @@ export class BridgeClient {
       for (const entry of this.subs.values()) {
         if (topicMatches(entry.topic, frame.topic)) {
           if (frame.seq > entry.lastSeq) entry.lastSeq = frame.seq;
-          entry.handler(frame);
+          this.eventQueue.push({ handler: entry.handler, frame });
         }
       }
+      this.scheduleFlush();
     }
+  }
+
+  /**
+   * Coalesces a burst of event frames into one flush per animation frame so
+   * React 18/19 auto-batching merges the resulting store updates into a
+   * single render. A setTimeout safety net covers backgrounded tabs, where
+   * rAF is throttled/paused.
+   */
+  private scheduleFlush(): void {
+    if (this.flushHandle !== null || this.flushTimer !== null) return;
+    this.flushHandle = requestAnimationFrame(() => this.flushEvents());
+    this.flushTimer = setTimeout(() => this.flushEvents(), 100);
+  }
+
+  private flushEvents(): void {
+    if (this.flushHandle !== null) {
+      cancelAnimationFrame(this.flushHandle);
+      this.flushHandle = null;
+    }
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    // Swap the queue out before delivering so a handler that triggers
+    // another frame (re-entrancy) queues into a fresh batch, not this one.
+    const queue = this.eventQueue;
+    this.eventQueue = [];
+    for (const { handler, frame } of queue) handler(frame);
   }
 
   private failAllPending(): void {

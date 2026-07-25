@@ -47,8 +47,18 @@ export function createAtelierMcpServer(
     tool(
       "read_file",
       "Read a text file from the workspace. Path is workspace-relative with " +
-        "forward slashes.",
-      { path: z.string().describe("Workspace-relative file path") },
+        "forward slashes. For a large file or a known line range, pass " +
+        "offset (1-based start line) and/or limit (max lines) to read a " +
+        "slice instead of the whole file. Always prefer this over " +
+        "run_terminal for inspecting file contents.",
+      {
+        path: z.string().describe("Workspace-relative file path"),
+        offset: z
+          .number()
+          .optional()
+          .describe("1-based line number to start reading from"),
+        limit: z.number().optional().describe("Max number of lines to return"),
+      },
       (input) => run("read_file", input),
       { annotations: { readOnlyHint: true } }
     ),
@@ -76,13 +86,14 @@ export function createAtelierMcpServer(
     ),
     tool(
       "search_workspace",
-      "Search file contents in the workspace. Returns path/row/col/line " +
-        "matches. Optional glob filter like src/**/*.ts.",
+      "Find the files relevant to a query using the live knowledge index " +
+        "(synced to the latest tree) — e.g. 'login' returns the files that " +
+        "implement login, ranked by relevance, each with a line and a " +
+        "one-line preview. Optional glob filter like src/**/*.ts.",
       {
         query: z.string(),
         glob: z.string().optional(),
         maxResults: z.number().optional(),
-        regex: z.boolean().optional(),
       },
       (input) => run("search_workspace", input),
       { annotations: { readOnlyHint: true } }
@@ -263,8 +274,10 @@ export function createAtelierMcpServer(
     tool(
       "run_terminal",
       "Run a shell command (PowerShell on Windows) in the workspace and " +
-        "return its output and exit code. Use for builds, tests, git, and " +
-        "package managers. Not interactive.",
+        "return its output and exit code. Use for builds, tests, and " +
+        "package managers (prefer the git tool for git). Not interactive. " +
+        "Do not use this to read or search files — use read_file (with " +
+        "offset/limit for a range) or search_workspace instead.",
       {
         command: z.string().describe("The command line to execute"),
         cwd: z.string().optional().describe("Workspace-relative working dir"),

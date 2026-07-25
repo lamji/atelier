@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { install } from "./install.js";
 import { run } from "./run.js";
+import { debug } from "./debug.js";
 import { runDoctor } from "./doctor.js";
 import { installRoot } from "./paths.js";
 import { banner, c, info } from "./ui.js";
@@ -36,12 +37,14 @@ function helpText(): string {
 ${c.bold("Usage:")}
   atelier install [--repo <url>] [--ref <branch>] [--no-global] [--skip-doctor]
   atelier run [--port <n>] [--no-open]
+  atelier debug [--port <n>]
   atelier doctor
   atelier version
 
 ${c.bold("Commands:")}
   ${c.cyan("install")}   Build Atelier, install prerequisites, register the command
   ${c.cyan("run")}       Launch the agent in the current project and open the UI
+  ${c.cyan("debug")}     Dev-mode run from source (tsx, no build) against the cwd
   ${c.cyan("doctor")}    Check prerequisites (node, git, gh, claude)
   ${c.cyan("version")}   Show the installed version
 `;
@@ -73,6 +76,12 @@ async function main(): Promise<void> {
         port:
           typeof flags.port === "string" ? Number(flags.port) : undefined,
         noOpen: flags["no-open"] === true,
+      });
+      break;
+    case "debug":
+      await debug({
+        port:
+          typeof flags.port === "string" ? Number(flags.port) : undefined,
       });
       break;
     case "doctor":

@@ -179,12 +179,24 @@ body {
   @apply bg-muted-foreground/40;
 }
 
-/* Markdown inside chat bubbles */
+/*
+ * Markdown inside chat bubbles — matches the terminal-style process log.
+ * Sits on a fixed dark chip (bg-black/40) in both light and dark app
+ * themes, so text colors here are fixed neutrals, not the foreground /
+ * muted-foreground vars (those are calibrated to the page background and
+ * go near-invisible on a dark chip in light mode).
+ */
 .chat-md {
-  @apply text-sm leading-relaxed;
+  @apply text-xs leading-relaxed text-neutral-300;
+  font-family: var(--font-mono);
 }
 .chat-md p {
   @apply mb-2 last:mb-0;
+  /* Hanging indent: wrapped lines line up under the text, not the
+     leading "N. " the model often types as plain prose (not a real
+     markdown list), which otherwise has no indent to wrap into. */
+  padding-left: 1.4em;
+  text-indent: -1.4em;
 }
 .chat-md pre {
   @apply my-2 overflow-x-auto rounded-lg bg-black/85 p-3 text-xs text-white;
@@ -210,11 +222,11 @@ body {
 .chat-md h1,
 .chat-md h2,
 .chat-md h3 {
-  @apply mb-1.5 mt-3 font-semibold first:mt-0;
+  @apply mb-1.5 mt-3 font-semibold text-neutral-100 first:mt-0;
 }
 .chat-md a {
   @apply text-primary underline underline-offset-2;
 }
 .chat-md blockquote {
-  @apply my-2 border-l-2 border-primary/40 pl-3 text-muted-foreground;
+  @apply my-2 border-l-2 border-primary/40 pl-3 text-neutral-400;
 }

@@ -61,6 +61,26 @@ function scheduleKnowledgeRefetch(immediate = false): void {
   }, KNOWLEDGE_BUMP_MS);
 }
 
+/** Summary line for a knowledge/impact log pinned into the chat transcript. */
+function logSummary(topic: string, payload: Record<string, unknown>): string {
+  switch (topic) {
+    case "knowledge.retrieved": {
+      const chunks = Array.isArray(payload.chunks) ? payload.chunks.length : 0;
+      return `Retrieved ${chunks} chunk(s) · ${String(payload.strategy ?? "")}`;
+    }
+    case "impact.radius":
+      return String(payload.summary ?? "Impact radius computed");
+    case "edit.impact": {
+      const symbol = String(payload.symbol ?? "");
+      const reach = String(payload.reach ?? "");
+      const summary = String(payload.summary ?? "").slice(0, 90);
+      return `${symbol} · ${reach} · ${summary}`;
+    }
+    default:
+      return "";
+  }
+}
+
 /** Human-readable label for a tool invocation. */
 function actionLabel(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>;
@@ -206,9 +226,13 @@ function dispatch(frame: EventFrame): void {
         sessions.taskEnded(convId, "error", String(payload.message));
       }
       break;
-    case "diff.created":
-      useWorkspaceStore.getState().addDiff(frame.payload as Diff);
+    case "diff.created": {
+      const diff = frame.payload as Diff;
+      if (convId) {
+        sessions.pinDiff(convId, diff.id, diff.path, diff.before, diff.after);
+      }
       break;
+    }
     case "terminal.data":
       terminalRegistry.write(String(payload.termId), String(payload.data));
       break;
@@ -292,9 +316,21 @@ function dispatch(frame: EventFrame): void {
       scheduleKnowledgeRefetch(phase === "done");
       break;
     }
-    // knowledge.retrieved / impact.radius / edit.impact no longer pin lines
-    // into the chat transcript — they remain live in the activity feed while
-    // a task runs, and as cards in the Timeline.
+    case "knowledge.retrieved":
+    case "impact.radius":
+    case "edit.impact":
+      // Pinned into the chat transcript (in addition to the activity feed
+      // and the Timeline cards) so the reasoning behind a change stays
+      // visible after the task finishes scrolling past it.
+      if (convId) {
+        sessions.pinLog(
+          convId,
+          `${frame.topic}:${frame.seq}`,
+          frame.topic,
+          logSummary(frame.topic, payload)
+        );
+      }
+      break;
     case "plan.created":
       if (convId) {
         sessions.setPlan(convId, frame.payload as never);

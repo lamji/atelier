@@ -24,6 +24,14 @@ interface SearchSymbolsInput {
   limit?: number;
 }
 
+interface SearchWorkspaceInput {
+  query: string;
+  glob?: string;
+  maxResults?: number;
+  /** Accepted for backward compat; index search is always semantic. */
+  regex?: boolean;
+}
+
 interface SaveLessonInput {
   title: string;
   lesson: string;
@@ -64,6 +72,36 @@ export function registerKnowledgeTools(
   registry.register("search_symbols", async (input: SearchSymbolsInput) => {
     return knowledge.search(input.query, input.limit ?? 15);
   });
+
+  // Workspace search now resolves through the live index instead of a
+  // native filesystem scan — the engine knowledge stays synced to the
+  // latest tree, so a query like "login" returns the files that actually
+  // implement login, ranked by relevance, without re-reading the tree.
+  registry.register(
+    "search_workspace",
+    async (input: SearchWorkspaceInput) => {
+      const k = Math.min(Math.max(input.maxResults ?? 20, 1), 50);
+      const filters = input.glob ? { pathGlob: input.glob } : undefined;
+      // Over-fetch chunks so collapsing to one row per file still fills k.
+      const result = await retriever.retrieve(input.query, k * 3, filters);
+      const seen = new Set<string>();
+      const matches = [];
+      for (const chunk of result.chunks) {
+        // File-backed hits only — lessons/feature summaries aren't files.
+        if (chunk.kind !== "code" && chunk.kind !== "doc") continue;
+        if (seen.has(chunk.path)) continue;
+        seen.add(chunk.path);
+        matches.push({
+          path: chunk.path,
+          row: chunk.startRow ?? 0,
+          score: chunk.score,
+          preview: firstLine(chunk.preview),
+        });
+        if (matches.length >= k) break;
+      }
+      return { matches, strategy: result.strategy };
+    }
+  );
 
   registry.register("save_lesson", async (input: SaveLessonInput, ctx) => {
     return lessons.save(input, ctx.taskId);
@@ -123,4 +161,11 @@ export function registerKnowledgeTools(
       riskNotes: direct.lessons.map((l) => `${l.title}: ${l.body}`),
     };
   });
+}
+
+/** First non-empty line of a chunk preview, trimmed for a compact teaser. */
+function firstLine(preview: string): string {
+  const line = preview.split(/\r?\n/).find((l) => l.trim().length > 0) ?? "";
+  const trimmed = line.trim();
+  return trimmed.length > 160 ? trimmed.slice(0, 160) + "…" : trimmed;
 }

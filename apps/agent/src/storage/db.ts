@@ -35,4 +35,10 @@ function applyMigrations(db: Db): void {
   if (!columns.includes("chunk_id")) {
     db.exec("ALTER TABLE features ADD COLUMN chunk_id INTEGER REFERENCES chunks(id)");
   }
+  const messageColumns = (
+    db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  if (!messageColumns.includes("meta")) {
+    db.exec("ALTER TABLE chat_messages ADD COLUMN meta TEXT");
+  }
 }

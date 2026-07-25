@@ -49,12 +49,24 @@ export class ConversationRepo {
   }
 
   addMessage(msg: ChatMessage): void {
+    const meta =
+      msg.logTopic !== undefined || msg.diff !== undefined
+        ? JSON.stringify({ logTopic: msg.logTopic, diff: msg.diff })
+        : null;
     this.db
       .prepare(
-        "INSERT INTO chat_messages(id, conversation_id, task_id, role, text, created_at) " +
-          "VALUES(?, ?, ?, ?, ?, ?)"
+        "INSERT INTO chat_messages(id, conversation_id, task_id, role, text, created_at, meta) " +
+          "VALUES(?, ?, ?, ?, ?, ?, ?)"
       )
-      .run(msg.id, msg.conversationId, msg.taskId ?? null, msg.role, msg.text, msg.createdAt);
+      .run(
+        msg.id,
+        msg.conversationId,
+        msg.taskId ?? null,
+        msg.role,
+        msg.text,
+        msg.createdAt,
+        meta
+      );
   }
 
   getMessages(conversationId: string): ChatMessage[] {
@@ -63,14 +75,19 @@ export class ConversationRepo {
         "SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY created_at"
       )
       .all(conversationId) as MessageRow[];
-    return rows.map((r) => ({
-      id: r.id,
-      conversationId: r.conversation_id,
-      taskId: r.task_id ?? undefined,
-      role: r.role as ChatMessage["role"],
-      text: r.text,
-      createdAt: r.created_at,
-    }));
+    return rows.map((r) => {
+      const meta = r.meta ? (JSON.parse(r.meta) as StoredMeta) : null;
+      return {
+        id: r.id,
+        conversationId: r.conversation_id,
+        taskId: r.task_id ?? undefined,
+        role: r.role as ChatMessage["role"],
+        text: r.text,
+        createdAt: r.created_at,
+        logTopic: meta?.logTopic,
+        diff: meta?.diff,
+      };
+    });
   }
 
   createTask(task: TaskInfo): void {
@@ -119,6 +136,12 @@ interface MessageRow {
   role: string;
   text: string;
   created_at: number;
+  meta: string | null;
+}
+
+interface StoredMeta {
+  logTopic?: string;
+  diff?: ChatMessage["diff"];
 }
 
 interface TaskRow {

@@ -27,8 +27,15 @@ export const TaskInfo = z.object({
 });
 export type TaskInfo = z.infer<typeof TaskInfo>;
 
-export const ChatRole = z.enum(["user", "assistant"]);
+export const ChatRole = z.enum(["user", "assistant", "log", "diff"]);
 export type ChatRole = z.infer<typeof ChatRole>;
+
+export const ChatMessageDiff = z.object({
+  path: z.string(),
+  before: z.string(),
+  after: z.string(),
+});
+export type ChatMessageDiff = z.infer<typeof ChatMessageDiff>;
 
 export const ChatMessage = z.object({
   id: z.string(),
@@ -37,5 +44,9 @@ export const ChatMessage = z.object({
   role: ChatRole,
   text: z.string(),
   createdAt: z.number(),
+  /** Source event topic for a "log" message (e.g. "knowledge.retrieved"). */
+  logTopic: z.string().optional(),
+  /** File edit for a "diff" message, shown inline as a VS Code-style diff. */
+  diff: ChatMessageDiff.optional(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;

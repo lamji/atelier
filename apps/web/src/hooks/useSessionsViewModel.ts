@@ -146,7 +146,13 @@ export function useSessionsViewModel() {
       .then(({ messages }) => {
         useSessionsStore.getState().hydrate(
           conversationId,
-          messages.map((m) => ({ id: m.id, role: m.role, text: m.text }))
+          messages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            text: m.text,
+            logTopic: m.logTopic,
+            diff: m.diff,
+          }))
         );
       })
       .catch(() => undefined);

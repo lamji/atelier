@@ -67,9 +67,10 @@ function Island(props: {
 }
 
 /**
- * Single-console layout: header tabs (Chat / Editor / Diffs / Terminal /
- * Activity) drive the one main view. Left column = agent sessions + the
- * rail-selected workspace view. Selecting a session forces Chat forward.
+ * Single-console layout: header tabs (Chat / Editor / Terminal / Activity)
+ * drive the one main view. Left column = agent sessions + the rail-selected
+ * workspace view. Selecting a session forces Chat forward. Agent file edits
+ * render inline in the chat transcript as VS Code-style diffs.
  */
 export function AppShell() {
   const [activeView, setActiveView] = useState<ActivityView>("agents");
@@ -158,6 +159,7 @@ export function AppShell() {
       items={sessions.selected?.items ?? []}
       thinking={sessions.selected?.thinking ?? ""}
       actions={sessions.selected?.actions ?? []}
+      liveDiffs={sessions.selected?.liveDiffs ?? []}
       plan={sessions.selected?.plan ?? null}
       stage={sessions.selected?.stage ?? null}
       taskStartedAt={sessions.selected?.taskStartedAt ?? null}
@@ -185,6 +187,7 @@ export function AppShell() {
       onRemoveImage={sessions.removeImage}
       slashCommands={sessions.slashCommands}
       filePaths={sessions.filePaths}
+      monacoTheme={editor.monacoTheme}
     />
   );
 
@@ -194,7 +197,6 @@ export function AppShell() {
         <HeaderBar
           workingCount={sessions.workingCount}
           rightTab={editor.rightTab}
-          diffCount={editor.diffs.length}
           terminalCount={terminal.sessions.length}
           onSelectTab={editor.setRightTab}
         />
@@ -233,9 +235,6 @@ export function AppShell() {
                 fileContent={editor.fileContent}
                 language={editor.language}
                 monacoTheme={editor.monacoTheme}
-                diffs={editor.diffs}
-                activeDiff={editor.activeDiff}
-                onShowDiff={editor.showDiff}
                 gitDiff={git.gitDiff}
                 onCloseGitDiff={git.closeDiff}
                 terminalSessions={terminal.sessions}
@@ -268,6 +267,7 @@ export function AppShell() {
           usage={usage}
           indexingActive={knowledge.indexingActive}
           indexing={knowledge.indexing}
+          lastIndexedAt={knowledge.stats?.lastIndexedAt ?? null}
         />
       </Island>
     </div>

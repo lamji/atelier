@@ -45,8 +45,6 @@ export function resetWorkspaceStores(): void {
     selectedPath: null,
     fileContent: null,
     fileMtime: null,
-    diffs: [],
-    activeDiffId: null,
     rightTab: "chat",
   });
   useKnowledgeStore.setState({

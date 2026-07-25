@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip } from "@/components/ui/tooltip";
 import { useGitFlowViewModel } from "@/hooks/useGitFlowViewModel";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import type { GitFileStatus } from "@atelier/protocol";
@@ -134,42 +135,47 @@ export function GitPanel({ vm }: GitPanelProps) {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) doCommit();
             }}
           />
-          <button
-            onClick={doGenerate}
-            disabled={generating || busy}
-            title="Generate commit message from changes (AI)"
-            className="absolute right-1.5 top-1.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-primary disabled:opacity-50"
-          >
-            {generating ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Sparkles className="h-3.5 w-3.5" />
-            )}
-          </button>
+          <Tooltip content="Generate commit message from changes (AI)">
+            <button
+              onClick={doGenerate}
+              disabled={generating || busy}
+              className="absolute right-1.5 top-1.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-primary disabled:opacity-50"
+            >
+              {generating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </Tooltip>
         </div>
-        <Button
-          size="sm"
-          className="w-full"
-          disabled={
-            busy ||
-            message.trim() === "" ||
-            (staged.length === 0 && unstaged.length === 0)
-          }
-          onClick={doCommit}
-          title={
+        <Tooltip
+          content={
             staged.length === 0
               ? "Nothing staged — all changes will be staged and committed"
               : undefined
           }
+          disabled={staged.length !== 0}
         >
-          <Check className="mr-1.5 h-3.5 w-3.5" />
-          Commit{" "}
-          {staged.length > 0
-            ? `(${staged.length})`
-            : unstaged.length > 0
-              ? `all (${unstaged.length})`
-              : ""}
-        </Button>
+          <Button
+            size="sm"
+            className="w-full"
+            disabled={
+              busy ||
+              message.trim() === "" ||
+              (staged.length === 0 && unstaged.length === 0)
+            }
+            onClick={doCommit}
+          >
+            <Check className="mr-1.5 h-3.5 w-3.5" />
+            Commit{" "}
+            {staged.length > 0
+              ? `(${staged.length})`
+              : unstaged.length > 0
+                ? `all (${unstaged.length})`
+                : ""}
+          </Button>
+        </Tooltip>
       </div>
 
       <FileSection
@@ -298,32 +304,34 @@ function BranchSection(props: {
   return (
     <div>
       <div className="flex items-center gap-1.5">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-accent/60"
-          title="Switch branch"
-        >
-          {open ? (
-            <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-          )}
-          <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-          <span className="truncate font-medium">{status.branch}</span>
-          {(status.ahead > 0 || status.behind > 0) && (
-            <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
-              {status.ahead > 0 && `↑${status.ahead}`}
-              {status.behind > 0 && ` ↓${status.behind}`}
-            </span>
-          )}
-        </button>
-        <button
-          onClick={props.onRefresh}
-          title="Refresh"
-          className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
+        <Tooltip content="Switch branch">
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-accent/60"
+          >
+            {open ? (
+              <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+            )}
+            <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+            <span className="truncate font-medium">{status.branch}</span>
+            {(status.ahead > 0 || status.behind > 0) && (
+              <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                {status.ahead > 0 && `↑${status.ahead}`}
+                {status.behind > 0 && ` ↓${status.behind}`}
+              </span>
+            )}
+          </button>
+        </Tooltip>
+        <Tooltip content="Refresh">
+          <button
+            onClick={props.onRefresh}
+            className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
       </div>
       {open && (
         <div className="mt-0.5 space-y-0.5 pl-6">
@@ -420,34 +428,35 @@ function FileSection(props: {
               key={f.path}
               className="group flex items-center gap-0.5 rounded-md pr-1 hover:bg-accent/60"
             >
-              <button
-                onClick={() => props.onOpen(f.path)}
-                title={f.path}
-                className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
-              >
-                <span
-                  className={cn(
-                    "w-4 shrink-0 text-center font-mono text-[11px] font-semibold",
-                    statusColor(f)
-                  )}
-                >
-                  {statusChar(f)}
-                </span>
-                <span className="truncate text-xs">{f.path}</span>
-              </button>
-              {props.rowActions.map((a) => (
+              <Tooltip content={f.path}>
                 <button
-                  key={a.title}
-                  onClick={() => a.run(f.path)}
-                  disabled={props.busy}
-                  title={a.title}
-                  className={cn(
-                    "shrink-0 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100",
-                    a.danger ? "hover:text-destructive" : "hover:text-foreground"
-                  )}
+                  onClick={() => props.onOpen(f.path)}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
                 >
-                  <a.icon className="h-3.5 w-3.5" />
+                  <span
+                    className={cn(
+                      "w-4 shrink-0 text-center font-mono text-[11px] font-semibold",
+                      statusColor(f)
+                    )}
+                  >
+                    {statusChar(f)}
+                  </span>
+                  <span className="truncate text-xs">{f.path}</span>
                 </button>
+              </Tooltip>
+              {props.rowActions.map((a) => (
+                <Tooltip key={a.title} content={a.title}>
+                  <button
+                    onClick={() => a.run(f.path)}
+                    disabled={props.busy}
+                    className={cn(
+                      "shrink-0 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100",
+                      a.danger ? "hover:text-destructive" : "hover:text-foreground"
+                    )}
+                  >
+                    <a.icon className="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
               ))}
             </div>
           ))
@@ -474,19 +483,17 @@ function HistorySection(props: { commits: GitViewModel["commits"] }) {
       </button>
       {open &&
         props.commits.map((c) => (
-          <div
-            key={c.hash}
-            className="flex items-start gap-1.5 px-2 py-1"
-            title={c.hash}
-          >
-            <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-            <div className="min-w-0">
-              <p className="truncate text-xs">{c.message}</p>
-              <p className="truncate text-[10px] text-muted-foreground/70">
-                {c.hash.slice(0, 7)} · {c.author} · {formatDate(c.date)}
-              </p>
+          <Tooltip key={c.hash} content={c.hash}>
+            <div className="flex items-start gap-1.5 px-2 py-1">
+              <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+              <div className="min-w-0">
+                <p className="truncate text-xs">{c.message}</p>
+                <p className="truncate text-[10px] text-muted-foreground/70">
+                  {c.hash.slice(0, 7)} · {c.author} · {formatDate(c.date)}
+                </p>
+              </div>
             </div>
-          </div>
+          </Tooltip>
         ))}
     </div>
   );

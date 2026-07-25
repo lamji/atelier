@@ -34,7 +34,8 @@ interface Running {
  */
 export class AgentSupervisor {
   private running = new Map<string, Running>();
-  private starting = new Set<string>();
+  /** In-flight starts, so concurrent start(id) calls share one launch. */
+  private starting = new Map<string, Promise<ProjectEndpoint>>();
 
   constructor(
     private registry: ProjectRegistry,
@@ -79,34 +80,49 @@ export class AgentSupervisor {
     if (existing) {
       return { id, port: existing.port, token: existing.token };
     }
+    // Coalesce concurrent starts. On `atelier run` the boot auto-start races
+    // the web's projects.start; without this both would spawn an agent, the
+    // two would collide on the same freePort, and the loser's crash would
+    // reject the start (and leave a stale bridge.json).
+    const inFlight = this.starting.get(id);
+    if (inFlight) return inFlight;
+
     const record = this.registry.get(id);
     if (!record) throw new Error(`unknown project: ${id}`);
 
-    this.starting.add(id);
+    const launch = this.launchAgent(id, record);
+    this.starting.set(id, launch);
     this.emit(record);
     try {
-      const port = await freePort(AGENT_PORT_BASE);
-      fs.mkdirSync(record.dataDir, { recursive: true });
-      const child = this.launch(record, {
-        ...process.env,
-        ATELIER_WORKSPACE: record.path,
-        ATELIER_DATA_DIR: record.dataDir,
-        ATELIER_PORT: String(port),
-        // Headless: the supervisor serves the UI, agents are pure bridges.
-        ATELIER_WEB_DIST: "",
-        LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
-      });
-      child.on("exit", (code) => this.onExit(id, code));
-      await this.waitReady(child, port);
-      const token = this.readToken(record.dataDir);
-      this.running.set(id, { child, port, token });
-      this.registry.touch(id);
-      this.log.info({ project: record.name, port }, "agent started");
-      this.emit(record);
-      return { id, port, token };
+      return await launch;
     } finally {
       this.starting.delete(id);
+      this.emit(record);
     }
+  }
+
+  private async launchAgent(
+    id: string,
+    record: ProjectRecord
+  ): Promise<ProjectEndpoint> {
+    const port = await freePort(AGENT_PORT_BASE);
+    fs.mkdirSync(record.dataDir, { recursive: true });
+    const child = this.launch(record, {
+      ...process.env,
+      ATELIER_WORKSPACE: record.path,
+      ATELIER_DATA_DIR: record.dataDir,
+      ATELIER_PORT: String(port),
+      // Headless: the supervisor serves the UI, agents are pure bridges.
+      ATELIER_WEB_DIST: "",
+      LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
+    });
+    child.on("exit", (code) => this.onExit(id, code));
+    await this.waitReady(child, port);
+    const token = this.readToken(record.dataDir);
+    this.running.set(id, { child, port, token });
+    this.registry.touch(id);
+    this.log.info({ project: record.name, port }, "agent started");
+    return { id, port, token };
   }
 
   stop(id: string): ProjectInfo | undefined {

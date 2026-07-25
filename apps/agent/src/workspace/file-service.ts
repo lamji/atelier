@@ -170,7 +170,10 @@ export class FileService {
     };
   }
 
-  async readFile(relPath: string): Promise<{ content: string; mtime: number }> {
+  async readFile(
+    relPath: string,
+    opts: { offset?: number; limit?: number } = {}
+  ): Promise<{ content: string; mtime: number; totalLines?: number }> {
     const abs = this.guard.toAbsolute(relPath);
     const stat = await fs.stat(abs);
     if (stat.size > MAX_READ_BYTES) {
@@ -180,7 +183,19 @@ export class FileService {
     if (isBinary(buffer)) {
       throw new Error(`Binary file: ${relPath}`);
     }
-    return { content: buffer.toString("utf8"), mtime: stat.mtimeMs };
+    const text = buffer.toString("utf8");
+    if (opts.offset === undefined && opts.limit === undefined) {
+      return { content: text, mtime: stat.mtimeMs };
+    }
+    // 1-based line range, mirroring the SDK's built-in Read tool.
+    const lines = text.split(/\r?\n/);
+    const start = Math.max(0, (opts.offset ?? 1) - 1);
+    const end = opts.limit === undefined ? lines.length : start + opts.limit;
+    return {
+      content: lines.slice(start, end).join("\n"),
+      mtime: stat.mtimeMs,
+      totalLines: lines.length,
+    };
   }
 
   async writeFile(

@@ -1,13 +1,14 @@
 import { useEffect } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
-import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { Activity, FileCode2, FileDiff, X } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { Tooltip } from "@/components/ui/tooltip";
 import { TerminalPanel } from "@/views/terminal/TerminalPanel";
 import { TimelinePanel } from "@/views/timeline/TimelinePanel";
 import { GraphPane } from "@/views/knowledge/GraphPane";
 import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
-import type { Diff, TerminalSession } from "@atelier/protocol";
+import { languageForPath } from "@/lib/diff-view";
+import type { TerminalSession } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
 import type { TimelineEntryVm } from "@/types";
@@ -24,10 +25,6 @@ export interface RightDockProps {
   fileContent: string | null;
   language: string;
   monacoTheme: string;
-  // diffs
-  diffs: Diff[];
-  activeDiff: Diff | null;
-  onShowDiff: (diffId: string) => void;
   // git file diff (takes over the editor pane while open)
   gitDiff: GitDiffView | null;
   onCloseGitDiff: () => void;
@@ -98,19 +95,6 @@ export function RightDock(props: RightDockProps) {
           )}
         </Pane>
 
-        <Pane active={props.rightTab === "diffs"}>
-          {props.diffs.length > 0 ? (
-            <DiffList
-              diffs={props.diffs}
-              activeDiffId={props.activeDiff?.id ?? null}
-              monacoTheme={props.monacoTheme}
-              active={props.rightTab === "diffs"}
-            />
-          ) : (
-            <Empty icon={FileDiff} text="Agent edits appear here as diffs." />
-          )}
-        </Pane>
-
         <Pane active={props.rightTab === "terminal"}>
           <TerminalPanel
             sessions={props.terminalSessions}
@@ -154,13 +138,14 @@ function GitDiffPane(props: {
         <span className="shrink-0 text-[10px] text-muted-foreground/70">
           {gitDiff.staged ? "staged" : "working tree"}
         </span>
-        <button
-          onClick={props.onClose}
-          title="Close diff"
-          className="ml-auto shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+        <Tooltip content="Close diff">
+          <button
+            onClick={props.onClose}
+            className="ml-auto shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
       </div>
       <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 px-4 pb-4 pt-2">
         <DiffEditor
@@ -170,11 +155,15 @@ function GitDiffPane(props: {
           theme={props.monacoTheme}
           options={{
             readOnly: true,
+            automaticLayout: true,
             renderSideBySide: false,
             renderOverviewRuler: false,
             minimap: { enabled: false },
             fontSize: 13,
-            lineNumbersMinChars: 3,
+            // See INLINE_DIFF_EDITOR_OPTIONS in diff-view.ts: inline diff mode
+            // packs both original+modified line numbers into one gutter, so
+            // 3 chars is too narrow once line numbers hit 4 digits.
+            lineNumbersMinChars: 6,
             glyphMargin: false,
             folding: false,
             scrollBeyondLastLine: false,
@@ -184,141 +173,6 @@ function GitDiffPane(props: {
       </div>
     </div>
   );
-}
-
-const MAX_RENDERED_DIFFS = 10;
-
-/**
- * All diffs in one scroll view, newest last, centered in a chat-width
- * column. Flat by design — no cards, borders, or shadows: each file is a
- * quiet path header, an added/removed stat, and the diff itself, split by
- * generous whitespace. The most recent diff auto-scrolls into view.
- */
-function DiffList(props: {
-  diffs: Diff[];
-  activeDiffId: string | null;
-  monacoTheme: string;
-  active: boolean;
-}) {
-  const rendered = props.diffs.slice(-MAX_RENDERED_DIFFS);
-  const hidden = props.diffs.length - rendered.length;
-  // Follows new diffs only while you're at the bottom.
-  const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>([
-    props.diffs.length,
-    props.active,
-  ]);
-
-  return (
-    <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto px-4 py-4">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-8">
-        {hidden > 0 && (
-          <p className="text-center text-[11px] text-muted-foreground/60">
-            {hidden} older {hidden === 1 ? "diff" : "diffs"} not shown
-          </p>
-        )}
-        {rendered.map((diff) => (
-          <section
-            key={diff.id}
-            className={cn(
-              "scroll-mt-4",
-              diff.id === props.activeDiffId && "opacity-100"
-            )}
-          >
-            <DiffHeader diff={diff} />
-            <div className="mt-2" style={{ height: diffHeight(diff) }}>
-              <DiffEditor
-                original={diff.before}
-                modified={diff.after}
-                language={languageForPath(diff.path)}
-                theme={props.monacoTheme}
-                options={DIFF_EDITOR_OPTIONS}
-              />
-            </div>
-          </section>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** Shared read-only, inline, chrome-light options for every diff view. */
-const DIFF_EDITOR_OPTIONS = {
-  readOnly: true,
-  renderSideBySide: false,
-  renderOverviewRuler: false,
-  minimap: { enabled: false },
-  fontSize: 12.5,
-  lineNumbersMinChars: 3,
-  glyphMargin: false,
-  folding: false,
-  scrollBeyondLastLine: false,
-  hideUnchangedRegions: { enabled: true },
-  guides: { indentation: false },
-  scrollbar: { vertical: "hidden" as const, alwaysConsumeMouseWheel: false },
-} as const;
-
-/** Quiet file header: path + a green/red line stat. No fill, no border. */
-function DiffHeader({ diff }: { diff: Diff }) {
-  const { added, removed } = lineStat(diff.before, diff.after);
-  return (
-    <div className="flex items-center gap-2">
-      <FileDiff className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-      <span className="truncate font-mono text-xs font-medium">{diff.path}</span>
-      <span className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
-        {added > 0 && <span className="text-emerald-500">+{added}</span>}
-        {removed > 0 && <span className="text-destructive">−{removed}</span>}
-      </span>
-      <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
-        {new Date(diff.createdAt).toLocaleTimeString(undefined, {
-          hour12: false,
-        })}
-      </span>
-    </div>
-  );
-}
-
-/** Cheap multiset line delta for the header badge (not a full LCS diff). */
-function lineStat(
-  before: string,
-  after: string
-): { added: number; removed: number } {
-  const counts = new Map<string, number>();
-  for (const line of before.split("\n")) {
-    counts.set(line, (counts.get(line) ?? 0) + 1);
-  }
-  let added = 0;
-  for (const line of after.split("\n")) {
-    const n = counts.get(line) ?? 0;
-    if (n > 0) counts.set(line, n - 1);
-    else added += 1;
-  }
-  const removed = [...counts.values()].reduce((a, b) => a + b, 0);
-  return { added, removed };
-}
-
-function diffHeight(diff: Diff): number {
-  const lines = Math.max(
-    diff.before.split("\n").length,
-    diff.after.split("\n").length
-  );
-  return Math.min(Math.max(lines * 19 + 24, 90), 320);
-}
-
-const DIFF_LANGS: Record<string, string> = {
-  ts: "typescript",
-  tsx: "typescript",
-  js: "javascript",
-  jsx: "javascript",
-  json: "json",
-  css: "css",
-  html: "html",
-  md: "markdown",
-  py: "python",
-};
-
-function languageForPath(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return DIFF_LANGS[ext] ?? "plaintext";
 }
 
 /**

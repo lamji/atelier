@@ -2,7 +2,6 @@ import { motion } from "framer-motion";
 import {
   Activity,
   FileCode2,
-  FileDiff,
   FolderGit2,
   MessageSquare,
   TerminalSquare,
@@ -14,7 +13,6 @@ import { useProjectsStore } from "@/state/projects.store";
 export interface HeaderBarProps {
   workingCount: number;
   rightTab: RightTab;
-  diffCount: number;
   terminalCount: number;
   onSelectTab: (tab: RightTab) => void;
 }
@@ -27,7 +25,7 @@ interface TabDef {
 }
 
 /**
- * Top app header: brand on the left; the workbench tabs (Editor / Diffs /
+ * Top app header: brand on the left; the workbench tabs (Editor /
  * Terminal / Activity) on the right, controlling the right dock.
  */
 export function HeaderBar(props: HeaderBarProps) {
@@ -37,7 +35,6 @@ export function HeaderBar(props: HeaderBarProps) {
   const tabs: TabDef[] = [
     { id: "chat", label: "Chat", icon: MessageSquare },
     { id: "editor", label: "Editor", icon: FileCode2 },
-    { id: "diffs", label: "Diffs", icon: FileDiff, badge: props.diffCount },
     {
       id: "terminal",
       label: "Terminal",

@@ -11,7 +11,8 @@ export function registerFsTools(
 ): void {
   registry.register(
     "read_file",
-    async (input: { path: string }) => files.readFile(input.path)
+    async (input: { path: string; offset?: number; limit?: number }) =>
+      files.readFile(input.path, { offset: input.offset, limit: input.limit })
   );
 
   registry.register(
@@ -46,22 +47,10 @@ export function registerFsTools(
     }
   );
 
-  registry.register(
-    "search_workspace",
-    async (input: {
-      query: string;
-      glob?: string;
-      maxResults?: number;
-      regex?: boolean;
-    }) => ({
-      matches: await files.search(
-        input.query,
-        input.glob,
-        input.maxResults ?? 100,
-        input.regex ?? false
-      ),
-    })
-  );
+  // NOTE: search_workspace is registered by registerKnowledgeTools so it
+  // resolves through the live engine-knowledge index (fast + relevance
+  // ranked), not a native filesystem scan. files.search stays for the UI
+  // editor grep (fs.search RPC) and internal word-boundary lookups.
 
   registry.register(
     "list_dir",

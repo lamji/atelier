@@ -12,6 +12,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import type { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
 
@@ -43,21 +44,22 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
       <div className="flex items-center gap-2">
         <Database className="h-4 w-4 text-primary/80" />
         <h2 className="text-sm font-semibold">Knowledge</h2>
-        <Button
-          size="sm"
-          variant="outline"
-          className="ml-auto h-7 gap-1.5 px-2"
-          disabled={!vm.connected || reindexing}
-          title="Scan for drift and index changed files"
-          onClick={() => void runReindex(false)}
-        >
-          {reindexing ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5" />
-          )}
-          Sync
-        </Button>
+        <Tooltip content="Scan for drift and index changed files">
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto h-7 gap-1.5 px-2"
+            disabled={!vm.connected || reindexing}
+            onClick={() => void runReindex(false)}
+          >
+            {reindexing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            Sync
+          </Button>
+        </Tooltip>
       </div>
 
       {indexing && indexing.total > 0 && (
@@ -126,25 +128,26 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
           <ScanSearch className="h-3.5 w-3.5" />
           RAG inspector
         </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="h-8 w-full gap-1.5"
-          disabled={!vm.connected || vm.featureScan !== null}
-          onClick={() => void vm.scanFeatures()}
-          title="Scan routes & endpoints and summarize each as a feature (Haiku)"
-        >
-          {vm.featureScan ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Sparkles className="h-3.5 w-3.5" />
-          )}
-          {vm.featureScan
-            ? vm.featureScan.phase === "discover"
-              ? "Discovering routes…"
-              : `Scanning ${vm.featureScan.done}/${vm.featureScan.total}`
-            : "Scan features"}
-        </Button>
+        <Tooltip content="Scan routes & endpoints and summarize each as a feature (Haiku)">
+          <Button
+            size="sm"
+            variant="secondary"
+            className="h-8 w-full gap-1.5"
+            disabled={!vm.connected || vm.featureScan !== null}
+            onClick={() => void vm.scanFeatures()}
+          >
+            {vm.featureScan ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
+            {vm.featureScan
+              ? vm.featureScan.phase === "discover"
+                ? "Discovering routes…"
+                : `Scanning ${vm.featureScan.done}/${vm.featureScan.total}`
+              : "Scan features"}
+          </Button>
+        </Tooltip>
       </div>
 
       {(vm.features.length > 0 || vm.featureScan) && (
@@ -160,32 +163,30 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
           </h3>
           <ul className="space-y-1.5">
             {vm.features.slice(0, 8).map((feature) => (
-              <li
-                key={feature.id}
-                title={feature.summary}
-                className="rounded-lg bg-muted/40 px-2.5 py-1.5"
-              >
-                <div className="flex items-center gap-1.5">
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
-                    {feature.name}
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold",
-                      feature.status === "fresh"
-                        ? "bg-success/15 text-success"
-                        : feature.status === "stale"
-                          ? "bg-amber-500/15 text-amber-500"
-                          : "bg-muted text-muted-foreground"
-                    )}
-                  >
-                    {feature.status}
-                  </span>
-                </div>
-                <p className="mt-0.5 truncate text-[10px] text-muted-foreground/80">
-                  {feature.summary}
-                </p>
-              </li>
+              <Tooltip key={feature.id} content={feature.summary}>
+                <li className="rounded-lg bg-muted/40 px-2.5 py-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
+                      {feature.name}
+                    </span>
+                    <span
+                      className={cn(
+                        "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold",
+                        feature.status === "fresh"
+                          ? "bg-success/15 text-success"
+                          : feature.status === "stale"
+                            ? "bg-amber-500/15 text-amber-500"
+                            : "bg-muted text-muted-foreground"
+                      )}
+                    >
+                      {feature.status}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 truncate text-[10px] text-muted-foreground/80">
+                    {feature.summary}
+                  </p>
+                </li>
+              </Tooltip>
             ))}
           </ul>
         </div>
@@ -198,21 +199,19 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
           </h3>
           <ul className="space-y-1.5">
             {vm.lessons.slice(0, 5).map((lesson) => (
-              <li
-                key={lesson.id}
-                title={lesson.body}
-                className="rounded-lg bg-muted/40 px-2.5 py-1.5"
-              >
-                <div className="flex items-start gap-1.5">
-                  <GraduationCap className="mt-0.5 h-3 w-3 shrink-0 text-amber-500/80" />
-                  <p className="min-w-0 text-[11px] leading-snug">{lesson.title}</p>
-                </div>
-                <p className="mt-0.5 truncate pl-[18px] text-[10px] text-muted-foreground/70">
-                  {lesson.kind}
-                  {lesson.links.length > 0 && ` · ${lesson.links.join(", ")}`}
-                  {lesson.useCount > 0 && ` · used ${lesson.useCount}×`}
-                </p>
-              </li>
+              <Tooltip key={lesson.id} content={lesson.body}>
+                <li className="rounded-lg bg-muted/40 px-2.5 py-1.5">
+                  <div className="flex items-start gap-1.5">
+                    <GraduationCap className="mt-0.5 h-3 w-3 shrink-0 text-amber-500/80" />
+                    <p className="min-w-0 text-[11px] leading-snug">{lesson.title}</p>
+                  </div>
+                  <p className="mt-0.5 truncate pl-[18px] text-[10px] text-muted-foreground/70">
+                    {lesson.kind}
+                    {lesson.links.length > 0 && ` · ${lesson.links.join(", ")}`}
+                    {lesson.useCount > 0 && ` · used ${lesson.useCount}×`}
+                  </p>
+                </li>
+              </Tooltip>
             ))}
           </ul>
         </div>

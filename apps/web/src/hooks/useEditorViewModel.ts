@@ -23,32 +23,19 @@ const LANG_BY_EXT: Record<string, string> = {
 
 /** ViewModel for the center editor/diff area. */
 export function useEditorViewModel() {
-  const {
-    selectedPath,
-    fileContent,
-    diffs,
-    activeDiffId,
-    rightTab,
-    setRightTab,
-    showDiff,
-  } = useWorkspaceStore();
+  const { selectedPath, fileContent, rightTab, setRightTab } =
+    useWorkspaceStore();
   const theme = useThemeStore((s) => s.theme);
 
-  const activeDiff = diffs.find((d) => d.id === activeDiffId) ?? null;
-  const language = languageFor(
-    rightTab === "diffs" ? activeDiff?.path : selectedPath
-  );
+  const language = languageFor(selectedPath);
 
   return {
     selectedPath,
     fileContent,
-    diffs,
-    activeDiff,
     rightTab,
     language,
     monacoTheme: theme === "dark" ? "vs-dark" : "light",
     setRightTab,
-    showDiff,
   };
 }
 

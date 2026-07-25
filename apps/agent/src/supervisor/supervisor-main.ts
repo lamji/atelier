@@ -62,14 +62,12 @@ function loadOrCreateHubInfo(port: number): BridgeInfo {
 function makeLauncher(log: pino.Logger): AgentLauncher {
   const entry = process.env.ATELIER_AGENT_ENTRY;
   const stdio: ("ignore" | "inherit")[] = ["ignore", "inherit", "inherit"];
+  // No windowsHide: agents share the supervisor's console so that closing
+  // that window (the project's terminal) stops them too, rather than
+  // leaving orphaned agent processes behind.
   if (entry && fs.existsSync(entry)) {
     return (record: ProjectRecord, env): ChildProcess =>
-      spawn(process.execPath, [entry], {
-        cwd: record.path,
-        env,
-        stdio,
-        windowsHide: true,
-      });
+      spawn(process.execPath, [entry], { cwd: record.path, env, stdio });
   }
   log.warn("ATELIER_AGENT_ENTRY unset — launching agents via pnpm (dev mode)");
   return (record: ProjectRecord, env): ChildProcess =>
@@ -78,7 +76,6 @@ function makeLauncher(log: pino.Logger): AgentLauncher {
       shell: true,
       env,
       stdio,
-      windowsHide: true,
     });
 }
 

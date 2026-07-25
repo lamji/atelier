@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   task_id TEXT,
   role TEXT NOT NULL,
   text TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- JSON blob for role-specific extras: { logTopic } or { diff: {...} }.
+  meta TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
   ON chat_messages(conversation_id, created_at);

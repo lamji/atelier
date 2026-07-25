@@ -11,6 +11,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { Box, Loader2, Network, Sparkles, Square } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { layoutGraph } from "@/lib/graph-layout";
 import { Graph3D } from "./Graph3D";
@@ -46,10 +47,12 @@ function FileGroupNode({ data }: NodeProps) {
   const basename = label.split("/").pop() ?? label;
   const dir = label.slice(0, label.length - basename.length);
   return (
-    <div title={label} className="px-2.5 pt-1.5 font-mono text-[10px]">
-      <span className="opacity-50">{dir}</span>
-      <span className="font-semibold">{basename}</span>
-    </div>
+    <Tooltip content={label}>
+      <div className="px-2.5 pt-1.5 font-mono text-[10px]">
+        <span className="opacity-50">{dir}</span>
+        <span className="font-semibold">{basename}</span>
+      </div>
+    </Tooltip>
   );
 }
 

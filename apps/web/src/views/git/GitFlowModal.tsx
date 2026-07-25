@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
 import { STAGE_LABELS } from "@/lib/stage-labels";
 import { useElapsed } from "@/hooks/useElapsed";
@@ -23,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip } from "@/components/ui/tooltip";
 import type { GitFlowRequest } from "@atelier/protocol";
 import type { GitFlowViewModel } from "@/hooks/useGitFlowViewModel";
 import type { FlowStage } from "@/state/git-flow.store";
@@ -110,13 +112,12 @@ function Header({ vm }: { vm: GitFlowViewModel }) {
         {STAGE_TITLES[flow.stage]}
       </span>
       {flow.info?.branch && (
-        <span
-          title="Current branch"
-          className="flex min-w-0 items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
-        >
-          <GitBranch className="h-3 w-3 shrink-0 text-primary/70" />
-          <span className="truncate">{flow.info.branch}</span>
-        </span>
+        <Tooltip content="Current branch">
+          <span className="flex min-w-0 items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+            <GitBranch className="h-3 w-3 shrink-0 text-primary/70" />
+            <span className="truncate">{flow.info.branch}</span>
+          </span>
+        </Tooltip>
       )}
       <span className="ml-auto flex items-center gap-1.5">
         {["Commit", "Push", "PR"].map((label, i) => (
@@ -142,13 +143,14 @@ function Header({ vm }: { vm: GitFlowViewModel }) {
           </span>
         ))}
       </span>
-      <button
-        onClick={vm.close}
-        title="Close"
-        className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-      >
-        <X className="h-4 w-4" />
-      </button>
+      <Tooltip content="Close">
+        <button
+          onClick={vm.close}
+          className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -302,16 +304,17 @@ function PushStage({ vm }: { vm: GitFlowViewModel }) {
           <Button size="sm" onClick={() => void vm.runPush()}>
             Push
           </Button>
-          <Input
-            value={flow.flagsText}
-            onChange={(e) => vm.setFlagsText(e.target.value)}
-            placeholder="--no-verify --tags …"
-            title="Extra flags passed to git push"
-            className="h-8 flex-1 font-mono text-xs"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void vm.runPush();
-            }}
-          />
+          <Tooltip content="Extra flags passed to git push">
+            <Input
+              value={flow.flagsText}
+              onChange={(e) => vm.setFlagsText(e.target.value)}
+              placeholder="--no-verify --tags …"
+              className="h-8 flex-1 font-mono text-xs"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void vm.runPush();
+              }}
+            />
+          </Tooltip>
         </div>
       )}
       <OutputPane output={flow.output} />
@@ -521,7 +524,7 @@ function OutputPane({ output, compact }: { output: string; compact?: boolean }) 
       onScroll={onScroll}
       className={cn(
         "overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-black/40",
-        "p-3 font-mono text-[11px] leading-relaxed text-muted-foreground",
+        "p-3 font-mono text-[11px] leading-relaxed text-neutral-300",
         compact ? "max-h-36" : "max-h-72 min-h-36"
       )}
     >
@@ -563,26 +566,38 @@ function FixChat({
           onScroll={onScroll}
           className="max-h-56 space-y-2 overflow-y-auto rounded-lg bg-secondary/30 p-2.5"
         >
-          {session.items.map((item) => (
-            <div
-              key={item.id}
-              className={cn(
-                "text-xs",
-                item.role === "user"
-                  ? "text-muted-foreground"
-                  : "chat-md text-foreground"
-              )}
-            >
-              {item.role === "user" ? (
-                <p className="italic">» {item.text}</p>
-              ) : (
-                <Markdown>{item.text}</Markdown>
-              )}
-              {item.streaming && (
-                <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-primary/60" />
-              )}
-            </div>
-          ))}
+          {session.items.map((item) => {
+            if (item.role === "log" || item.role === "diff") {
+              const label =
+                item.role === "diff" ? `Edited ${item.text}` : item.text;
+              return (
+                <p
+                  key={item.id}
+                  className="truncate font-mono text-[10px] text-muted-foreground"
+                >
+                  {label}
+                </p>
+              );
+            }
+            return (
+              <div
+                key={item.id}
+                className={cn(
+                  "text-xs",
+                  item.role === "user" ? "text-muted-foreground" : "chat-md"
+                )}
+              >
+                {item.role === "user" ? (
+                  <p className="italic">» {item.text}</p>
+                ) : (
+                  <Markdown remarkPlugins={[remarkGfm]}>{item.text}</Markdown>
+                )}
+                {item.streaming && (
+                  <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-primary/60" />
+                )}
+              </div>
+            );
+          })}
           {working && session.thinking && (
             <p className="text-[10px] italic text-muted-foreground/60">
               {session.thinking.slice(-200)}

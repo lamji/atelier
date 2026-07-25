@@ -1,16 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { DiffEditor } from "@monaco-editor/react";
 import {
   ArrowUp,
   BrainCircuit,
   Check,
   ClipboardList,
   FileCode2,
+  FileDiff,
   ImagePlus,
   Loader2,
   MessageSquareDashed,
+  Network,
   Paperclip,
+  Radar,
   Sparkles,
   Square,
   X,
@@ -18,9 +23,16 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { STAGE_LABELS } from "@/lib/stage-labels";
+import {
+  diffHeight,
+  INLINE_DIFF_EDITOR_OPTIONS,
+  languageForPath,
+  lineStat,
+} from "@/lib/diff-view";
 import { useElapsed } from "@/hooks/useElapsed";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { Select } from "@/components/ui/select";
+import { Tooltip } from "@/components/ui/tooltip";
 import type { ChatItemVm } from "@/types";
 import type {
   ModelOption,
@@ -28,7 +40,7 @@ import type {
   Plan,
   PlanStep,
 } from "@atelier/protocol";
-import type { AgentAction } from "@/state/sessions.store";
+import type { AgentAction, LiveDiff } from "@/state/sessions.store";
 import type {
   EffortChoice,
   ModelChoice,
@@ -41,6 +53,8 @@ export interface ChatPanelProps {
   items: ChatItemVm[];
   thinking: string;
   actions: AgentAction[];
+  /** Diffs from the running task, shown inline in the live activity feed. */
+  liveDiffs: LiveDiff[];
   /** Live task plan (pipeline stage 4); null before planning. */
   plan: Plan | null;
   /** Pipeline stage the running task is in; null before the first stage. */
@@ -67,6 +81,8 @@ export interface ChatPanelProps {
   slashCommands: SlashCommand[];
   /** Workspace file paths offered by the "@" mention menu. */
   filePaths: string[];
+  /** Monaco theme ("vs-dark" | "light"), for inline diffs in the transcript. */
+  monacoTheme: string;
   onInputChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
@@ -81,6 +97,10 @@ export interface ChatPanelProps {
 
 /** Composer grows with the text up to this height, then scrolls. */
 const MAX_COMPOSER_HEIGHT = 160;
+
+/** Drag-resize bounds for the process rail (plan + activity + diffs). */
+const PROCESS_MIN_WIDTH = 260;
+const PROCESS_MAX_WIDTH = 720;
 
 /** Used only when the SDK model probe fails (offline / older agent). */
 const FALLBACK_MODELS: Array<[string, string]> = [
@@ -105,14 +125,54 @@ export function ChatPanel(props: ChatPanelProps) {
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [processWidth, setProcessWidth] = useState(320);
+  const [resizingProcess, setResizingProcess] = useState(false);
 
   // Follows the stream only while you're at the bottom; scroll up to read
-  // and it stops yanking you back down.
+  // and it stops yanking you back down. The center only carries the summary
+  // now, so it no longer jumps when the process rail ticks.
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>([
     props.items,
     props.thinking,
-    props.actions,
   ]);
+
+  // The process rail (plan + activity + diffs) auto-follows its own stream.
+  const { ref: procRef, onScroll: onProcScroll } =
+    useStickToBottom<HTMLDivElement>([
+      props.actions,
+      props.liveDiffs,
+      props.plan,
+    ]);
+
+  // Diffs from the running task render inside the live feed (near the edit
+  // that produced them), so hide their transcript copies until the run ends.
+  const liveDiffIds = new Set(props.liveDiffs.map((d) => d.id));
+
+  // The right rail holds the process: the live plan persists after a run so
+  // it stays available; the activity feed shows only while the task runs.
+  const hasPlan = props.plan !== null && props.plan.steps.length > 1;
+  const showProcess = props.busy || hasPlan;
+
+  /** Drag the rail's left edge to widen it — handy for reading a wide diff. */
+  const onProcessResizeStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = processWidth;
+    setResizingProcess(true);
+    const onMove = (ev: PointerEvent) => {
+      const next = startWidth + (startX - ev.clientX);
+      setProcessWidth(
+        Math.min(PROCESS_MAX_WIDTH, Math.max(PROCESS_MIN_WIDTH, next))
+      );
+    };
+    const onUp = () => {
+      setResizingProcess(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   /**
    * Auto-size the composer from the value, not from keystrokes: sending,
@@ -278,36 +338,52 @@ export function ChatPanel(props: ChatPanelProps) {
         )}
       </div>
 
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="flex-1 overflow-y-auto px-4 py-4 [scrollbar-gutter:stable_both-edges]"
-      >
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4">
-          {props.items.length === 0 && !props.thinking && (
-            <EmptyState connected={props.connected} />
-          )}
-          <AnimatePresence initial={false}>
-            {props.items.map((item) => (
-              <ChatMessage key={item.id} item={item} />
-            ))}
-            {props.busy && props.thinking && (
-              <ThinkingBlock key="thinking" text={props.thinking} />
+      <div className="flex min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="flex-1 overflow-y-auto px-4 py-4 [scrollbar-gutter:stable_both-edges]"
+        >
+          <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4">
+            {props.items.length === 0 && !props.thinking && (
+              <EmptyState connected={props.connected} />
             )}
-            {props.plan && props.plan.steps.length > 1 && (
-              <PlanCard key="plan" plan={props.plan} />
-            )}
-            {props.busy && (
-              <ActivityFeed
-                key="actions"
-                actions={props.actions}
-                stage={props.stage}
-                startedAt={props.taskStartedAt}
-                cancelling={props.cancelling}
-              />
-            )}
-          </AnimatePresence>
+            <AnimatePresence initial={false}>
+              {props.items.map((item) =>
+                liveDiffIds.has(item.id) ? null : (
+                  <ChatMessage
+                    key={item.id}
+                    item={item}
+                    monacoTheme={props.monacoTheme}
+                  />
+                )
+              )}
+              {props.busy && props.thinking && (
+                <ThinkingBlock key="thinking" text={props.thinking} />
+              )}
+            </AnimatePresence>
+          </div>
         </div>
+
+        <AnimatePresence>
+          {showProcess && (
+            <ProcessPanel
+              scrollRef={procRef}
+              onScroll={onProcScroll}
+              plan={hasPlan ? props.plan : null}
+              busy={props.busy}
+              actions={props.actions}
+              diffs={props.liveDiffs}
+              stage={props.stage}
+              startedAt={props.taskStartedAt}
+              cancelling={props.cancelling}
+              monacoTheme={props.monacoTheme}
+              width={processWidth}
+              resizing={resizingProcess}
+              onResizeStart={onProcessResizeStart}
+            />
+          )}
+        </AnimatePresence>
       </div>
 
       <div className="px-4 pb-3">
@@ -347,13 +423,14 @@ export function ChatPanel(props: ChatPanelProps) {
                     alt="attachment"
                     className="h-16 w-16 rounded-lg border border-white/10 object-cover"
                   />
-                  <button
-                    onClick={() => props.onRemoveImage(img.id)}
-                    title="Remove image"
-                    className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-white opacity-0 transition-opacity group-hover:opacity-100"
-                  >
-                    <X className="h-2.5 w-2.5" />
-                  </button>
+                  <Tooltip content="Remove image">
+                    <button
+                      onClick={() => props.onRemoveImage(img.id)}
+                      className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-white opacity-0 transition-opacity group-hover:opacity-100"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </Tooltip>
                 </div>
               ))}
             </div>
@@ -436,58 +513,63 @@ export function ChatPanel(props: ChatPanelProps) {
                 )}
               />
               {props.busy ? (
-                <motion.button
-                  whileTap={{ scale: 0.92 }}
-                  onClick={props.onCancel}
-                  disabled={props.cancelling}
-                  title={
+                <Tooltip
+                  content={
                     props.cancelling
                       ? "Stopping — finishing the current step"
                       : "Cancel task"
                   }
-                  className={cn(
-                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                    "text-white hover:opacity-90",
-                    props.cancelling
-                      ? "bg-destructive/60"
-                      : "bg-destructive"
-                  )}
                 >
-                  {props.cancelling ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Square className="h-4 w-4 fill-current" />
-                  )}
-                </motion.button>
+                  <motion.button
+                    whileTap={{ scale: 0.92 }}
+                    onClick={props.onCancel}
+                    disabled={props.cancelling}
+                    className={cn(
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                      "text-white hover:opacity-90",
+                      props.cancelling
+                        ? "bg-destructive/60"
+                        : "bg-destructive"
+                    )}
+                  >
+                    {props.cancelling ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Square className="h-4 w-4 fill-current" />
+                    )}
+                  </motion.button>
+                </Tooltip>
               ) : (
-                <motion.button
-                  whileTap={{ scale: 0.92 }}
-                  disabled={
-                    !props.connected ||
-                    (!props.input.trim() && props.images.length === 0)
-                  }
-                  onClick={props.onSend}
-                  title="Send (Enter)"
-                  className={cn(
-                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                    "bg-primary text-primary-foreground transition-opacity",
-                    "hover:opacity-90 disabled:opacity-30",
-                  )}
-                >
-                  <ArrowUp className="h-4 w-4" />
-                </motion.button>
+                <Tooltip content="Send (Enter)">
+                  <motion.button
+                    whileTap={{ scale: 0.92 }}
+                    disabled={
+                      !props.connected ||
+                      (!props.input.trim() && props.images.length === 0)
+                    }
+                    onClick={props.onSend}
+                    className={cn(
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                      "bg-primary text-primary-foreground transition-opacity",
+                      "hover:opacity-90 disabled:opacity-30",
+                    )}
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </motion.button>
+                </Tooltip>
               )}
             </div>
             <div className="flex items-center gap-2 px-3 pb-2 pt-0.5">
-              <button
-                type="button"
-                title="Attach an image (or paste / drop a screenshot)"
-                disabled={!props.connected || props.busy}
-                onClick={() => fileInputRef.current?.click()}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
-              >
-                <Paperclip className="h-3.5 w-3.5" />
-              </button>
+              <Tooltip content="Attach an image (or paste / drop a screenshot)">
+                <button
+                  type="button"
+                  disabled={!props.connected || props.busy}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
+                >
+                  <Paperclip className="h-3.5 w-3.5" />
+                </button>
+              </Tooltip>
               <ComposerSelect
                 value={props.model}
                 onChange={(v) => props.onModelChange(v as ModelChoice)}
@@ -713,6 +795,75 @@ function ComposerSelect(props: {
   );
 }
 
+/**
+ * Right-side rail that carries the *process* — the live plan, the activity
+ * feed, and this run's diffs. Splitting it out keeps the model's summary
+ * pinned in the center so it can be tracked without scrolling the transcript.
+ */
+function ProcessPanel(props: {
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  onScroll: () => void;
+  plan: Plan | null;
+  busy: boolean;
+  actions: AgentAction[];
+  diffs: LiveDiff[];
+  stage: PipelineStage | null;
+  startedAt: number | null;
+  cancelling: boolean;
+  monacoTheme: string;
+  width: number;
+  resizing: boolean;
+  onResizeStart: (e: React.PointerEvent) => void;
+}) {
+  return (
+    <motion.aside
+      initial={{ opacity: 0, width: 0 }}
+      animate={{ opacity: 1, width: props.width }}
+      exit={{ opacity: 0, width: 0 }}
+      transition={{
+        opacity: { duration: 0.2 },
+        width: props.resizing
+          ? { duration: 0 }
+          : { type: "spring", stiffness: 260, damping: 30 },
+      }}
+      className="relative flex shrink-0 overflow-hidden border-l border-white/10"
+    >
+      {/* Drag handle: widen the rail to read a diff without cropping it. */}
+      <div
+        onPointerDown={props.onResizeStart}
+        className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize touch-none hover:bg-primary/40"
+      />
+      <div
+        ref={props.scrollRef}
+        onScroll={props.onScroll}
+        style={{ width: props.width }}
+        className={cn(
+          "flex h-full flex-col gap-3 overflow-y-auto",
+          "px-3 py-4 [scrollbar-gutter:stable]"
+        )}
+      >
+        <div className="flex items-center gap-1.5 px-1">
+          <Radar className="h-3.5 w-3.5 text-primary/70" />
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Process
+          </span>
+        </div>
+        {props.plan && <PlanCard plan={props.plan} />}
+        {props.busy && (
+          <ActivityFeed
+            actions={props.actions}
+            diffs={props.diffs}
+            stage={props.stage}
+            startedAt={props.startedAt}
+            cancelling={props.cancelling}
+            monacoTheme={props.monacoTheme}
+          />
+        )}
+      </div>
+    </motion.aside>
+  );
+}
+
 /** The live task plan checklist (pipeline stage 4, updated by the model). */
 function PlanCard({ plan }: { plan: Plan }) {
   const done = plan.steps.filter((s) => s.status === "done").length;
@@ -731,27 +882,25 @@ function PlanCard({ plan }: { plan: Plan }) {
       </div>
       <div className="space-y-1">
         {plan.steps.map((step) => (
-          <div
-            key={step.id}
-            className="flex items-start gap-1.5 text-[11px] text-muted-foreground"
-            title={step.detail}
-          >
-            <PlanStepIcon status={step.status} />
-            <span
-              className={cn(
-                "min-w-0 flex-1",
-                step.status === "done" && "line-through opacity-60",
-                step.status === "in-progress" && "text-foreground"
-              )}
-            >
-              {step.title}
-              {step.files.length > 0 && (
-                <span className="ml-1 font-mono text-[10px] opacity-60">
-                  {step.files.join(", ")}
-                </span>
-              )}
-            </span>
-          </div>
+          <Tooltip key={step.id} content={step.detail} disabled={!step.detail}>
+            <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+              <PlanStepIcon status={step.status} />
+              <span
+                className={cn(
+                  "min-w-0 flex-1",
+                  step.status === "done" && "line-through opacity-60",
+                  step.status === "in-progress" && "text-foreground"
+                )}
+              >
+                {step.title}
+                {step.files.length > 0 && (
+                  <span className="ml-1 font-mono text-[10px] opacity-60">
+                    {step.files.join(", ")}
+                  </span>
+                )}
+              </span>
+            </div>
+          </Tooltip>
         ))}
       </div>
     </motion.div>
@@ -781,16 +930,20 @@ function PlanStepIcon({ status }: { status: PlanStep["status"] }) {
  * the current tool — so long stretches between the model's own messages
  * never read as a stall.
  */
-function ActivityFeed({
+const ActivityFeed = memo(function ActivityFeed({
   actions,
+  diffs,
   stage,
   startedAt,
   cancelling,
+  monacoTheme,
 }: {
   actions: AgentAction[];
+  diffs: LiveDiff[];
   stage: PipelineStage | null;
   startedAt: number | null;
   cancelling: boolean;
+  monacoTheme: string;
 }) {
   const recent = actions.slice(-6);
   const elapsed = useElapsed(startedAt);
@@ -798,6 +951,15 @@ function ActivityFeed({
   const headline = cancelling
     ? "stopping — finishing the current step"
     : (running?.label ?? (stage ? STAGE_LABELS[stage] : "starting…"));
+
+  // One chronological stream: the recent actions plus every diff from this
+  // run (a diff is the record of an edit — never drop it, even after its
+  // action scrolls out of the window), ordered by the shared feed clock so
+  // each diff lands right under the "Editing" action that produced it.
+  const rows = [
+    ...recent.map((a) => ({ kind: "action" as const, seq: a.seq, action: a })),
+    ...diffs.map((d) => ({ kind: "diff" as const, seq: d.seq, diff: d })),
+  ].sort((a, b) => a.seq - b.seq);
 
   return (
     <motion.div
@@ -822,35 +984,53 @@ function ActivityFeed({
           {STAGE_LABELS[stage]}
         </p>
       )}
-      {recent.length > 0 && (
-        <div className="space-y-1">
+      {rows.length > 0 && (
+        <div className="space-y-1.5">
           <AnimatePresence initial={false}>
-            {recent.map((action) => (
-              <motion.div
-                key={action.id}
-                initial={{ opacity: 0, x: -6 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
-              >
-                {action.status === "running" ? (
-                  <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" />
-                ) : action.status === "done" ? (
-                  <Check className="h-3 w-3 shrink-0 text-success" />
-                ) : (
-                  <XCircle className="h-3 w-3 shrink-0 text-destructive" />
-                )}
-                <span className="truncate font-mono">{action.label}</span>
-              </motion.div>
-            ))}
+            {rows.map((row) =>
+              row.kind === "action" ? (
+                <motion.div
+                  key={row.action.id}
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                >
+                  {row.action.status === "running" ? (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" />
+                  ) : row.action.status === "done" ? (
+                    <Check className="h-3 w-3 shrink-0 text-success" />
+                  ) : (
+                    <XCircle className="h-3 w-3 shrink-0 text-destructive" />
+                  )}
+                  <span className="truncate font-mono">{row.action.label}</span>
+                </motion.div>
+              ) : (
+                <DiffCard
+                  key={row.diff.id}
+                  diff={row.diff}
+                  monacoTheme={monacoTheme}
+                />
+              )
+            )}
           </AnimatePresence>
         </div>
       )}
     </motion.div>
   );
-}
+});
 
-function ChatMessage({ item }: { item: ChatItemVm }) {
+const ChatMessage = memo(function ChatMessage({
+  item,
+  monacoTheme,
+}: {
+  item: ChatItemVm;
+  monacoTheme: string;
+}) {
   const isUser = item.role === "user";
+  if (item.role === "log") return <LogLine item={item} />;
+  if (item.role === "diff") {
+    return <DiffMessage item={item} monacoTheme={monacoTheme} />;
+  }
   return (
     <motion.div
       layout="position"
@@ -883,8 +1063,8 @@ function ChatMessage({ item }: { item: ChatItemVm }) {
               Atelier
             </span>
           </div>
-          <div className="chat-md rounded-2xl rounded-tl-md bg-muted/50 px-4 py-3">
-            <Markdown>{item.text}</Markdown>
+          <div className="chat-md rounded-2xl rounded-tl-md border border-white/10 bg-black/60 px-4 py-3">
+            <Markdown remarkPlugins={[remarkGfm]}>{item.text}</Markdown>
             {item.streaming && (
               <span className="ml-0.5 inline-block h-4 w-[7px] animate-pulse rounded-sm bg-primary/70 align-text-bottom" />
             )}
@@ -893,7 +1073,92 @@ function ChatMessage({ item }: { item: ChatItemVm }) {
       )}
     </motion.div>
   );
+});
+
+/** Icon for a pinned knowledge/impact log line, by its source topic. */
+function logIcon(topic: string | undefined) {
+  if (topic === "knowledge.retrieved") return Network;
+  return Radar;
 }
+
+/** Knowledge retrieval / impact radius, pinned inline in the transcript. */
+const LogLine = memo(function LogLine({ item }: { item: ChatItemVm }) {
+  const Icon = logIcon(item.logTopic);
+  return (
+    <motion.div
+      layout="position"
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18 }}
+      className="flex items-start gap-1.5 rounded-lg bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground"
+    >
+      <Icon className="mt-0.5 h-3 w-3 shrink-0 text-primary/70" />
+      <span className="min-w-0 flex-1 truncate">{item.text}</span>
+    </motion.div>
+  );
+});
+
+/**
+ * A file edit, shown inline in the transcript as a VS Code-style diff:
+ * just the path and the change, themed to match the app's dark/light mode.
+ */
+const DiffMessage = memo(function DiffMessage({
+  item,
+  monacoTheme,
+}: {
+  item: ChatItemVm;
+  monacoTheme: string;
+}) {
+  if (!item.diff) return null;
+  return <DiffCard diff={item.diff} monacoTheme={monacoTheme} />;
+});
+
+/**
+ * The diff card itself — path header, +/− line stat, and the Monaco diff.
+ * Shared by the transcript ({@link DiffMessage}) and the live activity feed,
+ * so an edit looks the same whether it's happening now or scrolled-back history.
+ */
+const DiffCard = memo(function DiffCard({
+  diff,
+  monacoTheme,
+}: {
+  diff: NonNullable<ChatItemVm["diff"]>;
+  monacoTheme: string;
+}) {
+  const { added, removed } = lineStat(diff.before, diff.after);
+  return (
+    <motion.div
+      layout="position"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="w-full max-w-full"
+    >
+      <div className="flex items-center gap-2">
+        <FileDiff className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        <span className="truncate font-mono text-xs font-medium">
+          {diff.path}
+        </span>
+        <span className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
+          {added > 0 && <span className="text-emerald-500">+{added}</span>}
+          {removed > 0 && <span className="text-destructive">−{removed}</span>}
+        </span>
+      </div>
+      <div
+        className="mt-2 overflow-hidden rounded-xl border border-white/10"
+        style={{ height: diffHeight(diff.before, diff.after) }}
+      >
+        <DiffEditor
+          original={diff.before}
+          modified={diff.after}
+          language={languageForPath(diff.path)}
+          theme={monacoTheme}
+          options={INLINE_DIFF_EDITOR_OPTIONS}
+        />
+      </div>
+    </motion.div>
+  );
+});
 
 function ThinkingBlock({ text }: { text: string }) {
   return (

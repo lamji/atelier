@@ -749,11 +749,16 @@ const SYSTEM_RULES =
   "PLAN PROGRESS: as you complete plan steps, call update_plan_step with " +
   "the step id and its new status.\n";
 
-/** Retrieved code the model reads verbatim, before it falls back to previews. */
-const FULL_CHUNKS = 3;
-const FULL_CHUNK_CHARS = 900;
+/**
+ * Only the very top matches ride as verbatim code; everything else goes in
+ * as a bare path so the model spends tokens reading a file only when the
+ * change actually needs it (it has retrieve_knowledge for the rest). Paths
+ * and the impact radius are the high-signal, low-cost data — those lead.
+ */
+const FULL_CHUNKS = 2;
+const FULL_CHUNK_CHARS = 600;
 /** Ceiling for the whole context block appended to the execute prompt. */
-const MAX_CONTEXT_CHARS = 9000;
+const MAX_CONTEXT_CHARS = 6000;
 
 /**
  * A one-shot streaming-input prompt carrying a multimodal user message:
@@ -789,19 +794,31 @@ function buildExecuteContext(
   plan: Plan,
   light: boolean
 ): string {
-  const lines: string[] = ["\nTASK CONTEXT (from the knowledge engine):"];
+  const lines: string[] = [
+    "\nTASK CONTEXT (from the knowledge engine — pull anything else with " +
+      "retrieve_knowledge; don't re-read what's already inlined here):",
+  ];
   const chunks = retrieval.chunks.slice(0, light ? 4 : 6);
-  if (chunks.length > 0) {
-    // The top matches go in as code, not as a one-line teaser: a 160-char
-    // preview tells the model a file exists, not what it does.
-    lines.push("Relevant code:");
-    chunks.forEach((chunk, i) => {
-      const budget = i < FULL_CHUNKS ? FULL_CHUNK_CHARS : 160;
+  const full = chunks.slice(0, FULL_CHUNKS);
+  const paths = chunks.slice(FULL_CHUNKS);
+  if (full.length > 0) {
+    // Inline the top matches as code so the model doesn't tool-call for the
+    // files it's most likely to touch.
+    lines.push("Most relevant code:");
+    for (const chunk of full) {
       lines.push(
         `- [${chunk.kind}] ${chunk.path}:`,
-        clip(chunk.preview, budget)
+        clip(chunk.preview, FULL_CHUNK_CHARS)
       );
-    });
+    }
+  }
+  if (paths.length > 0) {
+    // The tail rides as bare paths: a path is enough to decide whether to
+    // read it, and it costs a line instead of a code block.
+    lines.push(
+      "More relevant files (paths only — retrieve on demand):",
+      ...paths.map((chunk) => `- [${chunk.kind}] ${chunk.path}`)
+    );
   }
   if (!light) {
     // Blast radius carries callers, flows, tests and lessons for the

@@ -34,9 +34,16 @@ export interface TimelineEntryVm {
 
 export interface ChatItemVm {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "log" | "diff";
   text: string;
   streaming?: boolean;
   /** Data-URL thumbnails of images sent with a user message. */
   images?: string[];
+  /**
+   * Source event topic for a "log" item (e.g. "knowledge.retrieved"),
+   * used to pick its icon. Absent for user/assistant items.
+   */
+  logTopic?: string;
+  /** File edit shown inline as a VS Code-style diff. Only set for "diff". */
+  diff?: { path: string; before: string; after: string };
 }
