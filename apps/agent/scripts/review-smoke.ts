@@ -1,11 +1,15 @@
 /**
- * Post-edit review inputs smoke: the two things the model cannot gather
- * itself — near-identical code in files no import edge reaches, and the
- * companion files of what changed.
+ * Post-edit review smoke, in two halves.
  *
- * Builds a throwaway workspace with a component whose twin carries the
- * same bug (the PR-review case), indexes it, and asserts the sweep finds
- * the twin while ignoring unrelated code.
+ * INPUTS — the two things the model cannot gather itself: near-identical
+ * code in files no import edge reaches, and the companion files of what
+ * changed. Builds a throwaway workspace with a component whose twin
+ * carries the same bug (the PR-review case), indexes it, and asserts the
+ * sweep finds the twin while ignoring unrelated code.
+ *
+ * GATE — the verdict parser that decides pass/fail. The pipeline smoke
+ * drives a question-intent task, which skips the review stage outright, so
+ * nothing else exercises this.
  *
  *   pnpm --filter @atelier/agent smoke:review
  */
@@ -21,6 +25,14 @@ import { VectorStore } from "../src/knowledge/embeddings/vector-store.js";
 import { IncrementalIndexer } from "../src/knowledge/indexer/incremental-indexer.js";
 import { CloneScanner } from "../src/knowledge/impact/clone-scan.js";
 import { companionFilesFor } from "../src/knowledge/impact/companion-files.js";
+import {
+  extractVerdict,
+  withoutVerdictLine,
+} from "../src/orchestrator/pipeline-executor.js";
+import {
+  buildReviewFixPrompt,
+  buildReviewPrompt,
+} from "../src/orchestrator/review-prompt.js";
 import pino from "pino";
 
 /** The file the task "fixed" — expiry reshuffle with the separator stripped. */
@@ -153,6 +165,119 @@ async function main(): Promise<void> {
         )
     );
   }
+
+  // --- verdict gate: what the pipeline actually branches on -------------
+  const verdictCases: Array<{
+    name: string;
+    text: string;
+    verdict: "pass" | "fail";
+    findings: number;
+  }> = [
+    {
+      name: "clean pass",
+      text: '1. OK\n2. OK\nVERDICT_JSON: {"verdict":"pass","findings":[]}',
+      verdict: "pass",
+      findings: 0,
+    },
+    {
+      name: "fail carries its findings to the fix round",
+      text:
+        "1. ISSUE: twin left unfixed\n" +
+        'VERDICT_JSON: {"verdict":"fail","findings":["twin left unfixed",' +
+        '"unreachable error state"]}',
+      verdict: "fail",
+      findings: 2,
+    },
+    {
+      name: "malformed JSON falls back to the prose ISSUE lines",
+      text:
+        "- ISSUE: unused import in a.ts\n" +
+        "2. ISSUE: half-applied rename\n" +
+        "VERDICT_JSON: {verdict: fail",
+      verdict: "fail",
+      findings: 2,
+    },
+    {
+      name: "braces in the prose do not hijack the verdict",
+      text:
+        'The diff adds `{ ok: true }` and the string {"verdict":"pass"}.\n' +
+        'VERDICT_JSON: {"verdict":"fail","findings":["real defect"]}',
+      verdict: "fail",
+      findings: 1,
+    },
+    {
+      name: "no verdict line fails closed",
+      text: "Looks fine to me, shipping it.",
+      verdict: "fail",
+      findings: 0,
+    },
+    { name: "empty output fails closed", text: "", verdict: "fail", findings: 0 },
+  ];
+
+  for (const c of verdictCases) {
+    const got = extractVerdict(c.text);
+    check(
+      c.name,
+      got.verdict === c.verdict && got.findings.length === c.findings,
+      `got ${got.verdict}/${got.findings.length}, want ${c.verdict}/${c.findings}`
+    );
+  }
+
+  // The prompt must keep asking for the exact line the parser reads.
+  check(
+    "prompt still requests the VERDICT_JSON line",
+    buildReviewPrompt({
+      changedFiles: [changed],
+      similar: [],
+      companionFiles: [],
+    }).includes("VERDICT_JSON")
+  );
+
+  // --- the machine line never reaches the transcript --------------------
+  const report =
+    "OK - reachable states wired correctly\n" +
+    "ISSUE: orgTier.ts serializes limitUsd as Infinity\n" +
+    'VERDICT_JSON: {"verdict":"fail","findings":["orgTier.ts serializes"]}';
+  const stripped = withoutVerdictLine(report);
+  check(
+    "verdict line stripped from the shown report",
+    !stripped.includes("VERDICT_JSON") && stripped.includes("ISSUE: orgTier")
+  );
+  check(
+    "report with no verdict line survives untouched",
+    withoutVerdictLine("OK - all clean") === "OK - all clean"
+  );
+  check(
+    "verdict still parses from the RAW text",
+    extractVerdict(report).verdict === "fail"
+  );
+
+  // --- the repair round is told enough to act -----------------------------
+  const fixPrompt = buildReviewFixPrompt({
+    findings: ["orgTier.ts serializes limitUsd as Infinity", "dead export"],
+    changedFiles: ["src/orgTier.ts", "src/tierEntitlements.ts"],
+    request: "cap the tenant spend",
+    attempt: 1,
+    maxAttempts: 3,
+  });
+  check(
+    "fix prompt carries every finding",
+    fixPrompt.includes("orgTier.ts serializes limitUsd as Infinity") &&
+      fixPrompt.includes("dead export")
+  );
+  check(
+    "fix prompt names the changed files",
+    fixPrompt.includes("src/orgTier.ts") &&
+      fixPrompt.includes("src/tierEntitlements.ts")
+  );
+  check(
+    "fix prompt keeps the original request in scope",
+    fixPrompt.includes("cap the tenant spend")
+  );
+  check(
+    "fix prompt warns that a re-review follows",
+    /re-check|reviewer re-/i.test(fixPrompt)
+  );
 
   await embedder.shutdown().catch(() => undefined);
   db.close();

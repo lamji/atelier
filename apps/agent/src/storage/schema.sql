@@ -241,3 +241,49 @@ CREATE TABLE IF NOT EXISTS test_runs (
   findings TEXT NOT NULL DEFAULT '[]',
   ran_at INTEGER NOT NULL
 );
+
+-- Context engineering: per-LLM-request token accounting. Estimated at
+-- assembly time, reconciled with SDK actuals when the result arrives.
+CREATE TABLE IF NOT EXISTS context_requests (
+  id TEXT PRIMARY KEY,
+  task_id TEXT,
+  conversation_id TEXT,
+  purpose TEXT NOT NULL,
+  sections TEXT NOT NULL DEFAULT '[]',
+  append_tokens INTEGER NOT NULL DEFAULT 0,
+  est_baseline_tokens INTEGER NOT NULL DEFAULT 0,
+  saved_tokens INTEGER NOT NULL DEFAULT 0,
+  actual_input_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER,
+  output_tokens INTEGER,
+  cache_hit INTEGER NOT NULL DEFAULT 0,
+  deduped_chunks INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_requests_conv
+  ON context_requests(conversation_id, created_at);
+
+-- Chunks already sent to a conversation at full detail, keyed by content
+-- hash so re-indexing (which churns chunk ids) never confuses dedup.
+CREATE TABLE IF NOT EXISTS context_sent_chunks (
+  conversation_id TEXT NOT NULL,
+  chunk_hash TEXT NOT NULL,
+  path TEXT NOT NULL,
+  tokens INTEGER NOT NULL DEFAULT 0,
+  sent_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, chunk_hash)
+);
+
+-- Compressed per-task outcomes ("conversation memory"): injected into
+-- later tasks instead of replaying raw history.
+CREATE TABLE IF NOT EXISTS task_summaries (
+  task_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  changed_files TEXT NOT NULL DEFAULT '[]',
+  outcome TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_summaries_conv
+  ON task_summaries(conversation_id, created_at);

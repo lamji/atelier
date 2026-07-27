@@ -1,6 +1,6 @@
 import type { LessonKind } from "@atelier/protocol";
 import type { ToolRegistry } from "./registry.js";
-import type { Retriever } from "../rag/retriever.js";
+import type { RetrieverLike } from "../context/cache/index.js";
 import type { SymbolGraph } from "../knowledge/graph/symbol-graph.js";
 import type { SymbolImpactAnalyzer } from "../knowledge/impact/symbol-impact.js";
 import type { KnowledgeQuery } from "../knowledge/query/knowledge-query.js";
@@ -53,7 +53,7 @@ interface AnalyzeImpactInput {
  */
 export function registerKnowledgeTools(
   registry: ToolRegistry,
-  retriever: Retriever,
+  retriever: RetrieverLike,
   graph: SymbolGraph,
   knowledge: KnowledgeQuery,
   lessons: LessonStore,

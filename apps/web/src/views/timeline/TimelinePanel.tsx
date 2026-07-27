@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
@@ -23,11 +24,18 @@ export interface TimelinePanelProps {
   entries: TimelineEntryVm[];
 }
 
-export function TimelinePanel({ entries }: TimelinePanelProps) {
+/**
+ * The agent's raw event feed. Memoized, and each card is memoized too: the
+ * panel sits inside the shell's tree, so without this every keystroke and
+ * every unrelated store write re-rendered the whole list.
+ */
+export const TimelinePanel = memo(function TimelinePanel({
+  entries,
+}: TimelinePanelProps) {
   // Newest first, pinned to the top — but only while you're already there,
   // so scrolling down to read older entries isn't interrupted.
   const { ref: scrollRef, onScroll } = useStickToTop<HTMLDivElement>([entries]);
-  const newestFirst = [...entries].reverse();
+  const newestFirst = useMemo(() => [...entries].reverse(), [entries]);
 
   return (
     <div className="flex h-full flex-col">
@@ -51,7 +59,7 @@ export function TimelinePanel({ entries }: TimelinePanelProps) {
       </div>
     </div>
   );
-}
+});
 
 interface TopicStyle {
   icon: typeof Activity;
@@ -105,7 +113,11 @@ const TONE_CLASSES: Record<TopicStyle["tone"], string> = {
   destructive: "text-destructive bg-destructive/12",
 };
 
-function TimelineCard({ entry }: { entry: TimelineEntryVm }) {
+const TimelineCard = memo(function TimelineCard({
+  entry,
+}: {
+  entry: TimelineEntryVm;
+}) {
   const { icon: Icon, tone } = styleFor(entry.topic);
   const time = new Date(entry.ts).toLocaleTimeString(undefined, {
     hour12: false,
@@ -113,8 +125,9 @@ function TimelineCard({ entry }: { entry: TimelineEntryVm }) {
   const detail = summarize(entry);
 
   return (
+    // No `layout` here: hundreds of layout-projected nodes forced a measure
+    // pass on every commit, and the list only ever grows at one end.
     <motion.div
-      layout="position"
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
@@ -145,7 +158,7 @@ function TimelineCard({ entry }: { entry: TimelineEntryVm }) {
       </span>
     </motion.div>
   );
-}
+});
 
 function summarize(entry: TimelineEntryVm): string {
   const p = entry.payload as Record<string, unknown> | null;
@@ -193,7 +206,16 @@ function summarize(entry: TimelineEntryVm): string {
       const companions = Array.isArray(p.companionFiles)
         ? p.companionFiles.length
         : 0;
-      return `${similar} similar file(s), ${companions} companion(s)`;
+      const scanned = `${similar} similar file(s), ${companions} companion(s)`;
+      if (!p.verdict) return scanned;
+      const attempt = p.attempt ? ` #${Number(p.attempt)}` : "";
+      const findings = Array.isArray(p.findings) ? p.findings : [];
+      const detail =
+        p.verdict === "pass"
+          ? "passed"
+          : `FAILED — ${findings.slice(0, 2).join("; ").slice(0, 120) ||
+              "no findings reported"}`;
+      return `review${attempt} ${detail} · ${scanned}`;
     }
     case "git.flow.requested":
       return `awaiting confirmation — ${String(p.command ?? "").slice(0, 120)}`;

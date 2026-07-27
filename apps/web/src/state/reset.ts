@@ -7,6 +7,7 @@ import { useSessionsStore } from "./sessions.store";
 import { useTerminalStore } from "./terminal.store";
 import { useTimelineStore } from "./timeline.store";
 import { useUsageStore } from "./usage.store";
+import { useContextStore } from "./context.store";
 import { useWorkspaceStore } from "./workspace.store";
 
 /**
@@ -38,6 +39,7 @@ export function resetWorkspaceStores(): void {
   useUsageStore.setState({
     usage: { available: false, status: null, windows: [], updatedAt: null },
   });
+  useContextStore.setState({ requests: [] });
   useWorkspaceStore.setState({
     tree: null,
     treeVersion: 0,

@@ -8,6 +8,12 @@ export interface AgentAction {
   id: string;
   label: string;
   status: "running" | "done" | "failed";
+  /**
+   * Why it failed, straight from the tool.failed event. Kept on the action
+   * so a red X always comes with its reason — a failed edit that only shows
+   * an icon tells you nothing about what went wrong.
+   */
+  error?: string;
   /** Feed ordering, shared with LiveDiff so diffs slot in chronologically. */
   seq: number;
 }
@@ -106,11 +112,20 @@ interface SessionsStore {
   actionFinished: (
     conversationId: string,
     id: string,
-    status: "done" | "failed"
+    status: "done" | "failed",
+    error?: string
   ) => void;
   setStage: (conversationId: string, stage: PipelineStage) => void;
   taskCancelling: (conversationId: string) => void;
   taskStarted: (conversationId: string, taskId: string, title?: string) => void;
+  /**
+   * After a reload, restores the busy state for tasks the backend reports as
+   * still running, and re-maps taskId -> conversationId so live events route
+   * again. Without this the composer looks idle while a task is in flight.
+   */
+  restoreActiveTasks: (
+    tasks: { id: string; conversationId: string; startedAt: number }[]
+  ) => void;
   taskEnded: (
     conversationId: string,
     outcome: "completed" | "cancelled" | "error",
@@ -258,16 +273,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         const lastIndex = items.length - 1;
         // Common streaming case: the token belongs to the last item, so we
         // can skip the scan entirely.
-        if (lastIndex >= 0 && items[lastIndex].id === messageId) {
-          const last = items[lastIndex];
+        const last = lastIndex >= 0 ? items[lastIndex] : undefined;
+        if (last && last.id === messageId) {
           const updated = items.slice();
           updated[lastIndex] = { ...last, text: last.text + delta };
           return { items: updated };
         }
         const index = items.findIndex((i) => i.id === messageId);
-        if (index !== -1) {
+        const found = index !== -1 ? items[index] : undefined;
+        if (found) {
           const updated = items.slice();
-          updated[index] = { ...items[index], text: items[index].text + delta };
+          updated[index] = { ...found, text: found.text + delta };
           return { items: updated };
         }
         return {
@@ -279,16 +295,34 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       }),
     })),
 
+  /**
+   * Finishes the run's assistant message AND moves it to the end.
+   *
+   * Every streamed token of a task shares one message id, so the item is
+   * created at the first delta — before the edits, diffs, and review that
+   * follow — and it would otherwise sit above them with the final report
+   * (written last) stranded near the top. Reloading already puts it last,
+   * since it is persisted with the task's end time; this makes the live
+   * transcript agree with that order instead of asking for a scroll up.
+   */
   completeAssistantMessage: (conversationId, messageId, text) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => {
-        const exists = session.items.some((i) => i.id === messageId);
-        const items = exists
-          ? session.items.map((i) =>
-              i.id === messageId ? { ...i, text, streaming: false } : i
-            )
-          : [...session.items, { id: messageId, role: "assistant" as const, text }];
-        return { items, thinking: "" };
+        const rest = session.items.filter((i) => i.id !== messageId);
+        const existing = session.items.find((i) => i.id === messageId);
+        return {
+          items: [
+            ...rest,
+            {
+              ...(existing ?? { id: messageId, role: "assistant" as const }),
+              id: messageId,
+              role: "assistant" as const,
+              text,
+              streaming: false,
+            },
+          ],
+          thinking: "",
+        };
       }),
     })),
 
@@ -309,11 +343,11 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
     })),
 
-  actionFinished: (conversationId, id, status) =>
+  actionFinished: (conversationId, id, status, error) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         actions: session.actions.map((a) =>
-          a.id === id ? { ...a, status } : a
+          a.id === id ? { ...a, status, error } : a
         ),
       })),
     })),
@@ -347,6 +381,29 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
       taskMap: { ...s.taskMap, [taskId]: conversationId },
     })),
+
+  restoreActiveTasks: (tasks) =>
+    set((s) => {
+      const sessions = { ...s.sessions };
+      const taskMap = { ...s.taskMap };
+      for (const t of tasks) {
+        taskMap[t.id] = t.conversationId;
+        const session = sessions[t.conversationId];
+        if (!session) continue;
+        // Already live in this tab (event beat the restore) — don't clobber
+        // its accumulated feed.
+        if (session.activeTaskId === t.id) continue;
+        sessions[t.conversationId] = {
+          ...session,
+          activeTaskId: t.id,
+          status: "working",
+          taskStartedAt: t.startedAt,
+          cancelling: false,
+          lastError: null,
+        };
+      }
+      return { sessions, taskMap };
+    }),
 
   taskEnded: (conversationId, outcome, error) =>
     set((s) => ({

@@ -6,6 +6,7 @@ import { DbApprovalRequest, DbApprovalResolved } from "./models/hooks.js";
 import { UsageSnapshot } from "./models/usage.js";
 import { EditImpact, ImpactRadius } from "./models/impact.js";
 import { Feature, GraphNode, Lesson, RetrievalResult } from "./models/knowledge.js";
+import { ContextRequestStats } from "./models/context.js";
 import { ValidationKind, ValidationResult } from "./models/validation.js";
 import { ProjectInfo } from "./methods/projects.js";
 
@@ -65,6 +66,8 @@ export const eventPayloads = {
   }),
   /** Plan rate-limit usage, pushed whenever it changes. */
   "usage.updated": UsageSnapshot,
+  /** Context-engineering accounting for one LLM request. */
+  "context.stats": ContextRequestStats,
 
   // pipeline
   "pipeline.stage.started": z.object({
@@ -95,7 +98,7 @@ export const eventPayloads = {
   "impact.radius": ImpactRadius,
   /** Symbol-level impact at a specific edit site (who uses this line). */
   "edit.impact": EditImpact,
-  /** Post-edit consistency sweep: what the self-review was given. */
+  /** Post-edit consistency sweep by an independent reviewer agent. */
   "review.checked": z.object({
     changedFiles: z.array(z.string()),
     /** Untouched files whose code closely resembles a change. */
@@ -110,6 +113,11 @@ export const eventPayloads = {
       )
       .default([]),
     companionFiles: z.array(z.string()).default([]),
+    /** pass/fail verdict from this review attempt. */
+    verdict: z.enum(["pass", "fail"]).optional(),
+    /** 1-based review attempt number (a fail triggers a fix + re-review). */
+    attempt: z.number().optional(),
+    findings: z.array(z.string()).default([]),
   }),
   "plan.created": Plan,
   "plan.step.updated": z.object({

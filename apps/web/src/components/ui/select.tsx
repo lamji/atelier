@@ -6,6 +6,8 @@ import { cn } from "@/lib/cn";
 export interface SelectOption {
   value: string;
   label: string;
+  /** Secondary line in the menu (e.g. the model's version blurb). */
+  hint?: string;
 }
 
 export interface SelectProps {
@@ -83,7 +85,10 @@ export function Select({
             exit={{ opacity: 0, y: direction === "up" ? 4 : -4 }}
             transition={{ duration: 0.12 }}
             className={cn(
-              "absolute left-0 z-50 min-w-full overflow-hidden rounded-lg",
+              // Capped: model hints are a full sentence, and an uncapped
+              // menu would stretch far past the composer that anchors it.
+              "absolute left-0 z-50 min-w-full max-w-[min(20rem,80vw)]",
+              "overflow-hidden rounded-lg",
               "border border-white/10 bg-card p-1 shadow-xl",
               direction === "up" ? "bottom-full mb-1" : "top-full mt-1",
               menuClassName
@@ -98,16 +103,23 @@ export function Select({
                     setOpen(false);
                   }}
                   className={cn(
-                    "flex w-full items-center gap-2 whitespace-nowrap rounded-md",
+                    "flex w-full items-start gap-2 rounded-md",
                     "px-2 py-1 text-left text-[11px]",
                     option.value === value
                       ? "text-primary"
                       : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
                   )}
                 >
-                  <span className="flex-1 truncate">{option.label}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{option.label}</span>
+                    {option.hint && (
+                      <span className="mt-0.5 block text-[10px] leading-snug opacity-60">
+                        {option.hint}
+                      </span>
+                    )}
+                  </span>
                   {option.value === value && (
-                    <Check className="h-3 w-3 shrink-0" />
+                    <Check className="mt-0.5 h-3 w-3 shrink-0" />
                   )}
                 </button>
               </li>

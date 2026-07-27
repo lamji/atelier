@@ -8,7 +8,9 @@ import { useThemeStore } from "@/state/theme.store";
 /** ViewModel for the terminal island: session tabs, create, kill, mount. */
 export function useTerminalViewModel() {
   const connected = useConnectionStore((s) => s.state === "connected");
-  const { sessions, activeTermId, setActive } = useTerminalStore();
+  const sessions = useTerminalStore((s) => s.sessions);
+  const activeTermId = useTerminalStore((s) => s.activeTermId);
+  const setActive = useTerminalStore((s) => s.setActive);
   const theme = useThemeStore((s) => s.theme);
 
   useEffect(() => {

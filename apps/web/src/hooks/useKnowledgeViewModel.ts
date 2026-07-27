@@ -12,7 +12,21 @@ import { useWorkspaceStore } from "@/state/workspace.store";
  * indexing progress, re-index action, and graph scope/loading.
  */
 export function useKnowledgeViewModel() {
-  const store = useKnowledgeStore();
+  // Per-field selectors: indexing progress ticks several times a second
+  // during a scan, and only the progress readouts should follow it.
+  const stats = useKnowledgeStore((s) => s.stats);
+  const statsVersion = useKnowledgeStore((s) => s.statsVersion);
+  const indexing = useKnowledgeStore((s) => s.indexing);
+  const recentUpdates = useKnowledgeStore((s) => s.recentUpdates);
+  const features = useKnowledgeStore((s) => s.features);
+  const featureScan = useKnowledgeStore((s) => s.featureScan);
+  const lessons = useKnowledgeStore((s) => s.lessons);
+  const graph = useKnowledgeStore((s) => s.graph);
+  const graphScope = useKnowledgeStore((s) => s.graphScope);
+  const graphTarget = useKnowledgeStore((s) => s.graphTarget);
+  const graphLoading = useKnowledgeStore((s) => s.graphLoading);
+  const welcomeDismissed = useKnowledgeStore((s) => s.welcomeDismissed);
+  const dismissWelcome = useKnowledgeStore((s) => s.dismissWelcome);
   const connectionState = useConnectionStore((s) => s.state);
   const setRightTab = useWorkspaceStore((s) => s.setRightTab);
   const rightTab = useWorkspaceStore((s) => s.rightTab);
@@ -43,12 +57,11 @@ export function useKnowledgeViewModel() {
     return () => {
       cancelled = true;
     };
-  }, [connected, store.statsVersion]);
+  }, [connected, statsVersion]);
 
   // While indexing, poll stats so `queued` (and the welcome/status-bar
   // indicator) update smoothly even between knowledge.updated flushes.
-  const indexingActiveNow =
-    store.indexing !== null || (store.stats?.queued ?? 0) > 0;
+  const indexingActiveNow = indexing !== null || (stats?.queued ?? 0) > 0;
   useEffect(() => {
     if (!connected || !indexingActiveNow) return;
     const timer = setInterval(() => {
@@ -110,29 +123,26 @@ export function useKnowledgeViewModel() {
     const s = useKnowledgeStore.getState();
     if (s.graphLoading) return;
     void loadGraph(s.graphScope, s.graphTarget || undefined);
-  }, [connected, rightTab, store.statsVersion, loadGraph]);
-
-  // Indexing is active while jobs are queued (from stats) or a live
-  // progress event is in flight.
-  const indexingActive =
-    store.indexing !== null || (store.stats?.queued ?? 0) > 0;
+  }, [connected, rightTab, statsVersion, loadGraph]);
 
   return {
     connected,
-    stats: store.stats,
-    indexing: store.indexing,
-    indexingActive,
-    welcomeDismissed: store.welcomeDismissed,
-    dismissWelcome: store.dismissWelcome,
-    recentUpdates: store.recentUpdates,
-    features: store.features,
-    featureScan: store.featureScan,
+    stats,
+    indexing,
+    // Indexing is active while jobs are queued (from stats) or a live
+    // progress event is in flight.
+    indexingActive: indexingActiveNow,
+    welcomeDismissed,
+    dismissWelcome,
+    recentUpdates,
+    features,
+    featureScan,
     scanFeatures,
-    lessons: store.lessons,
-    graph: store.graph,
-    graphScope: store.graphScope,
-    graphTarget: store.graphTarget,
-    graphLoading: store.graphLoading,
+    lessons,
+    graph,
+    graphScope,
+    graphTarget,
+    graphLoading,
     reindex,
     loadGraph,
     openGraph,

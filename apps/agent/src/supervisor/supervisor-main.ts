@@ -31,26 +31,50 @@ function createLogger(): pino.Logger {
   return pino({ level });
 }
 
-/** Reuse a stable hub token across restarts so a live UI keeps working. */
-function loadOrCreateHubInfo(port: number): BridgeInfo {
-  const file = path.join(atelierDataRoot(), "hub.json");
-  let token: string | null = null;
+/** Read a hub discovery file, or null when absent/unreadable. */
+function readHubFile(file: string): BridgeInfo | null {
   try {
-    const existing = JSON.parse(fs.readFileSync(file, "utf8")) as BridgeInfo;
-    if (typeof existing.token === "string" && existing.token.length >= 32) {
-      token = existing.token;
-    }
+    return JSON.parse(fs.readFileSync(file, "utf8")) as BridgeInfo;
   } catch {
-    // first run
+    return null;
   }
+}
+
+/**
+ * Reuse a stable hub token across restarts so a live UI keeps working.
+ *
+ * Each hub also writes a per-port `hub-<port>.json`: several supervisors
+ * can run at once (one per project in dev), and a single shared file would
+ * leave every UI but the last one pointed at the wrong port. The canonical
+ * `hub.json` is only claimed by the default-port hub (or when it is stale/
+ * missing), so `atelier run` keeps finding the primary supervisor.
+ */
+function loadOrCreateHubInfo(port: number): BridgeInfo {
+  const root = atelierDataRoot();
+  const canonical = path.join(root, "hub.json");
+  const perPort = path.join(root, `hub-${port}.json`);
+
+  const previous = readHubFile(perPort) ?? readHubFile(canonical);
+  const token =
+    typeof previous?.token === "string" && previous.token.length >= 32
+      ? previous.token
+      : crypto.randomBytes(32).toString("hex");
+
   const info: BridgeInfo = {
     port,
-    token: token ?? crypto.randomBytes(32).toString("hex"),
+    token,
     pid: process.pid,
     startedAt: Date.now(),
   };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(info, null, 2), "utf8");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(perPort, JSON.stringify(info, null, 2), "utf8");
+
+  const owner = readHubFile(canonical);
+  const claimCanonical =
+    port === DEFAULT_HUB_PORT || owner === null || owner.port === port;
+  if (claimCanonical) {
+    fs.writeFileSync(canonical, JSON.stringify(info, null, 2), "utf8");
+  }
   return info;
 }
 

@@ -4,22 +4,33 @@ import { useConnectionStore } from "@/state/connection.store";
 import { useGitStore } from "@/state/git.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 
+/** A burst of agent writes should cost one tree read, not one per file. */
+const TREE_REFETCH_DEBOUNCE_MS = 400;
+
 /** ViewModel for the file explorer: tree loading, expand, open file. */
 export function useFileExplorerViewModel() {
   const connected = useConnectionStore((s) => s.state === "connected");
-  const { tree, treeVersion, expanded, selectedPath } = useWorkspaceStore();
+  const tree = useWorkspaceStore((s) => s.tree);
+  const treeVersion = useWorkspaceStore((s) => s.treeVersion);
+  const expanded = useWorkspaceStore((s) => s.expanded);
+  const selectedPath = useWorkspaceStore((s) => s.selectedPath);
 
+  // Debounced by construction: a new treeVersion re-runs the effect, whose
+  // cleanup cancels the pending read, so only the last one in a burst fires.
   useEffect(() => {
     if (!connected) return;
     let cancelled = false;
-    void bridge
-      .rpc("fs.tree", { depth: 6 })
-      .then(({ root }) => {
-        if (!cancelled) useWorkspaceStore.getState().setTree(root);
-      })
-      .catch(() => undefined);
+    const timer = setTimeout(() => {
+      void bridge
+        .rpc("fs.tree", { depth: 6 })
+        .then(({ root }) => {
+          if (!cancelled) useWorkspaceStore.getState().setTree(root);
+        })
+        .catch(() => undefined);
+    }, treeVersion === 0 ? 0 : TREE_REFETCH_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [connected, treeVersion]);
 

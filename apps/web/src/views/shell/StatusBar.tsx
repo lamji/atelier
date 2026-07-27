@@ -4,6 +4,7 @@ import {
   FolderOpen,
   GaugeCircle,
   GitBranch,
+  Layers,
   Loader2,
   Plug,
   PlugZap,
@@ -14,6 +15,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import type { AgentStatus, ConnectionState } from "@/types";
 import type { IndexingProgress } from "@/state/knowledge.store";
 import type { UsageVm } from "@/hooks/useUsageViewModel";
+import type { ContextStatsVm } from "@/hooks/useContextStatsViewModel";
 import type { UsageWindow } from "@atelier/protocol";
 
 export interface StatusBarProps {
@@ -25,6 +27,8 @@ export interface StatusBarProps {
   branch: string | null;
   /** Live plan usage. */
   usage: UsageVm;
+  /** Live context-engineering token metrics. */
+  contextStats: ContextStatsVm;
   /** Live indexing indicator (shown beside the folder path). */
   indexingActive: boolean;
   indexing: IndexingProgress | null;
@@ -87,6 +91,7 @@ export function StatusBar(props: StatusBarProps) {
         </Tooltip>
       )}
       <UsagePill usage={props.usage} />
+      <ContextPill stats={props.contextStats} />
       {(() => {
         const showSync =
           props.indexingActive || props.lastIndexedAt != null;
@@ -276,6 +281,59 @@ function UsageBar({ window: w, now }: { window: UsageWindow; now: number }) {
       </span>
     </Tooltip>
   );
+}
+
+/**
+ * Live context-engineering metrics: what the last request's assembled
+ * context cost, its savings vs naive assembly, and — across the recent
+ * window — fresh input vs prompt-cache reads.
+ */
+function ContextPill({ stats }: { stats: ContextStatsVm }) {
+  if (!stats.available || !stats.last) return null;
+  const last = stats.last;
+  const sections = last.sections
+    .map((s) => `${s.name} ${s.tokens}t`)
+    .join(" · ");
+  const cacheShare =
+    stats.totals.freshInputTokens + stats.totals.cacheReadTokens > 0
+      ? Math.round(
+          (stats.totals.cacheReadTokens /
+            (stats.totals.freshInputTokens + stats.totals.cacheReadTokens)) *
+            100
+        )
+      : null;
+  const tip =
+    `Last ${last.purpose}: context ${last.appendTokens}t` +
+    (last.savedTokens > 0
+      ? ` (saved ${last.savedTokens}t, ${last.savedPct}%)`
+      : "") +
+    (last.dedupedChunks > 0 ? ` · ${last.dedupedChunks} deduped` : "") +
+    (sections ? ` · ${sections}` : "") +
+    (last.actualInputTokens !== undefined
+      ? ` · actual input ${fmtTokens(last.actualInputTokens)}` +
+        (last.cacheReadTokens
+          ? ` + ${fmtTokens(last.cacheReadTokens)} cached`
+          : "")
+      : "") +
+    (cacheShare !== null ? ` · session cache share ${cacheShare}%` : "");
+  return (
+    <Tooltip content={tip}>
+      <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
+        <Layers className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        <span className="tabular-nums">
+          ctx {fmtTokens(last.appendTokens)}
+        </span>
+        {last.savedPct > 0 && (
+          <span className="tabular-nums text-success">−{last.savedPct}%</span>
+        )}
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Compact token count: "840t", "12.4kt". */
+function fmtTokens(n: number): string {
+  return n >= 10_000 ? `${(n / 1000).toFixed(1)}kt` : `${n}t`;
 }
 
 /** Time-remaining countdown: "3d 4h", "2h 05m", "4m 12s", "9s", "reset". */

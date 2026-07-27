@@ -1,0 +1,52 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e5]:
+    - generic [ref=f1e6]:
+      - generic [ref=f1e7]: A
+      - generic [ref=f1e8]:
+        - paragraph [ref=f1e9]: Atelier
+        - paragraph [ref=f1e10]: agentic engineering
+    - navigation [ref=f1e11]:
+      - button "Chat" [ref=f1e12]
+      - button "Editor" [ref=f1e17]
+      - button "Terminal" [ref=f1e24]
+      - button "Activity" [ref=f1e29]
+  - generic [ref=f1e33]:
+    - generic [ref=f1e35]:
+      - button [ref=f1e37]
+      - button [ref=f1e43]
+      - button [ref=f1e49]
+      - button [ref=f1e55]
+      - button [ref=f1e62]
+      - button [ref=f1e68]
+      - button [ref=f1e72]
+      - button [ref=f1e77]
+    - generic [ref=f1e80]:
+      - generic [ref=f1e84]:
+        - generic [ref=f1e85]: Agents
+        - button "New" [ref=f1e90]
+      - separator [ref=f1e93]
+      - generic [ref=f1e99]:
+        - generic [ref=f1e100]: No session
+        - generic [ref=f1e107]:
+          - generic [ref=f1e117]:
+            - paragraph [ref=f1e118]: Connecting to local agent…
+            - paragraph [ref=f1e119]: Make sure the agent process is running.
+          - generic [ref=f1e123]:
+            - generic [ref=f1e124]:
+              - textbox "Describe a task, paste or drop a screenshot…" [disabled] [ref=f1e125]
+              - button [disabled] [ref=f1e127]
+            - generic [ref=f1e130]:
+              - button [disabled] [ref=f1e132]
+              - button "Default" [ref=f1e136] [cursor=pointer]
+              - 'button "Reasoning: default" [ref=f1e141] [cursor=pointer]'
+              - generic [ref=f1e145] [cursor=pointer]:
+                - checkbox "Plan mode" [ref=f1e146]
+                - text: Plan mode
+              - generic [ref=f1e151] [cursor=pointer]:
+                - checkbox "Vibe" [ref=f1e152]
+                - text: Vibe
+              - generic [ref=f1e155]: Enter ↵ · Shift+Enter newline
+  - generic [ref=f1e157]:
+    - generic [ref=f1e158]: Disconnected
+    - generic [ref=f1e161]: agent idle
+    - generic [ref=f1e163]: no workspace

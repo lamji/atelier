@@ -13,5 +13,6 @@ export * from "./models/model-option.js";
 export * from "./models/validation.js";
 export * from "./models/git.js";
 export * from "./models/conversation.js";
+export * from "./models/context.js";
 export * from "./models/fs.js";
 export { Settings } from "./methods/settings.js";

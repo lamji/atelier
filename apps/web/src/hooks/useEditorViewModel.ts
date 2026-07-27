@@ -21,10 +21,16 @@ const LANG_BY_EXT: Record<string, string> = {
   ps1: "powershell",
 };
 
-/** ViewModel for the center editor/diff area. */
+/**
+ * ViewModel for the center editor/diff area. Field-by-field selectors, not
+ * the whole workspace store: `treeVersion` moves on every file.changed event
+ * the agent causes, and the editor has no interest in it.
+ */
 export function useEditorViewModel() {
-  const { selectedPath, fileContent, rightTab, setRightTab } =
-    useWorkspaceStore();
+  const selectedPath = useWorkspaceStore((s) => s.selectedPath);
+  const fileContent = useWorkspaceStore((s) => s.fileContent);
+  const rightTab = useWorkspaceStore((s) => s.rightTab);
+  const setRightTab = useWorkspaceStore((s) => s.setRightTab);
   const theme = useThemeStore((s) => s.theme);
 
   const language = languageFor(selectedPath);

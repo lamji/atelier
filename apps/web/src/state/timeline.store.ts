@@ -1,7 +1,12 @@
 import { create } from "zustand";
 import type { TimelineEntryVm } from "@/types";
 
-const MAX_ENTRIES = 1000;
+/**
+ * Cards kept in the Activity feed. The list is not virtualized, so this is
+ * also the render budget for the panel — a thousand cards was enough to
+ * show up as a stutter on every event.
+ */
+const MAX_ENTRIES = 300;
 
 interface TimelineStore {
   entries: TimelineEntryVm[];

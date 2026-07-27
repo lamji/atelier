@@ -32,6 +32,9 @@ interface ChunkRow {
   text: string;
   start_row: number | null;
   end_row: number | null;
+  symbol_id: number | null;
+  token_count: number | null;
+  content_hash: string | null;
 }
 
 /**
@@ -136,9 +139,13 @@ export class Retriever {
     const features = this.matchFeatures(terms);
     if (features.length > 0) arms.push("features");
 
-    // Merge, filter, rank.
+    // Merge, filter, rank. Arms are min-max normalized first so one arm's
+    // score scale (e.g. raw cosine vs hit ratio) cannot drown the others;
+    // the 0.55/0.30/0.15 weights then mean what they say.
+    normalizeArms(scores);
     const combined = [...scores.entries()].map(([id, s]) => ({
       id,
+      s,
       score: 0.55 * s.vec + 0.3 * s.kw + 0.15 * s.sym,
     }));
     combined.sort((a, b) => b.score - a.score);
@@ -149,7 +156,7 @@ export class Retriever {
     // design, so re-indexing never wipes them); path falls back to kind.
     const loadChunk = this.db.prepare(
       "SELECT c.id, COALESCE(f.path, c.kind) AS path, c.kind, c.text, " +
-        "c.start_row, c.end_row " +
+        "c.start_row, c.end_row, c.symbol_id, c.token_count, c.content_hash " +
         "FROM chunks c LEFT JOIN files f ON f.id = c.file_id WHERE c.id = ?"
     );
     const fileless = (kind: string) =>
@@ -173,6 +180,17 @@ export class Retriever {
             : row.text,
         startRow: row.start_row ?? undefined,
         endRow: row.end_row ?? undefined,
+        symbolId: row.symbol_id ?? undefined,
+        tokenCount:
+          row.token_count && row.token_count > 0
+            ? row.token_count
+            : Math.ceil(row.text.length / 4),
+        contentHash: row.content_hash ?? undefined,
+        arms: {
+          vec: Number(hit.s.vec.toFixed(4)),
+          kw: Number(hit.s.kw.toFixed(4)),
+          sym: Number(hit.s.sym.toFixed(4)),
+        },
       });
     }
     this.lessons.markUsed(usedLessonChunks);
@@ -219,6 +237,24 @@ export class Retriever {
       updatedAt: f.updated_at,
       files: [],
     }));
+  }
+}
+
+/** Min-max normalize each retrieval arm across the candidate set. */
+function normalizeArms(
+  scores: Map<number, { vec: number; kw: number; sym: number }>
+): void {
+  for (const arm of ["vec", "kw", "sym"] as const) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const s of scores.values()) {
+      if (s[arm] < min) min = s[arm];
+      if (s[arm] > max) max = s[arm];
+    }
+    if (max <= 0 || max === min) continue;
+    for (const s of scores.values()) {
+      if (s[arm] > 0) s[arm] = (s[arm] - min) / (max - min);
+    }
   }
 }
 

@@ -18,8 +18,14 @@ export function startHub(): void {
 
   hub.onStatus(async (state) => {
     const store = useProjectsStore.getState();
-    store.setHubConnected(state === "connected");
-    if (state === "connected") await loadAndAutoSelect();
+    store.setHubState(state);
+    if (state !== "connected") return;
+    try {
+      await loadAndAutoSelect();
+    } catch {
+      // A failed bootstrap leaves no active project; the connection gate
+      // tells the user to run `atelier run` and offers a retry.
+    }
   });
 
   hub.subscribe("project.status", (frame: EventFrame) => {
@@ -32,24 +38,31 @@ export function startHub(): void {
 
 async function loadAndAutoSelect(): Promise<void> {
   const store = useProjectsStore.getState();
-  const { projects } = await hub.rpc("projects.list", {});
-  store.setProjects(projects);
-  if (store.activeId) return; // already on a project (reconnect)
+  // Held until a project is selected so the gate shows "connecting", not
+  // "no project open", during the list → start → handshake round trip.
+  store.setBootstrapping(true);
+  try {
+    const { projects } = await hub.rpc("projects.list", {});
+    store.setProjects(projects);
+    if (store.activeId) return; // already on a project (reconnect)
 
-  // `atelier run` opens the UI with ?open=<abs path> for the launching dir.
-  const openPath = new URLSearchParams(window.location.search).get("open");
-  if (openPath) {
-    try {
-      const project = await addProject(openPath);
-      await switchProject(project.id);
-      return;
-    } catch {
-      // fall through to the normal auto-select below
+    // `atelier run` opens the UI with ?open=<abs path> for the launching dir.
+    const openPath = new URLSearchParams(window.location.search).get("open");
+    if (openPath) {
+      try {
+        const project = await addProject(openPath);
+        await switchProject(project.id);
+        return;
+      } catch {
+        // fall through to the normal auto-select below
+      }
     }
-  }
 
-  const target = pickInitial(projects);
-  if (target) await switchProject(target.id);
+    const target = pickInitial(projects);
+    if (target) await switchProject(target.id);
+  } finally {
+    useProjectsStore.getState().setBootstrapping(false);
+  }
 }
 
 /** Most-recently opened, else the first running, else the first known. */
@@ -83,6 +96,28 @@ export async function switchProject(id: string): Promise<void> {
     bridge.connect();
   } finally {
     useProjectsStore.getState().setSwitching(false);
+  }
+}
+
+/**
+ * Re-establish whichever link is missing, outermost first: the supervisor,
+ * then the project list, then the active project's agent. Drives the
+ * connection gate's Retry button, so it never throws.
+ */
+export async function retryConnection(): Promise<void> {
+  const store = useProjectsStore.getState();
+  if (store.hubState !== "connected") {
+    hub.disconnect();
+    hub.connect();
+    return;
+  }
+  try {
+    // projects.start is idempotent: it revives a stopped agent and returns
+    // the live endpoint for one that is already running.
+    if (store.activeId) await switchProject(store.activeId);
+    else await loadAndAutoSelect();
+  } catch {
+    // The gate keeps showing the failure; the user can retry again.
   }
 }
 

@@ -1,0 +1,44 @@
+- generic [ref=f2e3]:
+  - generic [ref=f2e5]:
+    - generic [ref=f2e6]:
+      - generic [ref=f2e7]: A
+      - generic [ref=f2e8]:
+        - paragraph [ref=f2e9]: Atelier
+        - paragraph [ref=f2e10]: agentic engineering
+    - navigation [ref=f2e11]:
+      - button "Chat" [ref=f2e12]
+      - button "Editor" [ref=f2e17]
+      - button "Terminal" [ref=f2e24]
+      - button "Activity" [ref=f2e29]
+  - generic [ref=f2e33]:
+    - generic [ref=f2e35]:
+      - button [ref=f2e37]
+      - button [ref=f2e43]
+      - button [ref=f2e49]
+      - button [ref=f2e55]
+      - button [ref=f2e62]
+      - button [ref=f2e68]
+      - button [ref=f2e72]
+      - button [ref=f2e77]
+    - generic [ref=f2e80]:
+      - generic [ref=f2e84]:
+        - generic [ref=f2e85]: Agents
+        - button "New" [ref=f2e90]
+      - separator [ref=f2e93]
+      - generic [ref=f2e100]:
+        - heading "Connect to Local Agent" [level=2] [ref=f2e108]
+        - paragraph [ref=f2e109]:
+          - text: Start the agent with
+          - code [ref=f2e110]: pnpm dev:agent
+          - text: ", then restart this dev server — or paste the port and token from"
+          - code [ref=f2e111]: "%LOCALAPPDATA%\\atelier\\bridge.json"
+          - text: .
+        - generic [ref=f2e112]:
+          - textbox "Port (e.g. 43110)" [ref=f2e113]
+          - textbox "Token" [ref=f2e114]
+          - button "Connect" [ref=f2e115]
+        - paragraph [ref=f2e116]: "state: disconnected"
+  - generic [ref=f2e118]:
+    - generic [ref=f2e119]: Disconnected
+    - generic [ref=f2e122]: agent idle
+    - generic [ref=f2e124]: no workspace

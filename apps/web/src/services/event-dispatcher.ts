@@ -1,4 +1,5 @@
 import type {
+  ContextRequestStats,
   DbApprovalRequest,
   Diff,
   EventFrame,
@@ -18,6 +19,7 @@ import { useSessionsStore } from "@/state/sessions.store";
 import { useTerminalStore } from "@/state/terminal.store";
 import { useTimelineStore } from "@/state/timeline.store";
 import { useUsageStore } from "@/state/usage.store";
+import { useContextStore } from "@/state/context.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 
 /** Topics rendered live elsewhere, not as timeline cards. */
@@ -187,6 +189,9 @@ function dispatch(frame: EventFrame): void {
     case "usage.updated":
       useUsageStore.getState().set(frame.payload as UsageSnapshot);
       break;
+    case "context.stats":
+      useContextStore.getState().add(frame.payload as ContextRequestStats);
+      break;
     case "task.started":
       if (convId && frame.taskId) {
         sessions.taskStarted(convId, frame.taskId);
@@ -210,11 +215,23 @@ function dispatch(frame: EventFrame): void {
         sessions.actionFinished(convId, String(payload.toolCallId), "done");
       }
       break;
-    case "tool.failed":
+    case "tool.failed": {
       if (convId) {
-        sessions.actionFinished(convId, String(payload.toolCallId), "failed");
+        // Carry the reason through: without it the feed shows a red X and
+        // nothing else, and a failed edit looks like it simply didn't happen.
+        const reason = payload.error ? String(payload.error) : undefined;
+        sessions.actionFinished(
+          convId,
+          String(payload.toolCallId),
+          "failed",
+          reason
+        );
+        console.error(
+          `[tool.failed] ${String(payload.name ?? "tool")}: ${reason ?? "no reason reported"}`
+        );
       }
       break;
+    }
     case "task.completed":
       if (convId) sessions.taskEnded(convId, "completed");
       break;

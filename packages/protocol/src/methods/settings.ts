@@ -5,6 +5,7 @@ export const Settings = z.object({
   model: z.string().optional(),
   ignoreGlobs: z.array(z.string()).default([]),
   maxValidationRetries: z.number().default(2),
+  maxReviewRetries: z.number().default(2),
 });
 export type Settings = z.infer<typeof Settings>;
 

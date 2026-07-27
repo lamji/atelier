@@ -19,6 +19,7 @@ const PIPELINE_ORDER = [
   "execute",
   "validate",
   "knowledge",
+  "review",
   "summary",
 ];
 

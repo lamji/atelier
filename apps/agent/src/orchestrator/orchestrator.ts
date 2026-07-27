@@ -22,6 +22,8 @@ export interface TaskOptions {
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   planMode?: boolean;
+  /** Vibe coding: autonomous product-builder mode for this task. */
+  vibe?: boolean;
   /** Images the model should see on the first turn of this task. */
   images?: ImageAttachment[];
 }
@@ -61,6 +63,16 @@ export class Orchestrator {
     if (!isPinnedTopic(event.topic)) return;
     const task = event.taskId ? this.running.get(event.taskId) : undefined;
     if (!task) return;
+    // Pinning history is a side effect of the task, never a reason to fail
+    // it: a storage hiccup here must not surface as a failed request.
+    try {
+      this.pinToHistory(event, task);
+    } catch (error) {
+      this.log.warn({ err: error, topic: event.topic }, "could not pin event");
+    }
+  }
+
+  private pinToHistory(event: PublishedEvent, task: RunningTask): void {
     if (event.topic === "diff.created") {
       const diff = event.payload as Diff;
       this.conversations.addMessage({
@@ -76,7 +88,10 @@ export class Orchestrator {
     }
     const payload = event.payload as Record<string, unknown>;
     this.conversations.addMessage({
-      id: `${event.topic}:${event.seq}`,
+      // taskId keeps this unique across agent restarts — the bus seq
+      // counter is in-memory and restarts at 1, which used to collide
+      // with rows an earlier run had already written to this conversation.
+      id: `${event.topic}:${task.taskId}:${event.seq}`,
       conversationId: task.conversationId,
       taskId: event.taskId,
       role: "log",

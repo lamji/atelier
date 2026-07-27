@@ -187,7 +187,7 @@ body {
  * go near-invisible on a dark chip in light mode).
  */
 .chat-md {
-  @apply text-xs leading-relaxed text-neutral-300;
+  @apply text-xs leading-relaxed text-foreground/90;
   font-family: var(--font-mono);
 }
 .chat-md p {
@@ -222,11 +222,42 @@ body {
 .chat-md h1,
 .chat-md h2,
 .chat-md h3 {
-  @apply mb-1.5 mt-3 font-semibold text-neutral-100 first:mt-0;
+  @apply mb-1.5 mt-3 font-semibold text-foreground first:mt-0;
 }
 .chat-md a {
   @apply text-primary underline underline-offset-2;
 }
 .chat-md blockquote {
-  @apply my-2 border-l-2 border-primary/40 pl-3 text-neutral-400;
+  @apply my-2 border-l-2 border-primary/40 pl-3 text-muted-foreground;
+}
+
+/*
+ * Terminal mouse cursor. The native I-beam is drawn by the OS in a single
+ * flat colour, so over the light theme it washes out and the pointer is
+ * effectively lost. We ship our own I-beam instead: a dark stroke with a
+ * light halo (inverted for dark mode), so it stays readable on any
+ * background the shell paints behind it. Hotspot is the 12 12 centre.
+ */
+.xterm,
+.xterm .xterm-screen,
+.xterm .xterm-viewport {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='%23ffffff' stroke-width='3.5' stroke-linecap='round'%3E%3Cpath d='M12 4.5v15M9.2 4.5h5.6M9.2 19.5h5.6'/%3E%3C/g%3E%3Cg fill='none' stroke='%2312121a' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M12 4.5v15M9.2 4.5h5.6M9.2 19.5h5.6'/%3E%3C/g%3E%3C/svg%3E")
+      12 12,
+    text;
+}
+.dark .xterm,
+.dark .xterm .xterm-screen,
+.dark .xterm .xterm-viewport {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='%2312121a' stroke-width='3.5' stroke-linecap='round'%3E%3Cpath d='M12 4.5v15M9.2 4.5h5.6M9.2 19.5h5.6'/%3E%3C/g%3E%3Cg fill='none' stroke='%23ffffff' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M12 4.5v15M9.2 4.5h5.6M9.2 19.5h5.6'/%3E%3C/g%3E%3C/svg%3E")
+      12 12,
+    text;
+}
+/* Shell asked for mouse reporting (tmux, vim) — respect its pointer. */
+.xterm.xterm-cursor-default,
+.xterm .xterm-cursor-default {
+  cursor: default;
+}
+.xterm.xterm-cursor-pointer,
+.xterm .xterm-cursor-pointer {
+  cursor: pointer;
 }

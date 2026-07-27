@@ -3,7 +3,18 @@
  *
  *   pnpm --filter @atelier/agent smoke:modularity
  */
-import { ModularityGuard } from "../src/hooks/modularity-guard.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { openDb } from "../src/storage/db.js";
+import { EventBus } from "../src/events/event-bus.js";
+import { HooksEngine } from "../src/hooks/hooks-engine.js";
+import { ToolRegistry } from "../src/tools/registry.js";
+import {
+  ModularityGuard,
+  MODULARITY_HOOK_ID,
+  MODULARITY_HOOK_NAME,
+} from "../src/hooks/modularity-guard.js";
 
 const guard = new ModularityGuard();
 
@@ -106,6 +117,47 @@ export function Widget() { return <div /> }`,
   },
 ];
 
+/**
+ * The rule is enforced in the write guard, which sees the content — the
+ * hook entry only carries the on/off switch. Without a pass-through guard
+ * the engine would apply its stored "block" action to every write, so this
+ * checks the gate itself lets a compliant call through.
+ */
+async function checkGatePassesThrough(): Promise<boolean> {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-modsmoke-"));
+  const db = openDb(dataDir);
+  const bus = new EventBus();
+  const hooks = new HooksEngine(db, bus, process.cwd());
+  hooks.ensureBuiltin({
+    id: MODULARITY_HOOK_ID,
+    name: MODULARITY_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file|replace_code",
+    action: "block",
+    argument: "One file = one function/component/class",
+  });
+  hooks.registerGuard(MODULARITY_HOOK_ID, async () => undefined);
+  const registry = new ToolRegistry(bus);
+  registry.setGate(hooks);
+  registry.register("write_file", async (input: unknown) => input);
+
+  let blocked = false;
+  try {
+    await registry.run(
+      "write_file",
+      { path: "src/helpers/formatDate.ts", content: "export function f() {}" },
+      "t-mod",
+      new AbortController().signal
+    );
+  } catch {
+    blocked = true;
+  }
+  db.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+  return !blocked;
+}
+
 async function main(): Promise<void> {
   let failed = 0;
   for (const c of CASES) {
@@ -116,6 +168,11 @@ async function main(): Promise<void> {
     console.log(`${pass ? "PASS" : "FAIL"}  ${c.name}`);
     if (!pass && !verdict.ok) console.log(`      reason: ${verdict.reason}`);
   }
+  const gateOk = await checkGatePassesThrough();
+  if (!gateOk) failed += 1;
+  console.log(
+    `${gateOk ? "PASS" : "FAIL"}  enabled hook does not block a compliant write`
+  );
   console.log(failed === 0 ? "\nall cases pass" : `\n${failed} case(s) FAILED`);
   process.exit(failed === 0 ? 0 : 1);
 }

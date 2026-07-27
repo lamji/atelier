@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { Plus, TerminalSquare, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/cn";
@@ -14,7 +14,14 @@ export interface TerminalPanelProps {
   onRefit: (termId: string) => void;
 }
 
-export function TerminalPanel(props: TerminalPanelProps) {
+/**
+ * Terminal tabs + the persistent containers xterm renders into. Memoized:
+ * output never flows through React (see terminal-registry), so a shell
+ * re-render has no business walking this subtree.
+ */
+export const TerminalPanel = memo(function TerminalPanel(
+  props: TerminalPanelProps
+) {
   const { sessions, activeTermId, onMount, onRefit } = props;
   // One persistent DOM container per terminal, kept mounted for the
   // terminal's whole life. Switching tabs only toggles visibility, so
@@ -111,4 +118,4 @@ export function TerminalPanel(props: TerminalPanelProps) {
       )}
     </div>
   );
-}
+});

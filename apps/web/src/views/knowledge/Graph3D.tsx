@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D, { type ForceGraphMethods } from "react-force-graph-3d";
 import SpriteText from "three-spritetext";
 import { Vector2 } from "three";
@@ -8,6 +8,13 @@ import type { KnowledgeGraph } from "@atelier/protocol";
 export interface Graph3DProps {
   graph: KnowledgeGraph;
   theme: "dark" | "light";
+  /**
+   * False while the Graph tab is not the visible pane. The scene stays
+   * mounted (rebuilding the layout on every tab switch is worse), but its
+   * render loop is parked: WebGL + bloom + auto-rotate at 60 fps behind a
+   * `display:none` is invisible work that makes the whole app feel heavy.
+   */
+  active?: boolean;
 }
 
 const KIND_COLORS: Record<string, string> = {
@@ -55,7 +62,11 @@ interface GLink {
  * links). Auto-rotates until you grab it; clicking a node spotlights its
  * connections and dims the rest; background click clears.
  */
-export function Graph3D({ graph, theme }: Graph3DProps) {
+export const Graph3D = memo(function Graph3D({
+  graph,
+  theme,
+  active = true,
+}: Graph3DProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<ForceGraphMethods<GNode, GLink> | undefined>(undefined);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -117,16 +128,24 @@ export function Graph3D({ graph, theme }: Graph3DProps) {
     return s === selected || t === selected;
   };
 
-  // Auto-rotate while nothing is selected.
+  // Auto-rotate while nothing is selected (and only while on screen).
   useEffect(() => {
     const controls = fgRef.current?.controls() as
       | { autoRotate: boolean; autoRotateSpeed: number }
       | undefined;
     if (controls) {
-      controls.autoRotate = selected === null;
+      controls.autoRotate = active && selected === null;
       controls.autoRotateSpeed = 0.7;
     }
-  }, [selected, size]);
+  }, [active, selected, size]);
+
+  // Park the render loop while the pane is hidden; pick it back up on return.
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg || size.w === 0) return;
+    if (active) fg.resumeAnimation();
+    else fg.pauseAnimation();
+  }, [active, size.w]);
 
   const dark = theme === "dark";
 
@@ -219,4 +238,4 @@ export function Graph3D({ graph, theme }: Graph3DProps) {
       )}
     </div>
   );
-}
+});

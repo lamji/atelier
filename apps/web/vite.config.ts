@@ -22,7 +22,25 @@ function readInfo(fileName: string): { port: string; token: string } {
 }
 
 /**
- * Injects the supervisor's hub.json (port + token) so the dev UI auto-
+ * Hub coordinates for this dev server. The launcher (scripts/dev.mjs) passes
+ * its own instance's port + token by env, which is what makes several
+ * projects runnable at once — reading the shared hub.json would hand every
+ * UI whichever supervisor started last. Falls back to the per-port file,
+ * then the canonical one, for a bare `pnpm --filter @atelier/web dev`.
+ */
+function hubInfo(): { port: string; token: string } {
+  const port = process.env.ATELIER_HUB_PORT ?? "";
+  const token = process.env.ATELIER_HUB_TOKEN ?? "";
+  if (port && token) return { port, token };
+  if (port) {
+    const perPort = readInfo(`hub-${port}.json`);
+    if (perPort.token) return perPort;
+  }
+  return readInfo("hub.json");
+}
+
+/**
+ * Injects the supervisor's hub info (port + token) so the dev UI auto-
  * connects to the projects control API without manual token pasting. The
  * legacy single-agent bridge.json is still injected for back-compat.
  */
@@ -43,7 +61,7 @@ function bridgeInfoPlugin(): Plugin {
         };
       }
       const bridge = readInfo("bridge.json");
-      const hub = readInfo("hub.json");
+      const hub = hubInfo();
       return {
         define: {
           __ATELIER_BRIDGE_PORT__: JSON.stringify(bridge.port),
@@ -64,6 +82,10 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    // The launcher pairs each hub with its own web port (43100 -> 5173,
+    // 43101 -> 5174, …) and pins it: drifting to another port would leave
+    // the UI baked with one project's hub token on another's URL.
+    port: Number(process.env.ATELIER_WEB_PORT ?? 5173),
+    strictPort: process.env.ATELIER_WEB_PORT !== undefined,
   },
 });

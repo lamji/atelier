@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { memo, useEffect } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import { Activity, FileCode2, FileDiff, X } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -45,9 +45,41 @@ export interface RightDockProps {
 }
 
 /**
+ * Read-only file view options. Hoisted out of render: @monaco-editor/react
+ * pushes `options` into the editor whenever the object identity changes, so
+ * an inline literal made every parent render re-apply them.
+ */
+const FILE_EDITOR_OPTIONS = {
+  readOnly: true,
+  minimap: { enabled: false },
+  fontSize: 13,
+  scrollBeyondLastLine: false,
+} as const;
+
+const GIT_DIFF_EDITOR_OPTIONS = {
+  readOnly: true,
+  automaticLayout: true,
+  renderSideBySide: false,
+  renderOverviewRuler: false,
+  minimap: { enabled: false },
+  fontSize: 13,
+  // See INLINE_DIFF_EDITOR_OPTIONS in diff-view.ts: inline diff mode
+  // packs both original+modified line numbers into one gutter, so
+  // 3 chars is too narrow once line numbers hit 4 digits.
+  lineNumbersMinChars: 6,
+  glyphMargin: false,
+  folding: false,
+  scrollBeyondLastLine: false,
+  hideUnchangedRegions: { enabled: true },
+} as const;
+
+/**
  * The right-side dock: panes only — the tab bar lives in the app header.
- * Panes stay mounted (hidden with CSS) so Monaco and xterm keep their
- * state across switches.
+ *
+ * Panes that own expensive live state stay mounted (Monaco, xterm, the 3D
+ * graph) so switching tabs doesn't rebuild them; the graph is told when it
+ * is hidden so it can stop rendering. Stateless panes (activity, RAG) mount
+ * only while visible, so their lists cost nothing when they aren't on screen.
  */
 export function RightDock(props: RightDockProps) {
   const { rightTab, activeTermId, onRefitTerm } = props;
@@ -61,41 +93,26 @@ export function RightDock(props: RightDockProps) {
   return (
     <div className="flex h-full flex-col">
       <div className="relative min-h-0 flex-1">
-        <Pane active={props.rightTab === "chat"}>{props.chatPane}</Pane>
+        <Pane active={rightTab === "chat"}>{props.chatPane}</Pane>
 
-        <Pane active={props.rightTab === "editor"}>
+        <Pane active={rightTab === "editor"}>
           {props.gitDiff !== null ? (
             <GitDiffPane
               gitDiff={props.gitDiff}
               monacoTheme={props.monacoTheme}
               onClose={props.onCloseGitDiff}
             />
-          ) : props.fileContent !== null ? (
-            <div className="flex h-full flex-col">
-              <p className="truncate px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
-                {props.selectedPath}
-              </p>
-              <div className="min-h-0 flex-1">
-                <Editor
-                  path={props.selectedPath ?? undefined}
-                  value={props.fileContent}
-                  language={props.language}
-                  theme={props.monacoTheme}
-                  options={{
-                    readOnly: true,
-                    minimap: { enabled: false },
-                    fontSize: 13,
-                    scrollBeyondLastLine: false,
-                  }}
-                />
-              </div>
-            </div>
           ) : (
-            <Empty icon={FileCode2} text="Select a file in the explorer." />
+            <FilePane
+              selectedPath={props.selectedPath}
+              fileContent={props.fileContent}
+              language={props.language}
+              monacoTheme={props.monacoTheme}
+            />
           )}
         </Pane>
 
-        <Pane active={props.rightTab === "terminal"}>
+        <Pane active={rightTab === "terminal"}>
           <TerminalPanel
             sessions={props.terminalSessions}
             activeTermId={props.activeTermId}
@@ -107,15 +124,19 @@ export function RightDock(props: RightDockProps) {
           />
         </Pane>
 
-        <Pane active={props.rightTab === "graph"}>
-          <GraphPane vm={props.knowledgeVm} theme={props.appTheme} />
+        <Pane active={rightTab === "graph"}>
+          <GraphPane
+            vm={props.knowledgeVm}
+            theme={props.appTheme}
+            active={rightTab === "graph"}
+          />
         </Pane>
 
-        <Pane active={props.rightTab === "rag"}>
+        <Pane active={rightTab === "rag"} mountWhenHidden={false}>
           <RagInspectorPane vm={props.ragVm} />
         </Pane>
 
-        <Pane active={props.rightTab === "activity"}>
+        <Pane active={rightTab === "activity"} mountWhenHidden={false}>
           <TimelinePanel entries={props.timelineEntries} />
         </Pane>
       </div>
@@ -123,8 +144,36 @@ export function RightDock(props: RightDockProps) {
   );
 }
 
+/** Monaco view of the selected workspace file. */
+const FilePane = memo(function FilePane(props: {
+  selectedPath: string | null;
+  fileContent: string | null;
+  language: string;
+  monacoTheme: string;
+}) {
+  if (props.fileContent === null) {
+    return <Empty icon={FileCode2} text="Select a file in the explorer." />;
+  }
+  return (
+    <div className="flex h-full flex-col">
+      <p className="truncate px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+        {props.selectedPath}
+      </p>
+      <div className="min-h-0 flex-1">
+        <Editor
+          path={props.selectedPath ?? undefined}
+          value={props.fileContent}
+          language={props.language}
+          theme={props.monacoTheme}
+          options={FILE_EDITOR_OPTIONS}
+        />
+      </div>
+    </div>
+  );
+});
+
 /** Full-height DiffEditor for a git working-tree/index diff of one file. */
-function GitDiffPane(props: {
+const GitDiffPane = memo(function GitDiffPane(props: {
   gitDiff: GitDiffView;
   monacoTheme: string;
   onClose: () => void;
@@ -153,33 +202,25 @@ function GitDiffPane(props: {
           modified={gitDiff.after}
           language={languageForPath(gitDiff.path)}
           theme={props.monacoTheme}
-          options={{
-            readOnly: true,
-            automaticLayout: true,
-            renderSideBySide: false,
-            renderOverviewRuler: false,
-            minimap: { enabled: false },
-            fontSize: 13,
-            // See INLINE_DIFF_EDITOR_OPTIONS in diff-view.ts: inline diff mode
-            // packs both original+modified line numbers into one gutter, so
-            // 3 chars is too narrow once line numbers hit 4 digits.
-            lineNumbersMinChars: 6,
-            glyphMargin: false,
-            folding: false,
-            scrollBeyondLastLine: false,
-            hideUnchangedRegions: { enabled: true },
-          }}
+          options={GIT_DIFF_EDITOR_OPTIONS}
         />
       </div>
     </div>
   );
-}
+});
 
 /**
- * Keeps children mounted; hides inactive panes with display:none so heavy
- * surfaces (Monaco, xterm) can never paint over the active pane.
+ * One dock pane. `mountWhenHidden` panes (the default) are kept in the tree
+ * and hidden with display:none so heavy surfaces keep their state; the rest
+ * are unmounted while inactive.
  */
-function Pane(props: { active: boolean; children: React.ReactNode }) {
+function Pane(props: {
+  active: boolean;
+  mountWhenHidden?: boolean;
+  children: React.ReactNode;
+}) {
+  const keep = props.mountWhenHidden ?? true;
+  if (!props.active && !keep) return null;
   return (
     <div className={cn("absolute inset-0", !props.active && "hidden")}>
       {props.children}

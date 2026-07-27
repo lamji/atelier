@@ -36,6 +36,11 @@ import {
   MODULARITY_HOOK_NAME,
 } from "./hooks/modularity-guard.js";
 import {
+  ImpactFirstGuard,
+  IMPACT_HOOK_ID,
+  IMPACT_HOOK_NAME,
+} from "./hooks/impact-guard.js";
+import {
   GitFlowGuard,
   GIT_FLOW_HOOK_ID,
   GIT_FLOW_HOOK_NAME,
@@ -45,6 +50,11 @@ import {
   DB_APPROVAL_HOOK_ID,
   DB_APPROVAL_HOOK_NAME,
 } from "./hooks/db-approval-guard.js";
+import {
+  DevServerGuard,
+  DEV_SERVER_HOOK_ID,
+  DEV_SERVER_HOOK_NAME,
+} from "./hooks/dev-server-guard.js";
 import { registerHookHandlers } from "./hooks/register-hook-handlers.js";
 import { KnowledgeQuery } from "./knowledge/query/knowledge-query.js";
 import { IncrementalIndexer } from "./knowledge/indexer/incremental-indexer.js";
@@ -62,6 +72,11 @@ import { registerPlanTools } from "./tools/plan-tools.js";
 import { PlanTracker } from "./orchestrator/plan-tracker.js";
 import { ValidationRunners } from "./validation/runners.js";
 import { Retriever } from "./rag/retriever.js";
+import { TokenLedger } from "./context/ledger/index.js";
+import { PromptAssembler } from "./context/assemble/index.js";
+import { CachedRetriever, IndexGeneration } from "./context/cache/index.js";
+import { SentChunkStore } from "./context/dedup/index.js";
+import { TaskSummaryStore } from "./context/summaries/index.js";
 
 const log = createLogger();
 
@@ -94,6 +109,7 @@ function main(): void {
     workspaceRoot: config.workspaceRoot,
     ignoreGlobs: [],
     maxValidationRetries: 2,
+    maxReviewRetries: 2,
   });
 
   const guard = new PathGuard(config.workspaceRoot);
@@ -118,6 +134,11 @@ function main(): void {
     argument: "One file = one function/component/class",
   });
   const modularity = new ModularityGuard();
+  // The structural check runs in the write guard below, which sees the
+  // content. Without a hook guard the engine would apply the stored "block"
+  // action to every write_file/replace_code call, so pass here and let the
+  // write guard decide.
+  hooks.registerGuard(MODULARITY_HOOK_ID, async () => undefined);
   files.setWriteGuard(async (relPath, nextContent, prevContent, taskId) => {
     if (!hooks.isEnabled(MODULARITY_HOOK_ID)) return;
     const verdict = await modularity.check(relPath, nextContent, prevContent);
@@ -161,6 +182,43 @@ function main(): void {
   });
   const dbApprovalGuard = new DbApprovalGuard(bus);
   hooks.registerGuard(DB_APPROVAL_HOOK_ID, (ctx) => dbApprovalGuard.check(ctx));
+  // Built-in dev-server hook: starting `npm run dev` / `pnpm start` a second
+  // time leaves two servers up and the UI pointed at the stale one. The guard
+  // refuses only when an instance is already there (port already listening,
+  // or this session started it), so first-time starts are untouched.
+  hooks.ensureBuiltin({
+    id: DEV_SERVER_HOOK_ID,
+    name: DEV_SERVER_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "run_terminal",
+    action: "block",
+    argument: "A dev server is already running for this project",
+  });
+  const devServerGuard = new DevServerGuard(bus, config.workspaceRoot);
+  hooks.registerGuard(DEV_SERVER_HOOK_ID, (ctx) => devServerGuard.check(ctx));
+  // Built-in impact hook: the blast radius must be checked at the edit site.
+  // The pipeline's radius is computed from plan targets, before the model
+  // knows the line it will touch; this refuses the first write to an
+  // existing source file until impact_of_edit has been called for it.
+  hooks.ensureBuiltin({
+    id: IMPACT_HOOK_ID,
+    name: IMPACT_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file|replace_code|impact_of_edit|analyze_impact",
+    action: "block",
+    argument: "Check who uses this code before editing it",
+  });
+  const impactGuard = new ImpactFirstGuard(
+    (relPath) =>
+      files
+        .stat(relPath)
+        .then(() => true)
+        .catch(() => false),
+    bus
+  );
+  hooks.registerGuard(IMPACT_HOOK_ID, (ctx) => impactGuard.check(ctx));
   const knowledge = new KnowledgeQuery(db);
   const embedder = new Embedder(config.dataDir);
   const vectors = new VectorStore(db, EMBEDDING_DIMS);
@@ -187,6 +245,10 @@ function main(): void {
   const routeFeatures = new RouteFeatureScanner(db, bus, files, embedder, vectors);
   const lessons = new LessonStore(db, bus, embedder, vectors);
   const retriever = new Retriever(db, embedder, vectors, knowledge, lessons);
+  // Semantic retrieval cache: identical queries against an unchanged
+  // index skip the re-embed and all retrieval arms entirely.
+  const generation = new IndexGeneration(bus);
+  const cachedRetriever = new CachedRetriever(retriever, generation);
   // Textual fallback for the symbol-impact analyzer: word-boundary search
   // catches dynamic/string-keyed uses the graph never resolved.
   const symbolImpact = new SymbolImpactAnalyzer(db, async (identifier) => {
@@ -196,7 +258,7 @@ function main(): void {
   });
   registerKnowledgeTools(
     tools,
-    retriever,
+    cachedRetriever,
     graph,
     knowledge,
     lessons,
@@ -216,12 +278,24 @@ function main(): void {
   // Live plan usage: SDK rate-limit events during tasks + an idle probe
   // that also catches spend from other machines.
   const usage = new UsageMonitor(bus, config.workspaceRoot);
+  // Context-engineering accounting: estimated assembly cost + SDK actuals.
+  const ledger = new TokenLedger(db, bus);
+  // Token-budgeted context assembly through the compression ladder, with
+  // cross-turn dedup and compressed conversation memory.
+  const sentChunks = new SentChunkStore(db);
+  const taskSummaries = new TaskSummaryStore(db);
+  const assembler = new PromptAssembler({
+    db,
+    ledger,
+    sent: sentChunks,
+    summaries: taskSummaries,
+  });
   const orchestrator = new Orchestrator({
     config,
     db,
     bus,
     tools,
-    retriever,
+    retriever: cachedRetriever,
     graph,
     clones,
     impact: impactAnalyzer,
@@ -231,6 +305,9 @@ function main(): void {
     planTracker,
     settings,
     usage,
+    ledger,
+    assembler,
+    summaries: taskSummaries,
     conversations,
     log,
   });
@@ -244,6 +321,9 @@ function main(): void {
   router.register("usage.get", async (params) => ({
     usage: params?.refresh ? await usage.refresh() : usage.current,
   }));
+  router.register("context.stats", async (params) =>
+    ledger.query(params?.conversationId, params?.limit ?? 50)
+  );
   // Live model roster from the SDK, probed once and cached.
   let modelsCache: import("@atelier/protocol").ModelOption[] | null = null;
   router.register("models.list", async () => {
@@ -254,7 +334,7 @@ function main(): void {
     router,
     knowledge,
     indexer,
-    retriever,
+    cachedRetriever,
     graph,
     features,
     routeFeatures,

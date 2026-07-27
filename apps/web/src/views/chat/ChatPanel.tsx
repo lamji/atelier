@@ -1,24 +1,18 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { DiffEditor } from "@monaco-editor/react";
 import {
-  ArrowUp,
   BrainCircuit,
   Check,
   ClipboardList,
-  FileCode2,
   FileDiff,
-  ImagePlus,
   Loader2,
   MessageSquareDashed,
   Network,
-  Paperclip,
   Radar,
   Sparkles,
-  Square,
-  X,
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -29,102 +23,35 @@ import {
   languageForPath,
   lineStat,
 } from "@/lib/diff-view";
+import { useChatViewModel } from "@/hooks/useChatViewModel";
 import { useElapsed } from "@/hooks/useElapsed";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
-import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
+import { Composer } from "./Composer";
 import type { ChatItemVm } from "@/types";
-import type {
-  ModelOption,
-  PipelineStage,
-  Plan,
-  PlanStep,
-} from "@atelier/protocol";
+import type { PipelineStage, Plan, PlanStep } from "@atelier/protocol";
 import type { AgentAction, LiveDiff } from "@/state/sessions.store";
-import type {
-  EffortChoice,
-  ModelChoice,
-  PendingImage,
-} from "@/hooks/useSessionsViewModel";
-import type { SlashCommand } from "@atelier/protocol";
 
 export interface ChatPanelProps {
-  sessionTitle: string;
-  items: ChatItemVm[];
-  thinking: string;
-  actions: AgentAction[];
-  /** Diffs from the running task, shown inline in the live activity feed. */
-  liveDiffs: LiveDiff[];
-  /** Live task plan (pipeline stage 4); null before planning. */
-  plan: Plan | null;
-  /** Pipeline stage the running task is in; null before the first stage. */
-  stage: PipelineStage | null;
-  /** Start of the running task, for the elapsed counter. */
-  taskStartedAt: number | null;
-  /** A stop was requested and the task has not ended yet. */
-  cancelling: boolean;
-  input: string;
-  busy: boolean;
-  connected: boolean;
-  error: string | null;
-  model: ModelChoice;
-  /** Live model roster from the SDK; falls back to a built-in list. */
-  models: ModelOption[];
-  effort: EffortChoice;
-  planMode: boolean;
-  attachments: string[];
-  /** Images staged in the composer (screenshots), with data-URL previews. */
-  images: PendingImage[];
-  /** Currently selected file in the explorer, used by the attach button. */
-  attachCandidate: string | null;
-  /** Commands + skills offered by the "/" autocomplete menu. */
-  slashCommands: SlashCommand[];
-  /** Workspace file paths offered by the "@" mention menu. */
-  filePaths: string[];
-  /** Monaco theme ("vs-dark" | "light"), for inline diffs in the transcript. */
-  monacoTheme: string;
-  onInputChange: (value: string) => void;
-  onSend: () => void;
-  onCancel: () => void;
-  onModelChange: (value: ModelChoice) => void;
-  onEffortChange: (value: EffortChoice) => void;
-  onPlanModeChange: (value: boolean) => void;
-  onAttach: (path: string) => void;
-  onRemoveAttachment: (path: string) => void;
-  onAddImages: (files: File[] | FileList) => void;
-  onRemoveImage: (id: string) => void;
+  /** Shell-level failure (creating a session), not a task failure. */
+  shellError?: string | null;
 }
-
-/** Composer grows with the text up to this height, then scrolls. */
-const MAX_COMPOSER_HEIGHT = 160;
 
 /** Drag-resize bounds for the process rail (plan + activity + diffs). */
 const PROCESS_MIN_WIDTH = 260;
 const PROCESS_MAX_WIDTH = 720;
 
-/** Used only when the SDK model probe fails (offline / older agent). */
-const FALLBACK_MODELS: Array<[string, string]> = [
-  ["default", "Default"],
-  ["opus", "Opus"],
-  ["sonnet", "Sonnet"],
-  ["haiku", "Haiku"],
-];
-
-/** Model picker options from the live SDK roster, else the fallback. */
-function modelOptions(models: ModelOption[]): Array<[string, string]> {
-  if (models.length === 0) return FALLBACK_MODELS;
-  return models.map((m) => [m.value, m.label]);
-}
-
-export function ChatPanel(props: ChatPanelProps) {
-  const composerRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [dragging, setDragging] = useState(false);
-  const [slashIndex, setSlashIndex] = useState(0);
-  const [slashDismissed, setSlashDismissed] = useState(false);
-  const [caret, setCaret] = useState(0);
-  const [mentionIndex, setMentionIndex] = useState(0);
-  const [mentionDismissed, setMentionDismissed] = useState(false);
+/**
+ * The chat surface: transcript in the centre, live process rail on the
+ * right, composer at the bottom.
+ *
+ * Reads its own data (see {@link useChatViewModel}) instead of taking it as
+ * props, and is memoized on the one prop it does take — so a shell re-render
+ * (a file event, an index tick, a usage refresh) cannot walk into the
+ * transcript, and a keystroke stays inside {@link Composer}.
+ */
+export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
+  const vm = useChatViewModel();
   const [processWidth, setProcessWidth] = useState(320);
   const [resizingProcess, setResizingProcess] = useState(false);
 
@@ -132,26 +59,27 @@ export function ChatPanel(props: ChatPanelProps) {
   // and it stops yanking you back down. The center only carries the summary
   // now, so it no longer jumps when the process rail ticks.
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>([
-    props.items,
-    props.thinking,
+    vm.items,
+    vm.thinking,
+    // The live block is part of the centre's stream: it appears when the
+    // run starts and its status line moves with the stage.
+    vm.busy,
+    vm.stage,
   ]);
 
   // The process rail (plan + activity + diffs) auto-follows its own stream.
   const { ref: procRef, onScroll: onProcScroll } =
-    useStickToBottom<HTMLDivElement>([
-      props.actions,
-      props.liveDiffs,
-      props.plan,
-    ]);
+    useStickToBottom<HTMLDivElement>([vm.actions, vm.liveDiffs, vm.plan]);
 
   // Diffs from the running task render inside the live feed (near the edit
   // that produced them), so hide their transcript copies until the run ends.
-  const liveDiffIds = new Set(props.liveDiffs.map((d) => d.id));
+  const liveDiffIds = new Set(vm.liveDiffs.map((d) => d.id));
 
   // The right rail holds the process: the live plan persists after a run so
   // it stays available; the activity feed shows only while the task runs.
-  const hasPlan = props.plan !== null && props.plan.steps.length > 1;
-  const showProcess = props.busy || hasPlan;
+  const hasPlan = vm.plan !== null && vm.plan.steps.length > 1;
+  const showProcess = vm.busy || hasPlan;
+  const error = props.shellError ?? vm.lastError;
 
   /** Drag the rail's left edge to widen it — handy for reading a wide diff. */
   const onProcessResizeStart = (e: React.PointerEvent) => {
@@ -174,164 +102,22 @@ export function ChatPanel(props: ChatPanelProps) {
     window.addEventListener("pointerup", onUp);
   };
 
-  /**
-   * Auto-size the composer from the value, not from keystrokes: sending,
-   * picking a slash command, or switching sessions clears the input
-   * without a change event, and the box must shrink back with it.
-   */
-  useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
-  }, [props.input]);
-
-  // "/" menu is live while the first token is being typed, like Claude Code.
-  const slashQuery =
-    props.input.startsWith("/") && !/\s/.test(props.input)
-      ? props.input.slice(1).toLowerCase()
-      : null;
-  const slashMatches =
-    slashQuery !== null && !slashDismissed
-      ? props.slashCommands
-          .filter((c) => c.name.toLowerCase().includes(slashQuery))
-          .slice(0, 12)
-      : [];
-  const slashOpen = slashMatches.length > 0;
-
-  // "@" mention: the token being typed at the caret (mid-sentence too).
-  const mention = mentionDismissed ? null : activeMention(props.input, caret);
-  const mentionMatches = mention
-    ? filterFiles(props.filePaths, mention.query)
-    : [];
-  const mentionOpen = mentionMatches.length > 0;
-
-  const changeInput = (value: string) => {
-    props.onInputChange(value);
-    setSlashDismissed(false);
-    setSlashIndex(0);
-    setMentionDismissed(false);
-    setMentionIndex(0);
-    // Caret sits just after the inserted text on a change event.
-    setCaret(value.length - (props.input.length - caret));
-  };
-
-  const syncCaret = () => {
-    const el = composerRef.current;
-    if (el) setCaret(el.selectionStart ?? el.value.length);
-  };
-
-  const pickSlash = (command: SlashCommand) => {
-    props.onInputChange(`/${command.name} `);
-    setSlashDismissed(true);
-  };
-
-  /**
-   * Stage files pasted into the composer (screenshots land here). All files
-   * go to onAddImages, which filters and reports anything it skips — a plain
-   * text paste carries no files, so typing is untouched.
-   */
-  const onPaste = (e: React.ClipboardEvent) => {
-    const files = Array.from(e.clipboardData.files);
-    if (files.length > 0) {
-      e.preventDefault();
-      props.onAddImages(files);
-    }
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    setDragging(false);
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      e.preventDefault();
-      props.onAddImages(files);
-    }
-  };
-
-  /** Replaces the active "@token" with the bare file path (no contents). */
-  const pickMention = (filePath: string) => {
-    if (!mention) return;
-    const before = props.input.slice(0, mention.start);
-    const after = props.input.slice(mention.end);
-    const next = `${before}${filePath} ${after}`;
-    props.onInputChange(next);
-    setMentionDismissed(true);
-    const pos = before.length + filePath.length + 1;
-    requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (el) {
-        el.focus();
-        el.setSelectionRange(pos, pos);
-        setCaret(pos);
-      }
-    });
-  };
-
-  const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (mentionOpen) {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        const delta = e.key === "ArrowDown" ? 1 : -1;
-        setMentionIndex(
-          (i) => (i + delta + mentionMatches.length) % mentionMatches.length
-        );
-        return;
-      }
-      if (e.key === "Tab" || e.key === "Enter") {
-        e.preventDefault();
-        const chosen = mentionMatches[mentionIndex] ?? mentionMatches[0];
-        if (chosen) pickMention(chosen);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setMentionDismissed(true);
-        return;
-      }
-    }
-    if (slashOpen) {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        const delta = e.key === "ArrowDown" ? 1 : -1;
-        setSlashIndex(
-          (i) => (i + delta + slashMatches.length) % slashMatches.length
-        );
-        return;
-      }
-      if (e.key === "Tab" || e.key === "Enter") {
-        e.preventDefault();
-        const chosen = slashMatches[slashIndex] ?? slashMatches[0];
-        if (chosen) pickSlash(chosen);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setSlashDismissed(true);
-        return;
-      }
-    }
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      props.onSend();
-    }
-  };
-
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2.5 px-4 py-2.5">
         <span
           className={cn(
             "orb relative h-7 w-7 shrink-0 rounded-full",
-            props.busy && "orb-spin",
+            vm.busy && "orb-spin"
           )}
         >
           <span className="absolute inset-[3px] rounded-full bg-card/85 backdrop-blur" />
           <Sparkles className="absolute inset-0 m-auto h-3.5 w-3.5 text-primary" />
         </span>
         <span className="min-w-0 flex-1 truncate text-sm font-semibold">
-          {props.sessionTitle}
+          {vm.sessionTitle}
         </span>
-        {props.busy && (
+        {vm.busy && (
           <span className="text-shimmer text-xs font-semibold">
             agent working…
           </span>
@@ -339,30 +125,52 @@ export function ChatPanel(props: ChatPanelProps) {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <div
-          ref={scrollRef}
-          onScroll={onScroll}
-          className="flex-1 overflow-y-auto px-4 py-4 [scrollbar-gutter:stable_both-edges]"
-        >
-          <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4">
-            {props.items.length === 0 && !props.thinking && (
-              <EmptyState connected={props.connected} />
-            )}
-            <AnimatePresence initial={false}>
-              {props.items.map((item) =>
-                liveDiffIds.has(item.id) ? null : (
-                  <ChatMessage
-                    key={item.id}
-                    item={item}
-                    monacoTheme={props.monacoTheme}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="flex-1 overflow-y-auto px-4 py-4 [scrollbar-gutter:stable_both-edges]"
+          >
+            <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4">
+              {vm.items.length === 0 && !vm.busy && (
+                <EmptyState connected={vm.connected} />
+              )}
+              <AnimatePresence initial={false}>
+                {vm.items.map((item) =>
+                  liveDiffIds.has(item.id) ? null : (
+                    <ChatMessage
+                      key={item.id}
+                      item={item}
+                      monacoTheme={vm.monacoTheme}
+                    />
+                  )
+                )}
+                {vm.busy && (
+                  <ThinkingBlock
+                    key="thinking"
+                    text={vm.thinking}
+                    status={liveHeadline(vm.actions, vm.stage, vm.cancelling)}
                   />
-                )
-              )}
-              {props.busy && props.thinking && (
-                <ThinkingBlock key="thinking" text={props.thinking} />
-              )}
-            </AnimatePresence>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
+
+          {error && (
+            <div className="px-4">
+              <motion.p
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={cn(
+                  "mx-auto mb-2 w-full max-w-3xl rounded-lg bg-destructive/10",
+                  "px-3 py-2 text-xs text-destructive"
+                )}
+              >
+                {error}
+              </motion.p>
+            </div>
+          )}
+          <Composer />
         </div>
 
         <AnimatePresence>
@@ -370,14 +178,14 @@ export function ChatPanel(props: ChatPanelProps) {
             <ProcessPanel
               scrollRef={procRef}
               onScroll={onProcScroll}
-              plan={hasPlan ? props.plan : null}
-              busy={props.busy}
-              actions={props.actions}
-              diffs={props.liveDiffs}
-              stage={props.stage}
-              startedAt={props.taskStartedAt}
-              cancelling={props.cancelling}
-              monacoTheme={props.monacoTheme}
+              plan={hasPlan ? vm.plan : null}
+              busy={vm.busy}
+              actions={vm.actions}
+              diffs={vm.liveDiffs}
+              stage={vm.stage}
+              startedAt={vm.taskStartedAt}
+              cancelling={vm.cancelling}
+              monacoTheme={vm.monacoTheme}
               width={processWidth}
               resizing={resizingProcess}
               onResizeStart={onProcessResizeStart}
@@ -385,415 +193,9 @@ export function ChatPanel(props: ChatPanelProps) {
           )}
         </AnimatePresence>
       </div>
-
-      <div className="px-4 pb-3">
-        <div className="mx-auto w-full max-w-3xl">
-          {props.error && (
-            <motion.p
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive"
-            >
-              {props.error}
-            </motion.p>
-          )}
-          {props.attachments.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
-              {props.attachments.map((path) => (
-                <span
-                  key={path}
-                  className="flex items-center gap-1 rounded-lg bg-accent px-2 py-0.5 font-mono text-[11px] text-accent-foreground"
-                >
-                  <Paperclip className="h-3 w-3" />
-                  {path}
-                  <X
-                    className="h-3 w-3 cursor-pointer hover:text-destructive"
-                    onClick={() => props.onRemoveAttachment(path)}
-                  />
-                </span>
-              ))}
-            </div>
-          )}
-          {props.images.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-2">
-              {props.images.map((img) => (
-                <div key={img.id} className="group relative">
-                  <img
-                    src={img.dataUrl}
-                    alt="attachment"
-                    className="h-16 w-16 rounded-lg border border-white/10 object-cover"
-                  />
-                  <Tooltip content="Remove image">
-                    <button
-                      onClick={() => props.onRemoveImage(img.id)}
-                      className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-white opacity-0 transition-opacity group-hover:opacity-100"
-                    >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </Tooltip>
-                </div>
-              ))}
-            </div>
-          )}
-          <div
-            className="relative"
-            onDragOver={(e) => {
-              if (e.dataTransfer.types.includes("Files")) {
-                e.preventDefault();
-                setDragging(true);
-              }
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files) props.onAddImages(e.target.files);
-                e.target.value = "";
-              }}
-            />
-            <AnimatePresence>
-              {slashOpen && (
-                <SlashMenu
-                  matches={slashMatches}
-                  selectedIndex={slashIndex}
-                  onHover={setSlashIndex}
-                  onPick={pickSlash}
-                />
-              )}
-              {mentionOpen && !slashOpen && (
-                <MentionMenu
-                  matches={mentionMatches}
-                  selectedIndex={mentionIndex}
-                  query={mention?.query ?? ""}
-                  onHover={setMentionIndex}
-                  onPick={pickMention}
-                />
-              )}
-            </AnimatePresence>
-          <div
-            className={cn(
-              "rounded-2xl bg-muted/60 transition-colors",
-              "focus-within:bg-muted",
-              dragging && "ring-2 ring-primary/60",
-            )}
-          >
-            {dragging && (
-              <div className="pointer-events-none flex items-center justify-center gap-2 py-1 text-[11px] font-medium text-primary">
-                <ImagePlus className="h-3.5 w-3.5" />
-                Drop image to attach
-              </div>
-            )}
-            <div className="flex items-end gap-2 p-2 pb-1">
-              <textarea
-                ref={composerRef}
-                value={props.input}
-                placeholder={
-                  props.busy
-                    ? "Agent is working — you can cancel or switch sessions"
-                    : "Describe a task, paste or drop a screenshot…"
-                }
-                disabled={!props.connected || props.busy}
-                rows={1}
-                onChange={(e) => changeInput(e.target.value)}
-                onKeyDown={onComposerKeyDown}
-                onKeyUp={syncCaret}
-                onClick={syncCaret}
-                onSelect={syncCaret}
-                onPaste={onPaste}
-                className={cn(
-                  "max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5",
-                  "text-sm outline-none placeholder:text-muted-foreground/70",
-                  "disabled:opacity-60",
-                )}
-              />
-              {props.busy ? (
-                <Tooltip
-                  content={
-                    props.cancelling
-                      ? "Stopping — finishing the current step"
-                      : "Cancel task"
-                  }
-                >
-                  <motion.button
-                    whileTap={{ scale: 0.92 }}
-                    onClick={props.onCancel}
-                    disabled={props.cancelling}
-                    className={cn(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                      "text-white hover:opacity-90",
-                      props.cancelling
-                        ? "bg-destructive/60"
-                        : "bg-destructive"
-                    )}
-                  >
-                    {props.cancelling ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Square className="h-4 w-4 fill-current" />
-                    )}
-                  </motion.button>
-                </Tooltip>
-              ) : (
-                <Tooltip content="Send (Enter)">
-                  <motion.button
-                    whileTap={{ scale: 0.92 }}
-                    disabled={
-                      !props.connected ||
-                      (!props.input.trim() && props.images.length === 0)
-                    }
-                    onClick={props.onSend}
-                    className={cn(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                      "bg-primary text-primary-foreground transition-opacity",
-                      "hover:opacity-90 disabled:opacity-30",
-                    )}
-                  >
-                    <ArrowUp className="h-4 w-4" />
-                  </motion.button>
-                </Tooltip>
-              )}
-            </div>
-            <div className="flex items-center gap-2 px-3 pb-2 pt-0.5">
-              <Tooltip content="Attach an image (or paste / drop a screenshot)">
-                <button
-                  type="button"
-                  disabled={!props.connected || props.busy}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
-                >
-                  <Paperclip className="h-3.5 w-3.5" />
-                </button>
-              </Tooltip>
-              <ComposerSelect
-                value={props.model}
-                onChange={(v) => props.onModelChange(v as ModelChoice)}
-                options={modelOptions(props.models)}
-              />
-              <ComposerSelect
-                value={props.effort}
-                onChange={(v) => props.onEffortChange(v as EffortChoice)}
-                options={[
-                  ["default", "Reasoning: default"],
-                  ["low", "Low"],
-                  ["medium", "Medium"],
-                  ["high", "High"],
-                  ["max", "Max"],
-                ]}
-              />
-              <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                <input
-                  type="checkbox"
-                  checked={props.planMode}
-                  onChange={(e) => props.onPlanModeChange(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-[var(--primary)]"
-                />
-                <ClipboardList className="h-3.5 w-3.5" />
-                Plan mode
-              </label>
-              <span className="ml-auto text-[10px] text-muted-foreground/50">
-                Enter ↵ · Shift+Enter newline
-              </span>
-            </div>
-          </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
-}
-
-/**
- * Claude Code-style "/" autocomplete: commands and skills discovered
- * from ~/.claude and the workspace's .claude directory.
- */
-function SlashMenu(props: {
-  matches: SlashCommand[];
-  selectedIndex: number;
-  onHover: (index: number) => void;
-  onPick: (command: SlashCommand) => void;
-}) {
-  const listRef = useRef<HTMLUListElement>(null);
-
-  // Keep the keyboard-selected row in view.
-  useEffect(() => {
-    listRef.current
-      ?.querySelector('[data-selected="true"]')
-      ?.scrollIntoView({ block: "nearest" });
-  }, [props.selectedIndex]);
-
-  return (
-    <motion.ul
-      ref={listRef}
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 6 }}
-      transition={{ duration: 0.12 }}
-      className={cn(
-        "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-64",
-        "overflow-y-auto rounded-xl border border-white/10 bg-card p-1 shadow-xl"
-      )}
-    >
-      {props.matches.map((command, index) => (
-        <li key={`${command.scope}:${command.name}`}>
-          <button
-            type="button"
-            data-selected={index === props.selectedIndex}
-            // preventDefault keeps focus in the textarea while clicking.
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => props.onPick(command)}
-            onMouseEnter={() => props.onHover(index)}
-            className={cn(
-              "flex w-full items-baseline gap-2 rounded-lg px-2.5 py-1.5 text-left",
-              index === props.selectedIndex && "bg-accent/60"
-            )}
-          >
-            <span className="shrink-0 font-mono text-xs text-primary">
-              /{command.name}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-              {command.description}
-            </span>
-            <span
-              className={cn(
-                "shrink-0 rounded px-1 py-px text-[9px] uppercase tracking-wide",
-                command.kind === "skill"
-                  ? "bg-primary/15 text-primary"
-                  : "bg-muted text-muted-foreground"
-              )}
-            >
-              {command.kind === "skill" ? "skill" : command.scope}
-            </span>
-          </button>
-        </li>
-      ))}
-    </motion.ul>
-  );
-}
-
-interface ActiveMention {
-  query: string;
-  start: number;
-  end: number;
-}
-
-/**
- * The "@…" token under the caret, if any. A mention starts at an "@" that
- * sits at the start of the input or right after whitespace, and runs to
- * the caret with no whitespace in between — so it fires mid-sentence too.
- */
-function activeMention(input: string, caret: number): ActiveMention | null {
-  const upto = input.slice(0, caret);
-  const at = upto.lastIndexOf("@");
-  if (at < 0) return null;
-  const before = at === 0 ? "" : upto[at - 1];
-  if (before && !/\s/.test(before)) return null;
-  const query = upto.slice(at + 1);
-  if (/\s/.test(query)) return null;
-  return { query, start: at, end: caret };
-}
-
-const MAX_MENTION_RESULTS = 10;
-
-/**
- * Ranks file paths for the "@" menu: basename prefix matches first, then
- * basename/path substring matches. Case-insensitive, space-insensitive.
- */
-function filterFiles(files: string[], query: string): string[] {
-  const q = query.toLowerCase().trim();
-  if (files.length === 0) return [];
-  if (q === "") return files.slice(0, MAX_MENTION_RESULTS);
-  const scored: Array<{ path: string; score: number }> = [];
-  for (const path of files) {
-    const lower = path.toLowerCase();
-    const base = lower.slice(lower.lastIndexOf("/") + 1);
-    let score = -1;
-    if (base.startsWith(q)) score = 0;
-    else if (base.includes(q)) score = 1;
-    else if (lower.includes(q)) score = 2;
-    if (score >= 0) scored.push({ path, score });
-    if (scored.length > 400) break;
-  }
-  scored.sort((a, b) => a.score - b.score || a.path.length - b.path.length);
-  return scored.slice(0, MAX_MENTION_RESULTS).map((s) => s.path);
-}
-
-/** Workspace file picker for "@" mentions — inserts a path, not contents. */
-function MentionMenu(props: {
-  matches: string[];
-  selectedIndex: number;
-  query: string;
-  onHover: (index: number) => void;
-  onPick: (path: string) => void;
-}) {
-  const listRef = useRef<HTMLUListElement>(null);
-  useEffect(() => {
-    listRef.current
-      ?.querySelector('[data-selected="true"]')
-      ?.scrollIntoView({ block: "nearest" });
-  }, [props.selectedIndex]);
-
-  return (
-    <motion.ul
-      ref={listRef}
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 6 }}
-      transition={{ duration: 0.12 }}
-      className={cn(
-        "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-64",
-        "overflow-y-auto rounded-xl border border-white/10 bg-card p-1 shadow-xl"
-      )}
-    >
-      {props.matches.map((path, index) => {
-        const slash = path.lastIndexOf("/");
-        const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
-        const name = slash >= 0 ? path.slice(slash + 1) : path;
-        return (
-          <li key={path}>
-            <button
-              type="button"
-              data-selected={index === props.selectedIndex}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => props.onPick(path)}
-              onMouseEnter={() => props.onHover(index)}
-              className={cn(
-                "flex w-full items-baseline gap-1.5 rounded-lg px-2.5 py-1.5 text-left",
-                index === props.selectedIndex && "bg-accent/60"
-              )}
-            >
-              <FileCode2 className="h-3.5 w-3.5 shrink-0 self-center text-primary/70" />
-              <span className="shrink-0 font-mono text-xs">{name}</span>
-              <span className="min-w-0 flex-1 truncate text-right font-mono text-[10px] text-muted-foreground/60">
-                {dir}
-              </span>
-            </button>
-          </li>
-        );
-      })}
-    </motion.ul>
-  );
-}
-
-function ComposerSelect(props: {
-  value: string;
-  onChange: (value: string) => void;
-  options: Array<[string, string]>;
-}) {
-  return (
-    <Select
-      value={props.value}
-      onChange={props.onChange}
-      direction="up"
-      options={props.options.map(([value, label]) => ({ value, label }))}
-    />
-  );
-}
+});
 
 /**
  * Right-side rail that carries the *process* — the live plan, the activity
@@ -865,7 +267,7 @@ function ProcessPanel(props: {
 }
 
 /** The live task plan checklist (pipeline stage 4, updated by the model). */
-function PlanCard({ plan }: { plan: Plan }) {
+const PlanCard = memo(function PlanCard({ plan }: { plan: Plan }) {
   const done = plan.steps.filter((s) => s.status === "done").length;
   return (
     <motion.div
@@ -905,7 +307,7 @@ function PlanCard({ plan }: { plan: Plan }) {
       </div>
     </motion.div>
   );
-}
+});
 
 function PlanStepIcon({ status }: { status: PlanStep["status"] }) {
   if (status === "done") {
@@ -924,7 +326,6 @@ function PlanStepIcon({ status }: { status: PlanStep["status"] }) {
   );
 }
 
-/** Live feed: what the agent is doing right now (tools, files, commands). */
 /**
  * Live progress while a task runs. The header always moves — stage, then
  * the current tool — so long stretches between the model's own messages
@@ -948,9 +349,7 @@ const ActivityFeed = memo(function ActivityFeed({
   const recent = actions.slice(-6);
   const elapsed = useElapsed(startedAt);
   const running = recent.find((a) => a.status === "running");
-  const headline = cancelling
-    ? "stopping — finishing the current step"
-    : (running?.label ?? (stage ? STAGE_LABELS[stage] : "starting…"));
+  const headline = liveHeadline(actions, stage, cancelling);
 
   // One chronological stream: the recent actions plus every diff from this
   // run (a diff is the record of an edit — never drop it, even after its
@@ -993,22 +392,38 @@ const ActivityFeed = memo(function ActivityFeed({
                   key={row.action.id}
                   initial={{ opacity: 0, x: -6 }}
                   animate={{ opacity: 1, x: 0 }}
-                  className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                  className="flex items-start gap-1.5 text-[11px] text-muted-foreground"
                 >
                   {row.action.status === "running" ? (
-                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" />
+                    <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary/70" />
                   ) : row.action.status === "done" ? (
-                    <Check className="h-3 w-3 shrink-0 text-success" />
+                    <Check className="mt-0.5 h-3 w-3 shrink-0 text-success" />
                   ) : (
-                    <XCircle className="h-3 w-3 shrink-0 text-destructive" />
+                    <XCircle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />
                   )}
-                  <span className="truncate font-mono">{row.action.label}</span>
+                  {/*
+                   * Wrap instead of truncate: these labels are file paths, and
+                   * the part that identifies the file is the tail — exactly
+                   * what an ellipsis eats. break-all keeps long unbroken paths
+                   * inside the rail instead of stretching it.
+                   */}
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-all font-mono">
+                      {row.action.label}
+                    </span>
+                    {row.action.status === "failed" && row.action.error && (
+                      <span className="mt-0.5 block break-all font-mono text-[10px] text-destructive">
+                        {row.action.error}
+                      </span>
+                    )}
+                  </span>
                 </motion.div>
               ) : (
                 <DiffCard
                   key={row.diff.id}
                   diff={row.diff}
                   monacoTheme={monacoTheme}
+                  defaultOpen
                 />
               )
             )}
@@ -1063,17 +478,38 @@ const ChatMessage = memo(function ChatMessage({
               Atelier
             </span>
           </div>
-          <div className="chat-md rounded-2xl rounded-tl-md border border-white/10 bg-black/60 px-4 py-3">
-            <Markdown remarkPlugins={[remarkGfm]}>{item.text}</Markdown>
-            {item.streaming && (
-              <span className="ml-0.5 inline-block h-4 w-[7px] animate-pulse rounded-sm bg-primary/70 align-text-bottom" />
-            )}
+          <div className="chat-md rounded-2xl rounded-tl-md border border-border/50 bg-muted/40 px-4 py-3">
+            <AssistantText text={item.text} streaming={item.streaming} />
           </div>
         </div>
       )}
     </motion.div>
   );
 });
+
+/**
+ * Assistant body. While tokens are still arriving this stays plain text:
+ * re-parsing the whole message through remark on every delta made long
+ * answers stream slower the longer they got. The markdown render happens
+ * once, when the message completes.
+ */
+function AssistantText({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming?: boolean;
+}) {
+  if (streaming) {
+    return (
+      <p className="whitespace-pre-wrap break-words text-sm">
+        {text}
+        <span className="ml-0.5 inline-block h-4 w-[7px] animate-pulse rounded-sm bg-primary/70 align-text-bottom" />
+      </p>
+    );
+  }
+  return <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>;
+}
 
 /** Icon for a pinned knowledge/impact log line, by its source topic. */
 function logIcon(topic: string | undefined) {
@@ -1117,15 +553,23 @@ const DiffMessage = memo(function DiffMessage({
  * The diff card itself — path header, +/− line stat, and the Monaco diff.
  * Shared by the transcript ({@link DiffMessage}) and the live activity feed,
  * so an edit looks the same whether it's happening now or scrolled-back history.
+ *
+ * Monaco is mounted lazily, on demand: a long session can produce dozens of
+ * edits, and dozens of live diff editors is what turned scrolling the
+ * transcript into a slideshow. Collapsed cards render the stat line only.
  */
 const DiffCard = memo(function DiffCard({
   diff,
   monacoTheme,
+  defaultOpen = false,
 }: {
   diff: NonNullable<ChatItemVm["diff"]>;
   monacoTheme: string;
+  /** The live feed opens its diffs; scrolled-back history starts collapsed. */
+  defaultOpen?: boolean;
 }) {
   const { added, removed } = lineStat(diff.before, diff.after);
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <motion.div
       layout="position"
@@ -1134,7 +578,11 @@ const DiffCard = memo(function DiffCard({
       transition={{ duration: 0.2 }}
       className="w-full max-w-full"
     >
-      <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+      >
         <FileDiff className="h-3.5 w-3.5 shrink-0 text-primary/70" />
         <span className="truncate font-mono text-xs font-medium">
           {diff.path}
@@ -1143,24 +591,52 @@ const DiffCard = memo(function DiffCard({
           {added > 0 && <span className="text-emerald-500">+{added}</span>}
           {removed > 0 && <span className="text-destructive">−{removed}</span>}
         </span>
-      </div>
-      <div
-        className="mt-2 overflow-hidden rounded-xl border border-white/10"
-        style={{ height: diffHeight(diff.before, diff.after) }}
-      >
-        <DiffEditor
-          original={diff.before}
-          modified={diff.after}
-          language={languageForPath(diff.path)}
-          theme={monacoTheme}
-          options={INLINE_DIFF_EDITOR_OPTIONS}
-        />
-      </div>
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/60">
+          {open ? "hide" : "show"}
+        </span>
+      </button>
+      {open && (
+        <div
+          className="mt-2 overflow-hidden rounded-xl border border-white/10"
+          style={{ height: diffHeight(diff.before, diff.after) }}
+        >
+          <DiffEditor
+            original={diff.before}
+            modified={diff.after}
+            language={languageForPath(diff.path)}
+            theme={monacoTheme}
+            options={INLINE_DIFF_EDITOR_OPTIONS}
+          />
+        </div>
+      )}
     </motion.div>
   );
 });
 
-function ThinkingBlock({ text }: { text: string }) {
+/**
+ * What the agent is doing right now, in one line: the running tool, else
+ * the pipeline stage. Shared by the process rail and the centre's live
+ * block so the two never disagree about the current step.
+ */
+function liveHeadline(
+  actions: AgentAction[],
+  stage: PipelineStage | null,
+  cancelling: boolean
+): string {
+  if (cancelling) return "stopping — finishing the current step";
+  const running = actions.slice(-6).find((a) => a.status === "running");
+  return running?.label ?? (stage ? STAGE_LABELS[stage] : "starting…");
+}
+
+/**
+ * The centre's live block. Present for the WHOLE run, not only while the
+ * model happens to be emitting thought: the transcript goes quiet during
+ * retrieval, planning, and long tool stretches, and a blank centre next to
+ * a ticking process rail reads as a stall. Thinking text wins when there
+ * is any; otherwise the block carries the current step.
+ */
+function ThinkingBlock({ text, status }: { text: string; status: string }) {
+  const thinking = text.trim().length > 0;
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -1171,11 +647,16 @@ function ThinkingBlock({ text }: { text: string }) {
       <div className="mb-1 flex items-center gap-1.5">
         <BrainCircuit className="h-3.5 w-3.5 animate-pulse text-primary/70" />
         <span className="text-[11px] font-medium uppercase tracking-wider text-primary/70">
-          thinking
+          {thinking ? "thinking" : "working"}
         </span>
       </div>
-      <p className="line-clamp-4 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-        {text.slice(-600)}
+      <p
+        className={cn(
+          "whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground",
+          thinking ? "line-clamp-4" : "text-shimmer truncate"
+        )}
+      >
+        {thinking ? text.slice(-600) : status}
       </p>
     </motion.div>
   );

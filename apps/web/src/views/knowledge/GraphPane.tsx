@@ -21,6 +21,8 @@ import type { GraphScope } from "@/state/knowledge.store";
 export interface GraphPaneProps {
   vm: ReturnType<typeof useKnowledgeViewModel>;
   theme: "dark" | "light";
+  /** False while another dock pane is in front; parks the 3D render loop. */
+  active?: boolean;
 }
 
 const SCOPES: Array<{ id: GraphScope; label: string; needsTarget: boolean }> = [
@@ -64,7 +66,7 @@ const NODE_TYPES = { fileGroup: FileGroupNode };
  * inside, and edges connect the actual functions across files. Click a
  * file box to drill into it; click a symbol to see its callers/callees.
  */
-export function GraphPane({ vm, theme }: GraphPaneProps) {
+export function GraphPane({ vm, theme, active = true }: GraphPaneProps) {
   const [target, setTarget] = useState("");
   const [mode, setMode] = useState<"3d" | "2d">("3d");
   const activeScope = vm.graphScope;
@@ -224,7 +226,7 @@ export function GraphPane({ vm, theme }: GraphPaneProps) {
             </p>
           </div>
         ) : mode === "3d" ? (
-          <Graph3D graph={vm.graph} theme={theme} />
+          <Graph3D graph={vm.graph} theme={theme} active={active} />
         ) : (
           <ReactFlow
             nodes={nodes}

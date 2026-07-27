@@ -1,11 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { HeaderBar } from "./HeaderBar";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
 import { StatusBar } from "./StatusBar";
-import { PlaceholderPanel } from "./PlaceholderPanel";
-import { ConnectPanel } from "./ConnectPanel";
+import { ConnectionGate } from "./ConnectionGate";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
@@ -15,11 +14,13 @@ import { MonitorPanel } from "@/views/monitor/MonitorPanel";
 import { KnowledgePanel } from "@/views/knowledge/KnowledgePanel";
 import { IndexingWelcome } from "@/views/knowledge/IndexingWelcome";
 import { HooksPanel } from "@/views/hooks/HooksPanel";
+import { SettingsPanel } from "@/views/settings/SettingsPanel";
 import { DbApprovalModal } from "@/views/hooks/DbApprovalModal";
 import { RightDock } from "@/views/right/RightDock";
 import { useTerminalViewModel } from "@/hooks/useTerminalViewModel";
 import { useSessionsViewModel } from "@/hooks/useSessionsViewModel";
 import { useConnectionViewModel } from "@/hooks/useConnectionViewModel";
+import { useConnectionGateViewModel } from "@/hooks/useConnectionGateViewModel";
 import { useTimelineViewModel } from "@/hooks/useTimelineViewModel";
 import { useFileExplorerViewModel } from "@/hooks/useFileExplorerViewModel";
 import { useEditorViewModel } from "@/hooks/useEditorViewModel";
@@ -29,20 +30,12 @@ import { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 import { useHooksViewModel } from "@/hooks/useHooksViewModel";
 import { useDbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
 import { useUsageViewModel } from "@/hooks/useUsageViewModel";
+import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
+import { useSettingsViewModel } from "@/hooks/useSettingsViewModel";
 import { bridge } from "@/services/bridge-client";
 import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
 import { cn } from "@/lib/cn";
-
-const SIDE_PANELS: Record<
-  Exclude<
-    ActivityView,
-    "agents" | "explorer" | "git" | "monitor" | "knowledge" | "hooks"
-  >,
-  { title: string; phase: string }
-> = {
-  settings: { title: "Settings", phase: "Phase 8" },
-};
 
 function Island(props: {
   children: React.ReactNode;
@@ -76,6 +69,7 @@ export function AppShell() {
   const [activeView, setActiveView] = useState<ActivityView>("agents");
   const { theme, toggle } = useThemeStore();
   const connection = useConnectionViewModel();
+  const gate = useConnectionGateViewModel();
   const sessions = useSessionsViewModel();
   const timeline = useTimelineViewModel();
   const explorer = useFileExplorerViewModel();
@@ -87,6 +81,8 @@ export function AppShell() {
   const hooksVm = useHooksViewModel();
   const dbApproval = useDbApprovalViewModel();
   const usage = useUsageViewModel();
+  const contextStats = useContextStatsViewModel();
+  const settingsVm = useSettingsViewModel();
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
 
   // Wildcard subscriptions do not replay, so seed the branch once on
@@ -105,9 +101,7 @@ export function AppShell() {
       .catch(() => undefined);
   }, [connection.state]);
 
-  const needsManualConnect =
-    connection.state === "disconnected" || connection.state === "unauthorized";
-  const busy = sessions.selected?.status === "working";
+  const busy = sessions.busy;
 
   const leftPanel =
     activeView === "agents" ? (
@@ -138,57 +132,18 @@ export function AppShell() {
     ) : activeView === "hooks" ? (
       <HooksPanel vm={hooksVm} />
     ) : (
-      <PlaceholderPanel
-        title={SIDE_PANELS[activeView].title}
-        phase={SIDE_PANELS[activeView].phase}
-      />
+      <SettingsPanel vm={settingsVm} />
     );
 
-  const chatPane = needsManualConnect ? (
-    <ConnectPanel
-      state={connection.state}
-      port={connection.port}
-      token={connection.token}
-      onPortChange={connection.setPort}
-      onTokenChange={connection.setToken}
-      onConnect={connection.saveAndConnect}
-    />
-  ) : (
-    <ChatPanel
-      sessionTitle={sessions.selected?.conversation.title ?? "No session"}
-      items={sessions.selected?.items ?? []}
-      thinking={sessions.selected?.thinking ?? ""}
-      actions={sessions.selected?.actions ?? []}
-      liveDiffs={sessions.selected?.liveDiffs ?? []}
-      plan={sessions.selected?.plan ?? null}
-      stage={sessions.selected?.stage ?? null}
-      taskStartedAt={sessions.selected?.taskStartedAt ?? null}
-      cancelling={sessions.selected?.cancelling ?? false}
-      input={sessions.input}
-      busy={busy ?? false}
-      connected={sessions.connected && sessions.selected !== null}
-      error={sessions.error ?? sessions.selected?.lastError ?? null}
-      model={sessions.model}
-      models={sessions.models}
-      effort={sessions.effort}
-      planMode={sessions.planMode}
-      attachments={sessions.attachments}
-      images={sessions.images}
-      attachCandidate={editor.selectedPath}
-      onInputChange={sessions.setInput}
-      onSend={() => void sessions.send()}
-      onCancel={() => void sessions.cancel()}
-      onModelChange={sessions.changeModel}
-      onEffortChange={sessions.changeEffort}
-      onPlanModeChange={sessions.setPlanMode}
-      onAttach={sessions.addAttachment}
-      onRemoveAttachment={sessions.removeAttachment}
-      onAddImages={sessions.addImages}
-      onRemoveImage={sessions.removeImage}
-      slashCommands={sessions.slashCommands}
-      filePaths={sessions.filePaths}
-      monacoTheme={editor.monacoTheme}
-    />
+  // Memoized so the dock's chat pane keeps a stable element across shell
+  // re-renders: ChatPanel and Composer subscribe to their own state, and a
+  // fresh element every render would defeat their memoization. Connection
+  // trouble is never swapped in here — ConnectionGate covers the whole
+  // viewport instead, so the transcript is not torn down and rebuilt on
+  // every reconnect.
+  const chatPane = useMemo(
+    () => <ChatPanel shellError={sessions.error} />,
+    [sessions.error]
   );
 
   return (
@@ -257,6 +212,8 @@ export function AppShell() {
       <GitFlowHost />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />
+      {/* Blocks the whole viewport while there is no live agent behind it. */}
+      <ConnectionGate vm={gate} />
       <Island className="h-8 shrink-0" delay={0.2}>
         <StatusBar
           connection={connection.state}
@@ -265,6 +222,7 @@ export function AppShell() {
           workspaceRoot={connection.workspaceRoot}
           branch={branch}
           usage={usage}
+          contextStats={contextStats}
           indexingActive={knowledge.indexingActive}
           indexing={knowledge.indexing}
           lastIndexedAt={knowledge.stats?.lastIndexedAt ?? null}

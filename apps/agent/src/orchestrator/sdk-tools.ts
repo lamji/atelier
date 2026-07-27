@@ -5,6 +5,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { ToolRegistry } from "../tools/registry.js";
+import { shapeToolOutput } from "../context/tool-output/index.js";
 
 export const MCP_SERVER_NAME = "atelier";
 
@@ -14,8 +15,13 @@ export interface SdkToolContext {
   signal: AbortSignal;
 }
 
-function asText(result: unknown): { content: Array<{ type: "text"; text: string }> } {
-  return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+function asText(
+  tool: string,
+  result: unknown
+): { content: Array<{ type: "text"; text: string }> } {
+  // Shaped, compact output: tool results ride in the SDK session transcript
+  // on every later turn, so compression here pays repeatedly.
+  return { content: [{ type: "text", text: shapeToolOutput(tool, result) }] };
 }
 
 /**
@@ -32,7 +38,7 @@ export function createAtelierMcpServer(
     const ctx = getContext();
     try {
       const result = await registry.run(name, input, ctx.taskId, ctx.signal);
-      return asText(result);
+      return asText(name, result);
     } catch (error) {
       return {
         content: [

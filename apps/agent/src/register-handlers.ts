@@ -5,7 +5,7 @@ import type { SymbolGraph } from "./knowledge/graph/symbol-graph.js";
 import type { FeatureModelService } from "./knowledge/features/feature-model.js";
 import type { RouteFeatureScanner } from "./knowledge/features/route-feature-scanner.js";
 import type { LessonStore } from "./knowledge/lessons/lesson-store.js";
-import type { Retriever } from "./rag/retriever.js";
+import type { RetrieverLike } from "./context/cache/index.js";
 import type { ValidationRunners } from "./validation/runners.js";
 import type { EventBus } from "./events/event-bus.js";
 import type { SettingsRepo } from "./storage/repositories/settings.js";
@@ -19,7 +19,7 @@ export function registerMiscHandlers(
   router: Router,
   knowledge: KnowledgeQuery,
   indexer: IncrementalIndexer,
-  retriever: Retriever,
+  retriever: RetrieverLike,
   graph: SymbolGraph,
   features: FeatureModelService,
   routeFeatures: RouteFeatureScanner,

@@ -14,6 +14,7 @@ import { settingsMethods } from "./settings.js";
 import { usageMethods } from "./usage.js";
 import { modelsMethods } from "./models.js";
 import { projectsMethods } from "./projects.js";
+import { contextMethods } from "./context.js";
 
 export const methods = {
   ...sessionMethods,
@@ -28,6 +29,7 @@ export const methods = {
   ...usageMethods,
   ...modelsMethods,
   ...projectsMethods,
+  ...contextMethods,
 } as const;
 
 export type Methods = typeof methods;
@@ -56,6 +58,7 @@ export {
   usageMethods,
   modelsMethods,
   projectsMethods,
+  contextMethods,
 };
 export {
   ProjectInfo,

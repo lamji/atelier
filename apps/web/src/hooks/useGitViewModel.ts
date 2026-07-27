@@ -10,8 +10,14 @@ import { useWorkspaceStore } from "@/state/workspace.store";
  */
 export function useGitViewModel() {
   const connected = useConnectionStore((s) => s.state === "connected");
-  const { status, commits, branches, stateVersion, gitDiff, error } =
-    useGitStore();
+  // Per-field selectors: `live` (branch/dirty count) moves with every git
+  // event, and the panel's data does not need to re-render for it.
+  const status = useGitStore((s) => s.status);
+  const commits = useGitStore((s) => s.commits);
+  const branches = useGitStore((s) => s.branches);
+  const stateVersion = useGitStore((s) => s.stateVersion);
+  const gitDiff = useGitStore((s) => s.gitDiff);
+  const error = useGitStore((s) => s.error);
 
   useEffect(() => {
     if (!connected) return;

@@ -19,6 +19,8 @@ export const taskMethods = {
       model: z.string().optional(),
       effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
       planMode: z.boolean().optional(),
+      /** Vibe coding: autonomous product-builder mode for this task. */
+      vibe: z.boolean().optional(),
       /** Pasted/dropped/picked images the model should see this turn. */
       images: z.array(ImageAttachment).optional(),
     }),

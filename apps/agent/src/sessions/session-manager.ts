@@ -63,6 +63,7 @@ export function registerSessionHandlers(
       model: params.model,
       effort: params.effort,
       planMode: params.planMode,
+      vibe: params.vibe,
       images: params.images,
     });
     return { taskId };
@@ -72,9 +73,16 @@ export function registerSessionHandlers(
     cancelled: orchestrator.cancelTask(params.taskId),
   }));
 
-  router.register("task.list", (params) => ({
-    tasks: conversations.listTasks(params?.activeOnly),
-  }));
+  router.register("task.list", (params) => {
+    const tasks = conversations.listTasks(params?.activeOnly);
+    if (!params?.activeOnly) return { tasks };
+    // "Active" must mean live in the orchestrator, not just a "running" DB
+    // row: if the agent restarted mid-task the row stays "running" forever.
+    // Intersecting with the live set keeps a reloading client from restoring
+    // a phantom busy state that would wedge the composer.
+    const live = new Set(orchestrator.listRunningTaskIds());
+    return { tasks: tasks.filter((t) => live.has(t.id)) };
+  });
 
   router.register("task.getTimeline", (params) =>
     timeline.getTimeline(params.taskId, params.cursor, params.limit)

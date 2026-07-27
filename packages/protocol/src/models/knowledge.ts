@@ -96,6 +96,14 @@ export const RetrievedChunk = z.object({
   preview: z.string(),
   startRow: z.number().optional(),
   endRow: z.number().optional(),
+  /** Enrichment for context engineering (ranking, budgeting, dedup). */
+  symbolId: z.number().optional(),
+  tokenCount: z.number().optional(),
+  contentHash: z.string().optional(),
+  /** Per-arm retrieval scores before the weighted merge. */
+  arms: z
+    .object({ vec: z.number(), kw: z.number(), sym: z.number() })
+    .optional(),
 });
 export type RetrievedChunk = z.infer<typeof RetrievedChunk>;
 

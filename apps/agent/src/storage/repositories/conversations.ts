@@ -53,9 +53,12 @@ export class ConversationRepo {
       msg.logTopic !== undefined || msg.diff !== undefined
         ? JSON.stringify({ logTopic: msg.logTopic, diff: msg.diff })
         : null;
+    // OR REPLACE: re-pinning the same event id (a replayed or duplicated
+    // publish) should update the row, never abort the task that wrote it.
     this.db
       .prepare(
-        "INSERT INTO chat_messages(id, conversation_id, task_id, role, text, created_at, meta) " +
+        "INSERT OR REPLACE INTO chat_messages(" +
+          "id, conversation_id, task_id, role, text, created_at, meta) " +
           "VALUES(?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
