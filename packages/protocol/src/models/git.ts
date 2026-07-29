@@ -33,6 +33,25 @@ export const GitBranch = z.object({
 });
 export type GitBranch = z.infer<typeof GitBranch>;
 
+/**
+ * One checkout inside the workspace. A company folder holding several
+ * project repos has no repository of its own, so the UI needs the list to
+ * show rather than a single implied repo that does not exist.
+ */
+export const GitRepo = z.object({
+  /** Workspace-relative directory ("." when the root is itself a repo). */
+  path: z.string(),
+  /** Folder name, for the tab label. */
+  name: z.string(),
+  /** Current branch, or null when it could not be read. */
+  branch: z.string().nullable(),
+  /** Uncommitted file count, for the tab badge. */
+  changedFiles: z.number(),
+  /** The checkout git commands currently act on. */
+  active: z.boolean(),
+});
+export type GitRepo = z.infer<typeof GitRepo>;
+
 /** Outcome of a streamed git/gh command run (output arrives via progress). */
 export const GitOpResult = z.object({
   ok: z.boolean(),

@@ -23,6 +23,8 @@ import {
   buildTaskSummary,
   TaskSummaryStore,
 } from "../src/context/summaries/index.js";
+import { SharedSessionContextBuilder } from "../src/context/session/index.js";
+import { ConversationRepo } from "../src/storage/repositories/conversations.js";
 import { openDb } from "../src/storage/db.js";
 import { EventBus } from "../src/events/event-bus.js";
 
@@ -230,7 +232,7 @@ check("assembler stays inside budget with stable section order", () => {
   for (const s of stats.sections) {
     assert.ok(s.tokens >= 0, `section ${s.name} negative`);
   }
-  const codeIdx = text.indexOf("Most relevant code:");
+  const codeIdx = text.indexOf("Most relevant retrieved context:");
   const planIdx = text.indexOf("PLAN (");
   assert.ok(codeIdx !== -1 && planIdx !== -1 && codeIdx < planIdx);
   assert.ok(stats.savedTokens > 0, "no savings vs naive baseline");
@@ -273,8 +275,7 @@ check("second assemble dedupes already-sent chunks", () => {
   const bus = new EventBus();
   const ledger = new TokenLedger(db, bus);
   const sent = new SentChunkStore(db);
-  const summaries = new TaskSummaryStore(db);
-  const assembler = new PromptAssembler({ db, ledger, sent, summaries });
+  const assembler = new PromptAssembler({ db, ledger, sent });
   const retrieval = {
     strategy: "test",
     chunks: [
@@ -316,24 +317,221 @@ check("second assemble dedupes already-sent chunks", () => {
   const first = assembler.assemble({ ...base, taskId: "task-1" });
   assert.equal(first.stats.dedupedChunks, 0);
   assert.ok(first.text.includes("function login"));
-  summaries.save(
-    buildTaskSummary({
-      taskId: "task-1",
-      conversationId: "conv-d",
-      intentSummary: "Fixed the login bug",
-      changedFiles: ["src/auth.ts"],
-      validation: [],
-      planGoal: "g",
-    })
-  );
   const second = assembler.assemble({ ...base, taskId: "task-2" });
   assert.equal(second.stats.dedupedChunks, 1, "chunk not deduped");
   assert.ok(second.text.includes("(already in context)"));
   assert.ok(!second.text.includes("function login"), "code re-sent");
-  assert.ok(second.text.includes("RECENT WORK IN THIS SESSION"));
-  assert.ok(second.text.includes("Fixed the login bug"));
+  // Conversation memory is not the assembler's job any more — it has one
+  // owner, SharedSessionContextBuilder (checked below).
+  assert.ok(!second.text.includes("RECENT WORK IN THIS SESSION"));
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-console.log("context-smoke: all checks passed");
+void (async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-ctx-session-"));
+  const db = openDb(dir);
+  const conversations = new ConversationRepo(db);
+  const summaries = new TaskSummaryStore(db);
+  const builder = new SharedSessionContextBuilder({ conversations, summaries });
+  const now = Date.now();
+  conversations.create({
+    id: "conv-s",
+    title: "t",
+    sdkSessionId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  conversations.addMessage({
+    id: "m1",
+    conversationId: "conv-s",
+    taskId: "task-1",
+    role: "user",
+    text: "rename the login button",
+    createdAt: now,
+  });
+  await summaries.save(
+    buildTaskSummary({
+      taskId: "task-1",
+      conversationId: "conv-s",
+      intentSummary: "Fixed the login bug",
+      changedFiles: ["src/auth.ts"],
+      validation: [],
+      planGoal: "g",
+      steps: [{ title: "patch the auth guard", files: ["src/auth.ts"] }],
+    })
+  );
+
+  const recalled = builder.build({
+    conversationId: "conv-s",
+    currentTaskId: "task-2",
+  });
+  assert.ok(recalled.text.includes("Fixed the login bug"), "summary not recalled");
+  assert.ok(recalled.text.includes("rename the login button"), "turn not recalled");
+  assert.equal(recalled.summaries, 1);
+  assert.equal(recalled.turns, 1);
+  assert.ok(recalled.tokens > 0);
+
+  // The gap this fixes: a summary retrieval already surfaced is dropped from
+  // the block, but the verbatim turns must STILL ride along.
+  const deduped = builder.build({
+    conversationId: "conv-s",
+    currentTaskId: "task-2",
+    excludeTaskIds: ["task-1"],
+  });
+  assert.ok(!deduped.text.includes("Fixed the login bug"), "summary sent twice");
+  assert.ok(deduped.text.includes("rename the login button"), "turns suppressed");
+  assert.equal(deduped.summaries, 0);
+  assert.equal(deduped.turns, 1);
+
+  // A terse follow-up must retain the newest user/assistant exchange even
+  // when older, much longer turns would otherwise consume the whole budget.
+  conversations.create({
+    id: "conv-recency",
+    title: "recency",
+    sdkSessionId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const recencyMessages = [
+    {
+      id: "r1",
+      taskId: "old-1",
+      role: "user" as const,
+      text: `ORIGINAL REQUEST DETAILS ${"frontend badges ".repeat(100)}`,
+    },
+    {
+      id: "r2",
+      taskId: "old-2",
+      role: "assistant" as const,
+      text: `Old frontend implementation ${"workspace sidebar ".repeat(120)}`,
+    },
+    {
+      id: "r3",
+      taskId: "latest-1",
+      role: "user" as const,
+      text: "What real gap is still open?",
+    },
+    {
+      id: "r4",
+      taskId: "latest-1",
+      role: "assistant" as const,
+      text:
+        "One real gap: BACKEND_ROUTE_ENFORCEMENT is still missing for " +
+        "scheduled reports, anomaly detection, and SPNDX tags.",
+    },
+  ];
+  recencyMessages.forEach((message, index) =>
+    conversations.addMessage({
+      ...message,
+      conversationId: "conv-recency",
+      createdAt: now + index,
+    })
+  );
+  const recency = builder.build({
+    conversationId: "conv-recency",
+    currentTaskId: "current",
+    maxTokens: 120,
+  });
+  assert.ok(
+    recency.text.includes("BACKEND_ROUTE_ENFORCEMENT"),
+    "newest assistant answer was clipped out"
+  );
+  assert.ok(
+    recency.text.includes("What real gap is still open?"),
+    "latest user prompt was clipped out"
+  );
+  assert.equal(recency.turns, 2, "turn count should reflect rendered turns");
+
+  // Session RAG keeps the original prompt and completed assistant answer, but
+  // never records a skipped plan item as completed work.
+  const completeMemory = buildTaskSummary({
+    taskId: "task-memory",
+    conversationId: "conv-s",
+    intentSummary: "Add tier badges",
+    originalPrompt:
+      "Do this exactly: ORIGINAL_ENTITLEMENT_DETAILS for scheduled reports.",
+    assistantText:
+      "One real gap: BACKEND_ROUTE_ENFORCEMENT still needs route checks.",
+    changedFiles: ["src/sidebar.ts"],
+    validation: [],
+    planGoal: "Add tier badges",
+    steps: [
+      {
+        title: "Add access control logic",
+        files: ["src/backend-access.ts"],
+        status: "skipped",
+      },
+      {
+        title: "Add sidebar badges",
+        files: ["src/sidebar.ts"],
+        status: "done",
+      },
+    ],
+  });
+  assert.ok(
+    completeMemory.details?.some(
+      (detail) =>
+        detail.title === "Original user request" &&
+        detail.body?.includes("ORIGINAL_ENTITLEMENT_DETAILS")
+    ),
+    "original prompt was not stored as retrievable session memory"
+  );
+  assert.ok(
+    completeMemory.details?.some(
+      (detail) =>
+        detail.title === "Assistant response" &&
+        detail.body?.includes("BACKEND_ROUTE_ENFORCEMENT")
+    ),
+    "assistant response was not stored as retrievable session memory"
+  );
+  assert.ok(
+    !completeMemory.details?.some(
+      (detail) => detail.title === "Add access control logic"
+    ),
+    "skipped plan step was stored as completed work"
+  );
+  assert.ok(
+    completeMemory.details?.some(
+      (detail) => detail.title === "Add sidebar badges"
+    ),
+    "completed plan step was not stored"
+  );
+
+  // Each unit of work is its own retrievable chunk, plus the overview.
+  const chunks = db
+    .prepare("SELECT COUNT(*) n FROM session_chunks WHERE task_id = 'task-1'")
+    .get() as { n: number };
+  assert.equal(chunks.n, 2, "expected an overview chunk plus one detail chunk");
+  const detail = db
+    .prepare(
+      "SELECT c.text FROM session_chunks sc JOIN chunks c ON c.id = sc.chunk_id " +
+        "WHERE sc.task_id = 'task-1' AND sc.ord = 1"
+    )
+    .get() as { text: string };
+  assert.ok(detail.text.includes("patch the auth guard"), "detail not chunked");
+  assert.ok(detail.text.includes("Part of:"), "detail chunk lacks its frame");
+
+  // An interrupted task is still remembered, and says so.
+  await summaries.save(
+    buildTaskSummary({
+      taskId: "task-3",
+      conversationId: "conv-s",
+      intentSummary: "Add a filter",
+      changedFiles: [],
+      validation: [],
+      planGoal: "",
+      status: "cancelled",
+      partialText: "I started editing the list view",
+    })
+  );
+  const afterCancel = builder.build({
+    conversationId: "conv-s",
+    currentTaskId: "task-4",
+  });
+  assert.ok(afterCancel.text.includes("INTERRUPTED"), "cancelled task forgotten");
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log("  ok  shared session recall, dedup, detail chunks, interruptions");
+  console.log("context-smoke: all checks passed");
+})();

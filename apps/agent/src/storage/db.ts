@@ -41,4 +41,29 @@ function applyMigrations(db: Db): void {
   if (!messageColumns.includes("meta")) {
     db.exec("ALTER TABLE chat_messages ADD COLUMN meta TEXT");
   }
+  const summaryColumns = (
+    db.prepare("PRAGMA table_info(task_summaries)").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  if (!summaryColumns.includes("chunk_id")) {
+    db.exec("ALTER TABLE task_summaries ADD COLUMN chunk_id INTEGER REFERENCES chunks(id)");
+  }
+  if (!summaryColumns.includes("status")) {
+    db.exec(
+      "ALTER TABLE task_summaries ADD COLUMN status TEXT NOT NULL " +
+        "DEFAULT 'completed'"
+    );
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_task_summaries_chunk " +
+      "ON task_summaries(chunk_id)"
+  );
+  // Session memory used to be one chunk per task, addressed by
+  // task_summaries.chunk_id. Backfill those as ord-0 rows so retrieval has a
+  // single source of truth and old conversations stay recallable.
+  db.exec(
+    "INSERT OR IGNORE INTO session_chunks(" +
+      "task_id, conversation_id, ord, chunk_id, created_at) " +
+      "SELECT task_id, conversation_id, 0, chunk_id, created_at " +
+      "FROM task_summaries WHERE chunk_id IS NOT NULL"
+  );
 }

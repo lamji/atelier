@@ -14,10 +14,12 @@ import {
   Undo2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { errorText } from "@/lib/error-text";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useGitFlowViewModel } from "@/hooks/useGitFlowViewModel";
+import { RepoSwitcher } from "./RepoSwitcher";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import type { GitFileStatus } from "@atelier/protocol";
 
@@ -26,11 +28,47 @@ export interface GitPanelProps {
 }
 
 /**
- * Left-column Git view: branch switcher, commit box on top, collapsible
- * staged/unstaged sections with stage/unstage/discard actions, and recent
- * history. Clicking a file opens its diff in the editor pane.
+ * Shell around the repo view. The switcher lives here rather than inside
+ * it so it stays on screen in every state — including the error one,
+ * which is exactly when the user needs to move to a different project.
  */
 export function GitPanel({ vm }: GitPanelProps) {
+  const multi = vm.repos.length > 1;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {multi && (
+        <RepoSwitcher
+          repos={vm.repos}
+          active={vm.activeRepo}
+          onSelect={(repo) => void vm.selectRepo(repo)}
+        />
+      )}
+      <div className="min-h-0 flex-1">
+        {multi && !vm.activeRepo ? (
+          <EmptyState text="Choose a project to see its git status." />
+        ) : (
+          <GitRepoView vm={vm} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 p-4">
+      <GitBranch className="h-6 w-6 text-muted-foreground/50" />
+      <p className="text-center text-xs text-muted-foreground">{text}</p>
+    </div>
+  );
+}
+
+/**
+ * Left-column Git view for ONE checkout: branch switcher, commit box on
+ * top, collapsible staged/unstaged sections with stage/unstage/discard
+ * actions, and recent history. Clicking a file opens its diff.
+ */
+function GitRepoView({ vm }: GitPanelProps) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -39,16 +77,7 @@ export function GitPanel({ vm }: GitPanelProps) {
   // only starts the flow; the host renders it.
   const flowVm = useGitFlowViewModel();
 
-  if (vm.error) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 p-4">
-        <GitBranch className="h-6 w-6 text-muted-foreground/50" />
-        <p className="text-center text-xs text-muted-foreground">
-          {shortError(vm.error)}
-        </p>
-      </div>
-    );
-  }
+  if (vm.error) return <EmptyState text={shortError(vm.error)} />;
   if (!vm.status) {
     return (
       <p className="pt-8 text-center text-xs text-muted-foreground">
@@ -67,7 +96,7 @@ export function GitPanel({ vm }: GitPanelProps) {
     setBusy(true);
     setActionError(null);
     void fn()
-      .catch((err: unknown) => setActionError(shortError(String(err))))
+      .catch((err: unknown) => setActionError(shortError(errorText(err))))
       .finally(() => setBusy(false));
   };
 
@@ -92,7 +121,7 @@ export function GitPanel({ vm }: GitPanelProps) {
     setActionError(null);
     vm.generateCommitMessage()
       .then((msg) => setMessage(msg))
-      .catch((err: unknown) => setActionError(shortError(String(err))))
+      .catch((err: unknown) => setActionError(shortError(errorText(err))))
       .finally(() => setGenerating(false));
   };
 
@@ -260,7 +289,7 @@ function NoRemoteState(props: { onConnect: () => Promise<void> }) {
     setError(null);
     props
       .onConnect()
-      .catch((err: unknown) => setError(shortError(String(err))))
+      .catch((err: unknown) => setError(shortError(errorText(err))))
       .finally(() => setBusy(false));
   };
 

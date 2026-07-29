@@ -8,6 +8,8 @@ import {
   Check,
   ClipboardList,
   FileDiff,
+  FolderLock,
+  History,
   Loader2,
   MessageSquareDashed,
   Network,
@@ -126,10 +128,16 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 flex-1 flex-col">
+          {/*
+            overflow-x-hidden is load-bearing: setting only overflow-y makes
+            the other axis compute to auto, so one wide child puts a
+            horizontal scrollbar under the whole transcript. Wide content
+            (code blocks, tables) scrolls inside itself instead.
+          */}
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            className="flex-1 overflow-y-auto px-4 py-4 [scrollbar-gutter:stable_both-edges]"
+            className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 [scrollbar-gutter:stable_both-edges]"
           >
             <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4">
               {vm.items.length === 0 && !vm.busy && (
@@ -137,7 +145,8 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
               )}
               <AnimatePresence initial={false}>
                 {vm.items.map((item) =>
-                  liveDiffIds.has(item.id) ? null : (
+                  liveDiffIds.has(item.id) ||
+                  (vm.busy && item.role === "assistant" && item.streaming) ? null : (
                     <ChatMessage
                       key={item.id}
                       item={item}
@@ -294,9 +303,17 @@ const PlanCard = memo(function PlanCard({ plan }: { plan: Plan }) {
                   step.status === "in-progress" && "text-foreground"
                 )}
               >
-                {step.title}
+                <span className="block break-words">{step.title}</span>
+                {/*
+                 * Same treatment as the action rail: these are file paths
+                 * with no spaces to break at, so min-w-0 alone does not
+                 * hold them — the flex item stops stretching but the text
+                 * still runs past the card. break-all is what wraps them.
+                 * Their own line, because a path reads as one unit rather
+                 * than a tail on the sentence above it.
+                 */}
                 {step.files.length > 0 && (
-                  <span className="ml-1 font-mono text-[10px] opacity-60">
+                  <span className="mt-0.5 block break-all font-mono text-[10px] opacity-60">
                     {step.files.join(", ")}
                   </span>
                 )}
@@ -514,10 +531,12 @@ function AssistantText({
 /** Icon for a pinned knowledge/impact log line, by its source topic. */
 function logIcon(topic: string | undefined) {
   if (topic === "knowledge.retrieved") return Network;
+  if (topic === "session.recalled") return History;
+  if (topic === "scope.locked") return FolderLock;
   return Radar;
 }
 
-/** Knowledge retrieval / impact radius, pinned inline in the transcript. */
+/** Knowledge / session recall / impact radius, pinned inline in the transcript. */
 const LogLine = memo(function LogLine({ item }: { item: ChatItemVm }) {
   const Icon = logIcon(item.logTopic);
   return (
@@ -653,10 +672,10 @@ function ThinkingBlock({ text, status }: { text: string; status: string }) {
       <p
         className={cn(
           "whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground",
-          thinking ? "line-clamp-4" : "text-shimmer truncate"
+          "text-shimmer truncate"
         )}
       >
-        {thinking ? text.slice(-600) : status}
+        {thinking ? text : status}
       </p>
     </motion.div>
   );

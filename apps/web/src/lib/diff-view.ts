@@ -142,7 +142,9 @@ export const INLINE_DIFF_EDITOR_OPTIONS = {
   // one gutter column. 3 chars only fits one 3-digit number — past line 999
   // the two numbers run together (e.g. "2968" + "2968" -> "29682968").
   // 6 fits two 3-digit numbers comfortably and still grows for bigger files.
-  lineNumbersMinChars: 6,
+  lineNumbers: "off" as const,
+  lineNumbersMinChars: 0,
+  lineDecorationsWidth: 0,
   glyphMargin: false,
   folding: false,
   scrollBeyondLastLine: false,

@@ -4,10 +4,16 @@ import type { AgentConfig } from "../config/agent-config.js";
 import type { TimelineStore } from "../events/timeline-store.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import { probeAuth } from "../orchestrator/auth-status.js";
-import { listSlashCommands } from "../orchestrator/command-catalog.js";
+import {
+  listSlashCommands,
+  readSlashCommandDetail,
+} from "../orchestrator/command-catalog.js";
+import { listMcpServers } from "../orchestrator/mcp-catalog.js";
+import { MCP_SERVER_NAME } from "../orchestrator/sdk-tools.js";
 import type { Router } from "../bridge/router.js";
 import { RpcError } from "../bridge/router.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
+import type { SettingsRepo } from "../storage/repositories/settings.js";
 
 /** Registers session.* and task.* RPC handlers. */
 export function registerSessionHandlers(
@@ -15,7 +21,8 @@ export function registerSessionHandlers(
   config: AgentConfig,
   conversations: ConversationRepo,
   orchestrator: Orchestrator,
-  timeline: TimelineStore
+  timeline: TimelineStore,
+  settings: SettingsRepo
 ): void {
   router.register("session.hello", (params) => {
     if (params.protocolVersion !== PROTOCOL_VERSION) {
@@ -55,16 +62,61 @@ export function registerSessionHandlers(
   }));
 
   router.register("session.listCommands", () => ({
-    commands: listSlashCommands(config.workspaceRoot),
+    commands: listSlashCommands(config.workspaceRoot, settings.get().disabledSkills),
+  }));
+
+  router.register("session.getCommandDetail", (params) => {
+    const detail = readSlashCommandDetail(
+      config.workspaceRoot,
+      params.id,
+      settings.get().disabledSkills
+    );
+    if (!detail) throw new RpcError("NOT_FOUND", `Unknown command: ${params.id}`);
+    return detail;
+  });
+
+  router.register("session.setCommandEnabled", (params) => {
+    const detail = readSlashCommandDetail(
+      config.workspaceRoot,
+      params.id,
+      settings.get().disabledSkills
+    );
+    if (!detail) throw new RpcError("NOT_FOUND", `Unknown command: ${params.id}`);
+    if (detail.command.kind !== "skill") return { command: detail.command };
+
+    const current = settings.get().disabledSkills;
+    const disabledSkills = params.enabled
+      ? current.filter((id) => id !== params.id)
+      : [...new Set([...current, params.id])];
+    settings.save({ disabledSkills });
+    const updated = readSlashCommandDetail(
+      config.workspaceRoot,
+      params.id,
+      disabledSkills
+    );
+    if (!updated) throw new RpcError("NOT_FOUND", `Unknown command: ${params.id}`);
+    return { command: updated.command };
+  });
+
+  router.register("session.listMcpServers", () => ({
+    servers: listMcpServers(config.workspaceRoot, MCP_SERVER_NAME),
   }));
 
   router.register("task.start", (params) => {
+    const disabled = disabledSlash(params.prompt, config.workspaceRoot, settings);
+    if (disabled) {
+      throw new RpcError(
+        "INVALID_PARAMS",
+        `Skill /${disabled.name} is disabled in Settings.`
+      );
+    }
     const taskId = orchestrator.startTask(params.conversationId, params.prompt, {
       model: params.model,
       effort: params.effort,
       planMode: params.planMode,
       vibe: params.vibe,
       images: params.images,
+      promptFile: params.promptFile,
     });
     return { taskId };
   });
@@ -87,4 +139,18 @@ export function registerSessionHandlers(
   router.register("task.getTimeline", (params) =>
     timeline.getTimeline(params.taskId, params.cursor, params.limit)
   );
+}
+
+function disabledSlash(
+  prompt: string,
+  workspaceRoot: string,
+  settings: SettingsRepo
+): { name: string } | null {
+  const match = prompt.trimStart().match(/^\/([^\s]+)/);
+  if (!match?.[1]) return null;
+  const command = listSlashCommands(
+    workspaceRoot,
+    settings.get().disabledSkills
+  ).find((c) => c.kind === "skill" && c.name === match[1]);
+  return command && !command.enabled ? { name: command.name } : null;
 }

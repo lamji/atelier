@@ -5,6 +5,9 @@ import { toPosix } from "@atelier/shared";
 
 const DEFAULT_IGNORES = [
   ".git/",
+  // The app's own cache (notes/prompt .md files); it has a dedicated
+  // catalog (fs.markdownFiles) and must stay out of tree/search/index.
+  ".atelier/",
   "node_modules/",
   "dist/",
   "build/",

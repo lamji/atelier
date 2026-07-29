@@ -10,7 +10,6 @@ import type { Db } from "../../storage/db.js";
 import { buildImpactContext } from "../../orchestrator/impact-context.js";
 import type { TokenLedger } from "../ledger/index.js";
 import type { SentChunkStore } from "../dedup/index.js";
-import type { TaskSummaryStore } from "../summaries/index.js";
 import { budgetFor } from "../budget/index.js";
 import { packItems } from "./pack-items.js";
 
@@ -47,7 +46,6 @@ export class PromptAssembler {
       db: Db;
       ledger: TokenLedger;
       sent?: SentChunkStore;
-      summaries?: TaskSummaryStore;
     }
   ) {}
 
@@ -75,17 +73,23 @@ export class PromptAssembler {
     const sentHashes =
       this.deps.sent?.sentHashes(input.conversationId) ?? new Set<string>();
     const fresh = input.retrieval.chunks.filter(
-      (c) => !c.contentHash || !sentHashes.has(c.contentHash)
+      (c) =>
+        c.kind === "session-memory" ||
+        !c.contentHash ||
+        !sentHashes.has(c.contentHash)
     );
     const already = input.retrieval.chunks.filter(
-      (c) => c.contentHash !== undefined && sentHashes.has(c.contentHash)
+      (c) =>
+        c.kind !== "session-memory" &&
+        c.contentHash !== undefined &&
+        sentHashes.has(c.contentHash)
     );
 
-    // 1. Ranked code through the ladder.
+    // 1. Ranked retrieved context through the ladder.
     const packed = packItems(fresh, budget, this.deps.db);
     this.deps.sent?.markSent(input.conversationId, packed.detailed);
     if (packed.items > 0) {
-      parts.push("Most relevant code:", packed.text);
+      parts.push("Most relevant retrieved context:", packed.text);
       sections.push({ name: "code", tokens: packed.tokens, items: packed.items });
     }
 
@@ -93,7 +97,12 @@ export class PromptAssembler {
     // one-line reminders instead of repeated code blocks.
     const refs = [
       ...packed.overflow
-        .filter((c) => c.kind === "code" || c.kind === "doc")
+        .filter(
+          (c) =>
+            c.kind === "code" ||
+            c.kind === "doc" ||
+            c.kind === "session-memory"
+        )
         .map((c) => `- [${c.kind}] ${c.path}`),
       ...already.map((c) => `- [${c.kind}] ${c.path} (already in context)`),
     ];
@@ -135,13 +144,26 @@ export class PromptAssembler {
       });
     }
 
-    // 5. The plan checklist.
+    // 5. The plan checklist — the execution contract, so titles are never
+    // sacrificed: every title+files line is emitted first, then each step's
+    // detail (the part saying what actually changes) is folded in while it
+    // fits. Details used to be dropped outright, which handed the
+    // implementer a list of headlines and no instructions.
     if (budget.planTokens > 0 && input.plan.steps.length > 0) {
       const steps = input.plan.steps.map(
         (step, i) =>
           `${i + 1}. [${step.id}] ${step.title}` +
           (step.files.length > 0 ? ` (${step.files.join(", ")})` : "")
       );
+      let used = approxTokens(steps.join("\n"));
+      input.plan.steps.forEach((step, i) => {
+        if (!step.detail) return;
+        const note = `   ${step.detail.slice(0, 240)}`;
+        const cost = approxTokens(note);
+        if (used + cost > budget.planTokens) return;
+        steps[i] += `\n${note}`;
+        used += cost;
+      });
       const text = clipToTokens(steps.join("\n"), budget.planTokens);
       parts.push("PLAN (report progress via update_plan_step):", text);
       sections.push({
@@ -151,25 +173,12 @@ export class PromptAssembler {
       });
     }
 
-    // 6. Recent work in this session — compressed task summaries instead
-    // of replayed conversation turns.
-    if (budget.summaryTokens > 0 && this.deps.summaries) {
-      const recent = this.deps.summaries
-        .recent(input.conversationId, 3)
-        .filter((s) => s.taskId !== input.taskId);
-      if (recent.length > 0) {
-        const text = clipToTokens(
-          recent.map((s) => `- ${s.text}`).join("\n"),
-          budget.summaryTokens
-        );
-        parts.push("RECENT WORK IN THIS SESSION:", text);
-        sections.push({
-          name: "recent-work",
-          tokens: approxTokens(text),
-          items: recent.length,
-        });
-      }
-    }
+    // Conversation memory is NOT assembled here. It has exactly one owner —
+    // SharedSessionContextBuilder — which combines the compressed summaries
+    // retrieval did not already surface with the recent verbatim turns. This
+    // used to emit its own copy of the same summaries, which meant paying
+    // twice whenever both fired and losing both whenever the mutual
+    // suppression misfired.
 
     let text = parts.join("\n");
     if (approxTokens(text) > budget.totalTokens) {

@@ -47,6 +47,7 @@ export async function probeModels(cwd: string): Promise<ModelOption[]> {
         description: m.description,
         resolvedModel: m.resolvedModel,
         supportsEffort: m.supportsEffort,
+        provider: "claude" as const,
       }));
   } catch {
     return [];

@@ -35,6 +35,7 @@ interface ChunkRow {
   symbol_id: number | null;
   token_count: number | null;
   content_hash: string | null;
+  conversation_id: string | null;
 }
 
 /**
@@ -54,7 +55,7 @@ export class Retriever {
   async retrieve(
     query: string,
     k = 12,
-    filters?: { pathGlob?: string; kinds?: string[] }
+    filters?: { pathGlob?: string; kinds?: string[]; conversationId?: string }
   ): Promise<RetrievalResult> {
     const arms: string[] = [];
     const scores = new Map<number, { vec: number; kw: number; sym: number }>();
@@ -63,10 +64,12 @@ export class Retriever {
       entry[arm] = Math.max(entry[arm], score);
       scores.set(id, entry);
     };
+    const terms = extractTerms(query);
+    let qvec: Float32Array | undefined;
 
     // Arm 1: vector similarity.
     if (this.embedder.available && this.hasEmbeddings()) {
-      const [qvec] = await this.embedder.embed([query]);
+      [qvec] = await this.embedder.embed([query]);
       if (qvec) {
         const hits = this.vectors.search(qvec, k * 3);
         if (hits.length > 0) {
@@ -76,15 +79,25 @@ export class Retriever {
       }
     }
 
+    // Arm 1b: provider-neutral session memory for this conversation. This is
+    // intentionally conversation-scoped so another chat's transcript never
+    // leaks into the current model context.
+    if (filters?.conversationId) {
+      const hits = this.sessionMemoryHits(filters.conversationId, terms, qvec);
+      if (hits.length > 0) {
+        arms.push("session-memory");
+        for (const hit of hits) {
+          if (hit.vec > 0) bump(hit.chunkId, "vec", hit.vec);
+          if (hit.kw > 0) bump(hit.chunkId, "kw", hit.kw);
+        }
+      }
+    }
+
     // Arm 2: keyword occurrence over chunk text.
-    const terms = extractTerms(query);
     if (terms.length > 0) {
-      const perTerm = this.db.prepare(
-        "SELECT id FROM chunks WHERE lower(text) LIKE ? LIMIT 300"
-      );
       const hitCounts = new Map<number, number>();
       for (const term of terms) {
-        const rows = perTerm.all(`%${term}%`) as Array<{ id: number }>;
+        const rows = this.keywordRows(term, filters?.conversationId);
         for (const row of rows) {
           hitCounts.set(row.id, (hitCounts.get(row.id) ?? 0) + 1);
         }
@@ -155,17 +168,26 @@ export class Retriever {
     // LEFT JOIN: lesson/feature chunks have no file (file_id NULL by
     // design, so re-indexing never wipes them); path falls back to kind.
     const loadChunk = this.db.prepare(
-      "SELECT c.id, COALESCE(f.path, c.kind) AS path, c.kind, c.text, " +
+      "SELECT c.id, COALESCE(f.path, " +
+        "CASE WHEN c.kind = 'session-memory' AND sc.conversation_id IS NOT NULL " +
+        "THEN 'session:' || sc.conversation_id ELSE c.kind END) AS path, " +
+        "c.kind, c.text, " +
         "c.start_row, c.end_row, c.symbol_id, c.token_count, c.content_hash " +
-        "FROM chunks c LEFT JOIN files f ON f.id = c.file_id WHERE c.id = ?"
+        ", sc.conversation_id " +
+        "FROM chunks c LEFT JOIN files f ON f.id = c.file_id " +
+        "LEFT JOIN session_chunks sc ON sc.chunk_id = c.id WHERE c.id = ?"
     );
     const fileless = (kind: string) =>
-      kind === "lesson" || kind === "feature-summary";
+      kind === "lesson" || kind === "feature-summary" || kind === "session-memory";
     const usedLessonChunks: number[] = [];
     for (const hit of combined) {
       if (chunks.length >= k) break;
       const row = loadChunk.get(hit.id) as ChunkRow | undefined;
       if (!row) continue;
+      if (row.kind === "session-memory") {
+        if (!filters?.conversationId) continue;
+        if (row.conversation_id !== filters.conversationId) continue;
+      }
       if (pathRe && !fileless(row.kind) && !pathRe.test(row.path)) continue;
       if (filters?.kinds && !filters.kinds.includes(row.kind)) continue;
       if (row.kind === "lesson") usedLessonChunks.push(row.id);
@@ -205,6 +227,63 @@ export class Retriever {
       .prepare("SELECT COUNT(*) n FROM chunk_embeddings")
       .get() as { n: number };
     return row.n > 0;
+  }
+
+  private keywordRows(
+    term: string,
+    conversationId?: string
+  ): Array<{ id: number }> {
+    const like = `%${term}%`;
+    if (conversationId) {
+      return this.db
+        .prepare(
+          "SELECT c.id FROM chunks c " +
+            "LEFT JOIN session_chunks sc ON sc.chunk_id = c.id " +
+            "WHERE lower(c.text) LIKE ? AND " +
+            "(c.kind != 'session-memory' OR sc.conversation_id = ?) LIMIT 300"
+        )
+        .all(like, conversationId) as Array<{ id: number }>;
+    }
+    return this.db
+      .prepare(
+        "SELECT id FROM chunks WHERE lower(text) LIKE ? " +
+          "AND kind != 'session-memory' LIMIT 300"
+      )
+      .all(like) as Array<{ id: number }>;
+  }
+
+  private sessionMemoryHits(
+    conversationId: string,
+    terms: string[],
+    qvec?: Float32Array
+  ): Array<{ chunkId: number; vec: number; kw: number }> {
+    // Every chunk this conversation produced — the per-task overview AND the
+    // per-unit details — so a query can match one step of a long session.
+    const rows = this.db
+      .prepare(
+        "SELECT c.id, c.text, e.embedding FROM session_chunks sc " +
+          "JOIN chunks c ON c.id = sc.chunk_id " +
+          "LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id " +
+          "WHERE sc.conversation_id = ? ORDER BY sc.created_at DESC, sc.ord LIMIT 240"
+      )
+      .all(conversationId) as Array<{
+      id: number;
+      text: string;
+      embedding: Buffer | null;
+    }>;
+    const hits = rows
+      .map((row) => {
+        const hay = row.text.toLowerCase();
+        const kw =
+          terms.length > 0
+            ? terms.filter((term) => hay.includes(term)).length / terms.length
+            : 0;
+        const vec = qvec && row.embedding ? cosine(qvec, row.embedding) : 0;
+        return { chunkId: row.id, vec, kw };
+      })
+      .filter((hit) => hit.vec > 0.2 || hit.kw > 0);
+    hits.sort((a, b) => Math.max(b.vec, b.kw) - Math.max(a.vec, a.kw));
+    return hits.slice(0, 8);
   }
 
   private matchFeatures(terms: string[]): Feature[] {
@@ -315,7 +394,15 @@ function normalizeKind(kind: string): RetrievedChunk["kind"] {
   return kind === "code" ||
     kind === "doc" ||
     kind === "feature-summary" ||
-    kind === "lesson"
+    kind === "lesson" ||
+    kind === "session-memory"
     ? kind
     : "code";
+}
+
+function cosine(a: Float32Array, blob: Buffer): number {
+  const b = new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
+  let dot = 0;
+  for (let i = 0; i < a.length && i < b.length; i++) dot += a[i]! * b[i]!;
+  return dot;
 }

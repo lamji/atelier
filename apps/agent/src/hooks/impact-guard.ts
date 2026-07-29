@@ -9,7 +9,7 @@ export const IMPACT_HOOK_NAME = "Impact radius before edit";
 const IMPACT_TOOLS = new Set(["impact_of_edit", "analyze_impact"]);
 
 /** Tools that mutate a file and therefore need a radius first. */
-const EDIT_TOOLS = new Set(["write_file", "replace_code"]);
+const EDIT_TOOLS = new Set(["write_file", "replace_code", "replace_many"]);
 
 /** Tasks kept in the ledger; old ones are dropped oldest-first. */
 const MAX_TASKS = 32;
@@ -53,12 +53,8 @@ export class ImpactFirstGuard {
     }
     if (!EDIT_TOOLS.has(ctx.toolName)) return undefined;
 
-    const path = pathOf(ctx.input);
+    const path = await this.firstUncheckedEditPath(ctx);
     if (!path) return undefined;
-    if (this.analyzed.get(ctx.taskId)?.has(normalize(path))) return undefined;
-    // Nothing to be impacted: no symbols to trace, or no file yet.
-    if (languageForFile(path) === null) return undefined;
-    if (!(await this.exists(path))) return undefined;
 
     const reason =
       `Impact radius not checked for ${path}. Before editing existing ` +
@@ -74,6 +70,19 @@ export class ImpactFirstGuard {
       ctx.taskId
     );
     return { allowed: false, reason };
+  }
+
+  private async firstUncheckedEditPath(
+    ctx: HookGuardContext
+  ): Promise<string | null> {
+    for (const path of editTargets(ctx.input)) {
+      if (this.analyzed.get(ctx.taskId)?.has(normalize(path))) continue;
+      // Nothing to be impacted: no symbols to trace, or no file yet.
+      if (languageForFile(path) === null) continue;
+      if (!(await this.exists(path))) continue;
+      return path;
+    }
+    return null;
   }
 
   private remember(taskId: string, path: string): void {
@@ -105,10 +114,20 @@ function impactTargets(input: unknown): string[] {
   return paths;
 }
 
-function pathOf(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const path = (input as Record<string, unknown>).path;
-  return typeof path === "string" && path !== "" ? path : null;
+function editTargets(input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const record = input as Record<string, unknown>;
+  if (typeof record.path === "string" && record.path !== "") {
+    return [record.path];
+  }
+  if (!Array.isArray(record.edits)) return [];
+  const paths = new Set<string>();
+  for (const edit of record.edits) {
+    if (!edit || typeof edit !== "object") continue;
+    const path = (edit as Record<string, unknown>).path;
+    if (typeof path === "string" && path !== "") paths.add(path);
+  }
+  return [...paths];
 }
 
 /**

@@ -14,6 +14,7 @@ import { useDbApprovalStore } from "@/state/db-approval.store";
 import { useGitFlowStore } from "@/state/git-flow.store";
 import { useGitStore } from "@/state/git.store";
 import { useKnowledgeStore } from "@/state/knowledge.store";
+import { useMarkdownStore } from "@/state/markdown.store";
 import type { IndexingProgress } from "@/state/knowledge.store";
 import { useSessionsStore } from "@/state/sessions.store";
 import { useTerminalStore } from "@/state/terminal.store";
@@ -70,6 +71,23 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
       const chunks = Array.isArray(payload.chunks) ? payload.chunks.length : 0;
       return `Retrieved ${chunks} chunk(s) · ${String(payload.strategy ?? "")}`;
     }
+    case "session.recalled":
+      return sessionRecalledSummary(payload);
+    case "scope.locked":
+      return scopeLockedSummary(payload);
+    case "skills.selected": {
+      const skills = Array.isArray(payload.skills) ? payload.skills : [];
+      const names = skills
+        .map((skill) =>
+          typeof skill === "object" && skill && "name" in skill
+            ? String((skill as { name?: unknown }).name ?? "")
+            : ""
+        )
+        .filter(Boolean);
+      return names.length > 0
+        ? `Using skills: ${names.map((name) => `/${name}`).join(", ")}`
+        : "No task skills selected";
+    }
     case "impact.radius":
       return String(payload.summary ?? "Impact radius computed");
     case "edit.impact": {
@@ -83,6 +101,55 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
   }
 }
 
+/**
+ * What the turn remembered, in one line. Mirrors the same function in
+ * apps/agent/src/orchestrator/orchestrator.ts so a reloaded transcript reads
+ * identically to the live console.
+ */
+function sessionRecalledSummary(payload: Record<string, unknown>): string {
+  const chunks = Number(payload.chunks ?? 0);
+  const summaries = Number(payload.summaries ?? 0);
+  const turns = Number(payload.turns ?? 0);
+  const tokens = Number(payload.tokens ?? 0);
+  const labels = Array.isArray(payload.labels)
+    ? payload.labels.map(String).filter(Boolean)
+    : [];
+  const parts: string[] = [];
+  if (chunks > 0) parts.push(`${chunks} memory chunk(s)`);
+  if (summaries > 0) parts.push(`${summaries} task summary(ies)`);
+  if (turns > 0) parts.push(`${turns} prior turn(s)`);
+  const head = parts.length > 0 ? parts.join(" · ") : "nothing to recall";
+  const tail = labels.length > 0 ? ` — ${labels.join("; ")}` : "";
+  return `Recalled session: ${head} · ~${tokens} tok${tail}`;
+}
+
+/**
+ * The working-set lock, phrased so an inherited lock reads as deliberate.
+ * A user who mentioned a folder four turns ago needs to see that it is
+ * still the only place the agent can touch.
+ */
+function scopeLockedSummary(payload: Record<string, unknown>): string {
+  const roots = Array.isArray(payload.roots)
+    ? payload.roots.map(String).filter(Boolean)
+    : [];
+  const anchors = Array.isArray(payload.anchors)
+    ? payload.anchors.map(String).filter(Boolean)
+    : [];
+  const repo = typeof payload.repo === "string" ? payload.repo : "";
+
+  if (roots.length === 0) {
+    return anchors.length > 0
+      ? `Anchored to ${anchors.length} file(s) from earlier turns`
+      : "No scope lock";
+  }
+  const verb = payload.source === "mention" ? "Locked to" : "Still locked to";
+  const where = roots.map((root) => `${root}/`).join(", ");
+  const git = repo && repo !== "." ? ` · git: ${repo}` : "";
+  const anchored =
+    anchors.length > 0 ? ` · ${anchors.length} file(s) anchored` : "";
+  return `${verb} ${where}${git}${anchored}`;
+}
+
 /** Human-readable label for a tool invocation. */
 function actionLabel(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>;
@@ -90,16 +157,26 @@ function actionLabel(name: string, input: unknown): string {
   switch (name) {
     case "read_file":
       return `Reading ${path}`;
+    case "read_many_files": {
+      const files = Array.isArray(i.files) ? i.files : [];
+      return `Reading ${files.length} files`;
+    }
     case "write_file":
       return `Writing ${path}`;
     case "replace_code":
       return `Editing ${path}`;
+    case "replace_many": {
+      const edits = Array.isArray(i.edits) ? i.edits : [];
+      return `Editing ${edits.length} replacements`;
+    }
     case "search_workspace":
       return `Searching "${String(i.query ?? "")}"`;
+    case "search_text":
+      return `Searching text "${String(i.query ?? "")}"`;
     case "list_dir":
       return `Listing ${path || "workspace"}`;
     case "run_terminal":
-      return `Running: ${String(i.command ?? "").slice(0, 80)}`;
+      return terminalActionLabel(String(i.command ?? ""));
     case "git":
       return `git ${String(i.action ?? "")}`.trim();
     case "retrieve_knowledge":
@@ -122,6 +199,44 @@ function actionLabel(name: string, input: unknown): string {
     default:
       return name;
   }
+}
+
+function terminalActionLabel(command: string): string {
+  const inner = unwrapShellCommand(command).trim();
+  const normalized = inner.replace(/\s+/g, " ");
+
+  if (/^git\s+status\b/i.test(normalized)) return "Checking git status";
+  if (/^git\s+diff\b/i.test(normalized)) return "Reading git diff";
+  if (/^git\s+log\b/i.test(normalized)) return "Reading git history";
+  if (/^git\s+branch(?:es)?\b/i.test(normalized)) return "Listing branches";
+  if (/^git\s+checkout\b/i.test(normalized)) return "Switching branch";
+  if (/^git\s+(?:add|stage)\b/i.test(normalized)) return "Staging changes";
+  if (/^git\s+commit\b/i.test(normalized)) return "Committing changes";
+  if (/^git\s+(?:rebase|merge)\b/i.test(normalized)) {
+    return "Updating branch";
+  }
+  if (/^(?:rg|grep|Select-String)\b/i.test(normalized)) {
+    return "Searching workspace";
+  }
+  if (/^(?:Get-Content|cat|type|sed)\b/i.test(normalized)) {
+    return "Reading file";
+  }
+  if (/^(?:Get-ChildItem|ls|dir|find)\b/i.test(normalized)) {
+    return "Listing workspace";
+  }
+  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+test)\b/i.test(normalized)) {
+    return "Running tests";
+  }
+  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|typecheck|lint)\b/i.test(normalized)) {
+    return "Running verification";
+  }
+
+  return "Running terminal tool";
+}
+
+function unwrapShellCommand(command: string): string {
+  const match = /(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)["'\s]*(?:-[^\s]+\s+)*-Command\s+(.+)$/i.exec(command);
+  return match?.[1] ?? command;
 }
 
 /**
@@ -248,6 +363,11 @@ function dispatch(frame: EventFrame): void {
       if (convId) {
         sessions.pinDiff(convId, diff.id, diff.path, diff.before, diff.after);
       }
+      // .atelier is invisible to the watcher (ignored), so writes to the
+      // markdown cache refresh its catalog from here instead.
+      if (diff.path.startsWith(".atelier/")) {
+        void useMarkdownStore.getState().forceRefresh();
+      }
       break;
     }
     case "terminal.data":
@@ -334,6 +454,9 @@ function dispatch(frame: EventFrame): void {
       break;
     }
     case "knowledge.retrieved":
+    case "session.recalled":
+    case "scope.locked":
+    case "skills.selected":
     case "impact.radius":
     case "edit.impact":
       // Pinned into the chat transcript (in addition to the activity feed

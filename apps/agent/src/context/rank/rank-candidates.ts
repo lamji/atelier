@@ -19,6 +19,7 @@ export interface RankInput {
 
 /** Lessons are confirmed knowledge — they outrank similarity noise. */
 const LESSON_BOOST = 0.15;
+const SESSION_MEMORY_BOOST = 0.12;
 
 /**
  * Re-ranks over-fetched retrieval candidates with signals retrieval
@@ -41,7 +42,8 @@ export function rankCandidates(input: RankInput): RetrievedChunk[] {
       chunk.score +
       targetBoost(chunk, targetPaths, neighborPaths) +
       recencyBoost(chunk.path, mtimes, now) +
-      (chunk.kind === "lesson" ? LESSON_BOOST : 0),
+      (chunk.kind === "lesson" ? LESSON_BOOST : 0) +
+      (chunk.kind === "session-memory" ? SESSION_MEMORY_BOOST : 0),
   }));
   ranked.sort((a, b) => b.rank - a.rank);
 

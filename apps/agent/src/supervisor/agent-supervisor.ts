@@ -4,6 +4,7 @@ import type { Logger } from "pino";
 import path from "node:path";
 import type { ProjectEndpoint, ProjectInfo } from "@atelier/protocol";
 import { freePort, portInUse } from "@atelier/shared/node";
+import type { BridgeInfo } from "../config/token.js";
 import type { EventBus } from "../events/event-bus.js";
 import { ProjectRegistry, type ProjectRecord } from "./registry.js";
 
@@ -36,6 +37,10 @@ export class AgentSupervisor {
   private running = new Map<string, Running>();
   /** In-flight starts, so concurrent start(id) calls share one launch. */
   private starting = new Map<string, Promise<ProjectEndpoint>>();
+  /** Ports handed to an agent that may not be listening yet. */
+  private reserved = new Set<number>();
+  /** Serializes port handout so two launches can't pick the same port. */
+  private portLock: Promise<unknown> = Promise.resolve();
 
   constructor(
     private registry: ProjectRegistry,
@@ -105,24 +110,48 @@ export class AgentSupervisor {
     id: string,
     record: ProjectRecord
   ): Promise<ProjectEndpoint> {
-    const port = await freePort(AGENT_PORT_BASE);
-    fs.mkdirSync(record.dataDir, { recursive: true });
-    const child = this.launch(record, {
-      ...process.env,
-      ATELIER_WORKSPACE: record.path,
-      ATELIER_DATA_DIR: record.dataDir,
-      ATELIER_PORT: String(port),
-      // Headless: the supervisor serves the UI, agents are pure bridges.
-      ATELIER_WEB_DIST: "",
-      LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
+    const port = await this.reservePort();
+    try {
+      fs.mkdirSync(record.dataDir, { recursive: true });
+      // Taken before the spawn so bridge.json from an earlier run of this
+      // same project can never pass as this launch's.
+      const launchedAt = Date.now();
+      const child = this.launch(record, {
+        ...process.env,
+        ATELIER_WORKSPACE: record.path,
+        ATELIER_DATA_DIR: record.dataDir,
+        ATELIER_PORT: String(port),
+        // Headless: the supervisor serves the UI, agents are pure bridges.
+        ATELIER_WEB_DIST: "",
+        LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
+      });
+      child.on("exit", (code) => this.onExit(id, code));
+      const info = await this.waitReady(child, record, port, launchedAt);
+      this.running.set(id, { child, port, token: info.token });
+      this.registry.touch(id);
+      this.log.info({ project: record.name, port }, "agent started");
+      return { id, port, token: info.token };
+    } catch (error) {
+      this.reserved.delete(port);
+      throw error;
+    }
+  }
+
+  /**
+   * Claim a port for one agent. Serialized and reservation-aware: a spawned
+   * agent does not bind its port for a second or two, so two launches that
+   * overlap (the boot auto-start and the UI's projects.start, say) would
+   * otherwise both be told the same port and the loser would die with
+   * EADDRINUSE.
+   */
+  private reservePort(): Promise<number> {
+    const next = this.portLock.then(async () => {
+      const port = await freePort(AGENT_PORT_BASE, 100, this.reserved);
+      this.reserved.add(port);
+      return port;
     });
-    child.on("exit", (code) => this.onExit(id, code));
-    await this.waitReady(child, port);
-    const token = this.readToken(record.dataDir);
-    this.running.set(id, { child, port, token });
-    this.registry.touch(id);
-    this.log.info({ project: record.name, port }, "agent started");
-    return { id, port, token };
+    this.portLock = next.catch(() => undefined);
+    return next;
   }
 
   stop(id: string): ProjectInfo | undefined {
@@ -130,6 +159,7 @@ export class AgentSupervisor {
     if (run) {
       killTree(run.child);
       this.running.delete(id);
+      this.reserved.delete(run.port);
     }
     const record = this.registry.get(id);
     if (record) {
@@ -147,10 +177,13 @@ export class AgentSupervisor {
   shutdown(): void {
     for (const [, run] of this.running) killTree(run.child);
     this.running.clear();
+    this.reserved.clear();
   }
 
   private onExit(id: string, code: number | null): void {
     if (!this.running.has(id) && !this.starting.has(id)) return;
+    const run = this.running.get(id);
+    if (run) this.reserved.delete(run.port);
     this.running.delete(id);
     const record = this.registry.get(id);
     if (code && code !== 0) {
@@ -159,24 +192,48 @@ export class AgentSupervisor {
     if (record) this.emit(record);
   }
 
-  /** Wait until the agent's bridge port accepts connections (or it dies). */
-  private async waitReady(child: ChildProcess, port: number): Promise<void> {
+  /**
+   * Wait until THIS agent owns the port (or it dies). A bare "is the port
+   * in use" probe is not enough: another project's agent listening on the
+   * same port answers it just as happily, so a crashed agent would be
+   * reported as started and the UI handed the wrong project's bridge.
+   */
+  private async waitReady(
+    child: ChildProcess,
+    record: ProjectRecord,
+    port: number,
+    launchedAt: number
+  ): Promise<BridgeInfo> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) {
         throw new Error(`agent exited (code ${child.exitCode}) before ready`);
       }
-      if (await portInUse(port)) return;
+      const info = this.readBridgeInfo(record.dataDir, port, launchedAt);
+      if (info && (await portInUse(port))) return info;
       await sleep(200);
     }
     throw new Error(`agent did not listen on port ${port} in time`);
   }
 
-  /** The agent writes bridge.json (port + token) before it starts listening. */
-  private readToken(dataDir: string): string {
-    const file = path.join(dataDir, "bridge.json");
-    const info = JSON.parse(fs.readFileSync(file, "utf8")) as { token: string };
-    return info.token;
+  /**
+   * The agent writes bridge.json (port + token) just before it listens.
+   * Only this launch's file counts — a stale one left by a previous run
+   * carries a port that some other agent may hold by now.
+   */
+  private readBridgeInfo(
+    dataDir: string,
+    port: number,
+    launchedAt: number
+  ): BridgeInfo | null {
+    try {
+      const file = path.join(dataDir, "bridge.json");
+      const info = JSON.parse(fs.readFileSync(file, "utf8")) as BridgeInfo;
+      const fresh = info.startedAt >= launchedAt && info.port === port;
+      return fresh && typeof info.token === "string" ? info : null;
+    } catch {
+      return null; // not written yet, or half-written
+    }
   }
 }
 

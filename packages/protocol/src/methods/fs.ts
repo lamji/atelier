@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FileEntry, FileTreeNode, SearchMatch } from "../models/fs.js";
+import { FileEntry, FileTreeNode, MarkdownFile, SearchMatch } from "../models/fs.js";
 import { Diff } from "../models/diff.js";
 
 export const fsMethods = {
@@ -15,6 +15,12 @@ export const fsMethods = {
   "fs.files": {
     params: z.object({}).optional(),
     result: z.object({ files: z.array(z.string()) }),
+  },
+  /** The .md files under the workspace's .atelier cache folder,
+   *  each with a title + one-line description. */
+  "fs.markdownFiles": {
+    params: z.object({}).optional(),
+    result: z.object({ files: z.array(MarkdownFile) }),
   },
   "fs.stat": {
     params: z.object({ path: z.string() }),

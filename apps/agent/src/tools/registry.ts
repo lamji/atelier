@@ -1,5 +1,6 @@
 import { newId } from "@atelier/shared";
 import type { EventBus } from "../events/event-bus.js";
+import type { ScopeGuard } from "./scope-guard.js";
 
 /** Hook gate contract (implemented by HooksEngine). */
 export interface ToolGate {
@@ -31,12 +32,18 @@ export type ToolImpl<I = unknown, O = unknown> = (
 export class ToolRegistry {
   private tools = new Map<string, ToolImpl>();
   private gate: ToolGate | null = null;
+  private scopeGuard: ScopeGuard | null = null;
 
   constructor(private bus: EventBus) {}
 
   /** Installed once at startup; every run() then flows through hooks. */
   setGate(gate: ToolGate): void {
     this.gate = gate;
+  }
+
+  /** Installed once at startup; enforces the conversation's scope lock. */
+  setScopeGuard(guard: ScopeGuard): void {
+    this.scopeGuard = guard;
   }
 
   register<I, O>(name: string, impl: ToolImpl<I, O>): void {
@@ -59,6 +66,27 @@ export class ToolRegistry {
     const toolCallId = newId("tc");
     const startedAt = Date.now();
     this.bus.publish("tool.started", { toolCallId, name, input }, taskId);
+
+    // Scope first: a call the session is not allowed to make should not
+    // reach the hook engine, which can park it waiting on the user.
+    if (this.scopeGuard) {
+      try {
+        input = this.scopeGuard.check(name, input, taskId);
+      } catch (error) {
+        this.bus.publish(
+          "tool.failed",
+          {
+            toolCallId,
+            name,
+            error: String(error),
+            durationMs: Date.now() - startedAt,
+          },
+          taskId
+        );
+        throw error;
+      }
+    }
+
     if (this.gate) {
       const decision = await this.gate.evaluateToolUse(
         name,

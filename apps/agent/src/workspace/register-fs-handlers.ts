@@ -12,6 +12,10 @@ export function registerFsHandlers(router: Router, files: FileService): void {
 
   router.register("fs.files", async () => ({ files: await files.allFiles() }));
 
+  router.register("fs.markdownFiles", async () => ({
+    files: await files.markdownFiles(),
+  }));
+
   router.register("fs.stat", async (params) => ({
     entry: await files.stat(params.path),
   }));

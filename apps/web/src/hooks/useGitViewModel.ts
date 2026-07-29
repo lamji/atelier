@@ -1,5 +1,7 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { GitRepo } from "@atelier/protocol";
 import { bridge } from "@/services/bridge-client";
+import { errorText } from "@/lib/error-text";
 import { useConnectionStore } from "@/state/connection.store";
 import { useGitStore } from "@/state/git.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -19,6 +21,30 @@ export function useGitViewModel() {
   const gitDiff = useGitStore((s) => s.gitDiff);
   const error = useGitStore((s) => s.error);
 
+  // The checkouts in this workspace. A folder that only groups a company's
+  // projects has no repo of its own, so the panel shows one tab per project
+  // instead of failing on a repository that was never there.
+  const [repos, setRepos] = useState<GitRepo[]>([]);
+  const [activeRepo, setActiveRepo] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    void bridge
+      .rpc("git.repos", {})
+      .then(({ repos: found, active }) => {
+        if (cancelled) return;
+        setRepos(found);
+        setActiveRepo(active);
+      })
+      .catch(() => {
+        if (!cancelled) setRepos([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, stateVersion]);
+
   useEffect(() => {
     if (!connected) return;
     let cancelled = false;
@@ -32,12 +58,22 @@ export function useGitViewModel() {
         useGitStore.getState().setData(s.status, l.commits, b.branches);
       })
       .catch((err: unknown) => {
-        if (!cancelled) useGitStore.getState().setError(String(err));
+        // errorText, not String(): the bridge rejects with a plain object,
+        // which stringifies to "[object Object]".
+        if (!cancelled) useGitStore.getState().setError(errorText(err));
       });
     return () => {
       cancelled = true;
     };
   }, [connected, stateVersion]);
+
+  const selectRepo = useCallback(async (repo: string) => {
+    await bridge.rpc("git.selectRepo", { repo });
+    // Clears the stale "not a git repository" state so switching from an
+    // unselected workspace lands on data, not the previous error.
+    useGitStore.getState().setError(null);
+    useGitStore.getState().bumpStateVersion();
+  }, []);
 
   const refresh = useCallback(() => {
     useGitStore.getState().bumpStateVersion();
@@ -103,6 +139,9 @@ export function useGitViewModel() {
     branches,
     gitDiff,
     error,
+    repos,
+    activeRepo,
+    selectRepo,
     refresh,
     stage,
     unstage,

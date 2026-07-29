@@ -1,59 +1,37 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import { capture } from "./git-ops.js";
 import type { GitService } from "./git-service.js";
+import { runOneShot } from "../providers/one-shot.js";
 
 /**
  * One-shot AI text drafts for the git flow (branch names, PR
- * descriptions, commit messages). All run on Claude Haiku through the
- * Claude Agent SDK — auth comes from the user's Claude Code subscription
- * login, same as the orchestrator (no ANTHROPIC_API_KEY on this machine).
+ * descriptions, commit messages). Tool-less single turns, so they follow
+ * the user's model choice: an Ollama selection runs on the local daemon,
+ * anything else on Claude Haiku through the Agent SDK — where auth comes
+ * from the Claude Code subscription login, same as the orchestrator.
  */
 
 const HAIKU = "claude-haiku-4-5";
 const TIMEOUT_MS = 60_000;
 
-/** Same list the orchestrator disables: drafts are pure text completions. */
-const DISABLED_BUILTINS = [
-  "Read",
-  "Write",
-  "Edit",
-  "Bash",
-  "Glob",
-  "Grep",
-  "WebSearch",
-  "WebFetch",
-  "Task",
-  "TodoWrite",
-  "NotebookEdit",
-];
-
-/** Runs a single tool-less Haiku turn and returns the cleaned text. */
+/**
+ * Runs a single tool-less turn and returns the cleaned text. `model` is
+ * the user's selected model id; omit it to stay on Haiku.
+ */
 export async function oneShotDraft(
   system: string,
-  prompt: string
+  prompt: string,
+  model?: string
 ): Promise<string> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
-    const stream = query({
+    const text = await runOneShot({
+      model,
+      claudeFallback: HAIKU,
+      system,
       prompt,
-      options: {
-        model: HAIKU,
-        systemPrompt: system,
-        disallowedTools: DISABLED_BUILTINS,
-        settingSources: [],
-        maxTurns: 1,
-        abortController: abort,
-      },
+      signal: abort.signal,
     });
-
-    let text = "";
-    for await (const raw of stream) {
-      const m = raw as Record<string, unknown>;
-      if (m.type === "result" && typeof m.result === "string") {
-        text = m.result;
-      }
-    }
     return cleanDraft(text);
   } catch (error) {
     if (abort.signal.aborted) {
@@ -82,7 +60,10 @@ const BRANCH_NAME_RE = /^[a-z0-9][a-z0-9/._-]*$/;
  * Suggests a feature-branch name from the pending changes. Falls back to
  * a timestamped name when the model output isn't a valid ref name.
  */
-export async function suggestBranchName(git: GitService): Promise<string> {
+export async function suggestBranchName(
+  git: GitService,
+  model?: string
+): Promise<string> {
   const status = await git.status();
   const files = status.files
     .slice(0, 60)
@@ -98,7 +79,8 @@ export async function suggestBranchName(git: GitService): Promise<string> {
         "ONLY a short kebab-case branch name prefixed with feat/, fix/, " +
         "chore/, or refactor/ — e.g. feat/git-flow-wizard. Lowercase " +
         "letters, digits, hyphens, and one slash only. No other text.",
-      `Changed files:\n${files}`
+      `Changed files:\n${files}`,
+      model
     );
     const cleaned = name.toLowerCase().replace(/\s+/g, "-");
     return BRANCH_NAME_RE.test(cleaned) ? cleaned : fallback;
@@ -125,7 +107,8 @@ const MAX_DIFF_CHARS = 40_000;
  */
 export async function generatePrDescription(
   git: GitService,
-  base: string
+  base: string,
+  model?: string
 ): Promise<{ title: string; body: string }> {
   const root = git.root;
   const range = `origin/${base}...HEAD`;
@@ -150,7 +133,8 @@ export async function generatePrDescription(
       "",
       "Diff:",
       truncate(diff.out, MAX_DIFF_CHARS) || "(empty)",
-    ].join("\n")
+    ].join("\n"),
+    model
   );
 
   const [first = "", ...rest] = text.split("\n");

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { HeaderBar } from "./HeaderBar";
@@ -14,6 +14,7 @@ import { MonitorPanel } from "@/views/monitor/MonitorPanel";
 import { KnowledgePanel } from "@/views/knowledge/KnowledgePanel";
 import { IndexingWelcome } from "@/views/knowledge/IndexingWelcome";
 import { HooksPanel } from "@/views/hooks/HooksPanel";
+import { MarkdownPanel } from "@/views/markdown/MarkdownPanel";
 import { SettingsPanel } from "@/views/settings/SettingsPanel";
 import { DbApprovalModal } from "@/views/hooks/DbApprovalModal";
 import { RightDock } from "@/views/right/RightDock";
@@ -28,13 +29,14 @@ import { useGitViewModel } from "@/hooks/useGitViewModel";
 import { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
 import { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 import { useHooksViewModel } from "@/hooks/useHooksViewModel";
+import { useMarkdownViewModel } from "@/hooks/useMarkdownViewModel";
 import { useDbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
 import { useUsageViewModel } from "@/hooks/useUsageViewModel";
 import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
-import { useSettingsViewModel } from "@/hooks/useSettingsViewModel";
 import { bridge } from "@/services/bridge-client";
 import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
+import { useWorkspaceStore } from "@/state/workspace.store";
 import { cn } from "@/lib/cn";
 
 function Island(props: {
@@ -66,7 +68,8 @@ function Island(props: {
  * render inline in the chat transcript as VS Code-style diffs.
  */
 export function AppShell() {
-  const [activeView, setActiveView] = useState<ActivityView>("agents");
+  const activeView = useWorkspaceStore((s) => s.activityView);
+  const setActiveView = useWorkspaceStore((s) => s.setActivityView);
   const { theme, toggle } = useThemeStore();
   const connection = useConnectionViewModel();
   const gate = useConnectionGateViewModel();
@@ -79,10 +82,12 @@ export function AppShell() {
   const knowledge = useKnowledgeViewModel();
   const rag = useRagInspectorViewModel();
   const hooksVm = useHooksViewModel();
+  const markdownVm = useMarkdownViewModel();
   const dbApproval = useDbApprovalViewModel();
   const usage = useUsageViewModel();
   const contextStats = useContextStatsViewModel();
-  const settingsVm = useSettingsViewModel();
+  const skillDetail = useWorkspaceStore((s) => s.skillDetail);
+  const closeSkillDetail = useWorkspaceStore((s) => s.closeSkillDetail);
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
 
   // Wildcard subscriptions do not replay, so seed the branch once on
@@ -102,6 +107,10 @@ export function AppShell() {
   }, [connection.state]);
 
   const busy = sessions.busy;
+  const showIndexingWelcome =
+    knowledge.indexingActive &&
+    !knowledge.welcomeDismissed &&
+    knowledge.stats?.lastIndexedAt == null;
 
   const leftPanel =
     activeView === "agents" ? (
@@ -119,6 +128,11 @@ export function AppShell() {
         onToggleDir={explorer.toggleDir}
         onOpenFile={(path) => void explorer.openFile(path)}
       />
+    ) : activeView === "markdown" ? (
+      <MarkdownPanel
+        vm={markdownVm}
+        onOpenFile={(path) => void explorer.openFile(path)}
+      />
     ) : activeView === "git" ? (
       <GitPanel vm={git} />
     ) : activeView === "monitor" ? (
@@ -132,7 +146,7 @@ export function AppShell() {
     ) : activeView === "hooks" ? (
       <HooksPanel vm={hooksVm} />
     ) : (
-      <SettingsPanel vm={settingsVm} />
+      <SettingsPanel />
     );
 
   // Memoized so the dock's chat pane keeps a stable element across shell
@@ -176,7 +190,7 @@ export function AppShell() {
               className={cn("relative", busy && "glow-working")}
             >
               <AnimatePresence>
-                {knowledge.indexingActive && !knowledge.welcomeDismissed && (
+                {showIndexingWelcome && (
                   <IndexingWelcome
                     vm={knowledge}
                     workspaceRoot={connection.workspaceRoot}
@@ -186,6 +200,8 @@ export function AppShell() {
               <RightDock
                 rightTab={editor.rightTab}
                 chatPane={chatPane}
+                skillDetail={skillDetail}
+                onCloseSkillDetail={closeSkillDetail}
                 selectedPath={editor.selectedPath}
                 fileContent={editor.fileContent}
                 language={editor.language}

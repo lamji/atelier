@@ -4,10 +4,26 @@ import {
   GitCommit,
   GitFlowInfo,
   GitOpResult,
+  GitRepo,
   GitStatus,
 } from "../models/git.js";
 
 export const gitMethods = {
+  // Every checkout in the workspace. Empty only when there is genuinely no
+  // repository anywhere below the opened folder.
+  "git.repos": {
+    params: z.object({}).optional(),
+    result: z.object({
+      repos: z.array(GitRepo),
+      /** Active checkout path, or null when none is selected yet. */
+      active: z.string().nullable(),
+    }),
+  },
+  // Points the git panel (and unqualified git commands) at one checkout.
+  "git.selectRepo": {
+    params: z.object({ repo: z.string() }),
+    result: z.object({ active: z.string() }),
+  },
   "git.status": {
     params: z.object({}).optional(),
     result: z.object({ status: GitStatus }),

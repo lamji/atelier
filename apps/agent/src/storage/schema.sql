@@ -283,7 +283,40 @@ CREATE TABLE IF NOT EXISTS task_summaries (
   text TEXT NOT NULL,
   changed_files TEXT NOT NULL DEFAULT '[]',
   outcome TEXT,
+  status TEXT NOT NULL DEFAULT 'completed',
+  chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_summaries_conv
   ON task_summaries(conversation_id, created_at);
+
+-- Retrievable session memory: one row per session-memory chunk a task
+-- produced. A task writes an overview chunk (ord 0) plus one chunk per unit
+-- of work, so RAG can surface the ONE relevant detail from a long session
+-- instead of a whole-task digest. Deliberately conversation-scoped: the
+-- retriever filters on this column so another chat can never leak in.
+CREATE TABLE IF NOT EXISTS session_chunks (
+  task_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  ord INTEGER NOT NULL,
+  chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_session_chunks_conv
+  ON session_chunks(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_session_chunks_chunk
+  ON session_chunks(chunk_id);
+
+-- The working-set lock for one conversation. Mentioning a folder ("@app/")
+-- narrows retrieval, tools and git to that checkout, and the lock is
+-- STICKY: a follow-up carries no path of its own, so without a stored row
+-- the second turn would silently widen back to the whole workspace.
+-- anchors are the files already touched, used to resolve a bare "fix it".
+CREATE TABLE IF NOT EXISTS conversation_scope (
+  conversation_id TEXT PRIMARY KEY
+    REFERENCES conversations(id) ON DELETE CASCADE,
+  roots TEXT NOT NULL,
+  anchors TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);

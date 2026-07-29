@@ -1,6 +1,8 @@
-import { memo, useEffect } from "react";
-import Editor, { DiffEditor } from "@monaco-editor/react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import Editor, { DiffEditor, type Monaco } from "@monaco-editor/react";
 import { Activity, FileCode2, FileDiff, X } from "lucide-react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/tooltip";
 import { TerminalPanel } from "@/views/terminal/TerminalPanel";
@@ -8,7 +10,10 @@ import { TimelinePanel } from "@/views/timeline/TimelinePanel";
 import { GraphPane } from "@/views/knowledge/GraphPane";
 import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { languageForPath } from "@/lib/diff-view";
+import { registerMarkdownMentions } from "@/lib/monaco-mentions";
+import { bridge } from "@/services/bridge-client";
 import type { TerminalSession } from "@atelier/protocol";
+import type { SlashCommand } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
 import type { TimelineEntryVm } from "@/types";
@@ -20,6 +25,8 @@ export interface RightDockProps {
   rightTab: RightTab;
   /** The chat surface (or connect screen), rendered as the Chat pane. */
   chatPane: React.ReactNode;
+  skillDetail: { command: SlashCommand; content: string } | null;
+  onCloseSkillDetail: () => void;
   // editor
   selectedPath: string | null;
   fileContent: string | null;
@@ -54,6 +61,17 @@ const FILE_EDITOR_OPTIONS = {
   minimap: { enabled: false },
   fontSize: 13,
   scrollBeyondLastLine: false,
+} as const;
+
+/** .atelier notes are user-owned, so their editor is writable. Document
+ *  words as suggestions are noise in prose — only "@" mentions complete. */
+const EDITABLE_FILE_OPTIONS = {
+  readOnly: false,
+  minimap: { enabled: false },
+  fontSize: 13,
+  scrollBeyondLastLine: false,
+  wordWrap: "on",
+  wordBasedSuggestions: "off",
 } as const;
 
 const GIT_DIFF_EDITOR_OPTIONS = {
@@ -93,7 +111,16 @@ export function RightDock(props: RightDockProps) {
   return (
     <div className="flex h-full flex-col">
       <div className="relative min-h-0 flex-1">
-        <Pane active={rightTab === "chat"}>{props.chatPane}</Pane>
+        <Pane active={rightTab === "chat"}>
+          {props.skillDetail ? (
+            <SkillDetailPane
+              detail={props.skillDetail}
+              onClose={props.onCloseSkillDetail}
+            />
+          ) : (
+            props.chatPane
+          )}
+        </Pane>
 
         <Pane active={rightTab === "editor"}>
           {props.gitDiff !== null ? (
@@ -144,20 +171,137 @@ export function RightDock(props: RightDockProps) {
   );
 }
 
+const SkillDetailPane = memo(function SkillDetailPane(props: {
+  detail: { command: SlashCommand; content: string };
+  onClose: () => void;
+}) {
+  const { command, content } = props.detail;
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-mono text-sm font-semibold">
+            /{command.name}
+          </p>
+          {command.description && (
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+              {command.description}
+            </p>
+          )}
+        </div>
+        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
+          {command.scope}
+        </span>
+        <button
+          type="button"
+          onClick={props.onClose}
+          className="rounded-md p-1 text-muted-foreground hover:text-foreground"
+          title="Close"
+          aria-label="Close skill detail"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div className="chat-md mx-auto max-w-4xl">
+          <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 /** Monaco view of the selected workspace file. */
+/** Idle → typing debounce → save; errors keep the edit queued for retry. */
+type SaveState = "clean" | "dirty" | "saving" | "saved" | "error";
+
+const AUTOSAVE_MS = 800;
+
+/** Only the app's own markdown cache is user-editable; source files stay
+ *  read-only — the agent edits those, and its edits belong to the chat. */
+function isEditablePath(path: string | null): boolean {
+  return path?.startsWith(".atelier/") ?? false;
+}
+
 const FilePane = memo(function FilePane(props: {
   selectedPath: string | null;
   fileContent: string | null;
   language: string;
   monacoTheme: string;
 }) {
+  const editable = isEditablePath(props.selectedPath);
+  const [saveState, setSaveState] = useState<SaveState>("clean");
+  const pendingRef = useRef<{ path: string; content: string } | null>(null);
+  const timerRef = useRef<number | undefined>(undefined);
+
+  const flush = useCallback(async () => {
+    window.clearTimeout(timerRef.current);
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = null;
+    setSaveState("saving");
+    try {
+      await bridge.rpc("fs.writeFile", pending);
+      // Typing during the await re-queues; don't claim "Saved" over it.
+      setSaveState(pendingRef.current ? "dirty" : "saved");
+    } catch {
+      // Keep the edit queued so Ctrl+S / the next change retries it.
+      pendingRef.current = pendingRef.current ?? pending;
+      setSaveState("error");
+    }
+  }, []);
+
+  // Leaving the file (or unmounting) flushes its pending edit; the queued
+  // {path, content} pair keeps the write pointed at the right file.
+  useEffect(() => {
+    setSaveState("clean");
+    return () => void flush();
+  }, [props.selectedPath, flush]);
+
+  const onChange = (value: string | undefined) => {
+    if (!editable || value === undefined || !props.selectedPath) return;
+    pendingRef.current = { path: props.selectedPath, content: value };
+    setSaveState("dirty");
+    window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => void flush(), AUTOSAVE_MS);
+  };
+
+  const onMount = (
+    editor: Parameters<NonNullable<React.ComponentProps<typeof Editor>["onMount"]>>[0],
+    monaco: Monaco
+  ) => {
+    registerMarkdownMentions(monaco);
+    editor.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+      () => void flush()
+    );
+  };
+
   if (props.fileContent === null) {
     return <Empty icon={FileCode2} text="Select a file in the explorer." />;
   }
   return (
     <div className="flex h-full flex-col">
-      <p className="truncate px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
-        {props.selectedPath}
+      <p className="flex items-center gap-2 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+        <span className="truncate">{props.selectedPath}</span>
+        {editable && saveState !== "clean" && (
+          <span
+            className={cn(
+              "shrink-0 text-[10px]",
+              saveState === "error"
+                ? "text-destructive"
+                : "text-muted-foreground/60"
+            )}
+          >
+            {saveState === "saving"
+              ? "Saving…"
+              : saveState === "saved"
+                ? "Saved"
+                : saveState === "error"
+                  ? "Save failed"
+                  : "Unsaved"}
+          </span>
+        )}
       </p>
       <div className="min-h-0 flex-1">
         <Editor
@@ -165,7 +309,9 @@ const FilePane = memo(function FilePane(props: {
           value={props.fileContent}
           language={props.language}
           theme={props.monacoTheme}
-          options={FILE_EDITOR_OPTIONS}
+          onChange={editable ? onChange : undefined}
+          onMount={onMount}
+          options={editable ? EDITABLE_FILE_OPTIONS : FILE_EDITOR_OPTIONS}
         />
       </div>
     </div>

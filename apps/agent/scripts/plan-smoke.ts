@@ -6,6 +6,7 @@
  */
 import { EventBus } from "../src/events/event-bus.js";
 import { PlanTracker } from "../src/orchestrator/plan-tracker.js";
+import { planFromMarkdown } from "../src/orchestrator/pipeline-executor.js";
 import type { Plan } from "@atelier/protocol";
 
 const TASK = "task-1";
@@ -65,6 +66,50 @@ function main(): void {
     tracker.get(TASK)!.steps.every((s) => s.status === "done")
   );
   check("events were published", updates.length > 0, `${updates.length} updates`);
+
+  // --- ExitPlanMode markdown -> checklist (the internal plan pass) ---
+  const parsed = planFromMarkdown(
+    TASK,
+    [
+      "Wire the tables API into the site map.",
+      "",
+      "1. **Add the tables query** — fetch sections in `src/api/tables.ts`",
+      "2. Render them in `src/features/site-map/Canvas.tsx`",
+      "3. Reflect orders back: update src/features/orders/store.ts too",
+    ].join("\n")
+  );
+  check("markdown yields steps", parsed?.steps.length === 3, `${parsed?.steps.length}`);
+  check(
+    "goal is the lead line, not a step",
+    parsed?.goal === "Wire the tables API into the site map.",
+    parsed?.goal
+  );
+  check(
+    "title splits at the em dash and drops markup",
+    parsed?.steps[0]!.title === "Add the tables query",
+    parsed?.steps[0]!.title
+  );
+  check(
+    "backticked path becomes a step file",
+    parsed?.steps[0]!.files[0] === "src/api/tables.ts",
+    String(parsed?.steps[0]!.files)
+  );
+  check(
+    "bare path is picked up without backticks",
+    parsed?.steps[2]!.files[0] === "src/features/orders/store.ts",
+    String(parsed?.steps[2]!.files)
+  );
+  // Files are what PlanTracker matches edits against, so a parsed plan has
+  // to advance for the same reason the hand-built one above does.
+  const liveTracker = new PlanTracker(new EventBus());
+  liveTracker.setPlan(parsed!);
+  liveTracker.noteFileEdited(TASK, "src/features/site-map/Canvas.tsx");
+  check(
+    "parsed plan advances from a real edit",
+    liveTracker.get(TASK)!.steps[1]!.status === "in-progress",
+    liveTracker.get(TASK)!.steps[1]!.status
+  );
+  check("prose with no list is rejected", planFromMarkdown(TASK, "I'll fix it.") === null);
 
   console.log(fail === 0 ? "\nall plan cases pass" : `\n${fail} FAILED`);
   process.exit(fail === 0 ? 0 : 1);

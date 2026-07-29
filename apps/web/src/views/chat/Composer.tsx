@@ -2,6 +2,8 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowUp,
+  Check,
+  ChevronDown,
   ChevronRight,
   ClipboardList,
   FileCode2,
@@ -9,11 +11,12 @@ import {
   ImagePlus,
   Loader2,
   Paperclip,
+  Plus,
   Sparkles,
   Square,
   X,
 } from "lucide-react";
-import type { ModelOption, SlashCommand } from "@atelier/protocol";
+import type { MarkdownFile, ModelOption, SlashCommand } from "@atelier/protocol";
 import { cn } from "@/lib/cn";
 import {
   parentDir,
@@ -24,7 +27,10 @@ import {
 } from "@/lib/mention-tree";
 import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useMarkdownStore } from "@/state/markdown.store";
+import { useWorkspaceStore } from "@/state/workspace.store";
 import {
+  NO_PROMPT_FILE,
   useComposerViewModel,
   type EffortChoice,
   type ModelChoice,
@@ -42,7 +48,10 @@ const FALLBACK_MODELS: PickerOption[] = [
 ];
 
 /** [value, label] with an optional third slot for the menu's hint line. */
-type PickerOption = [string, string] | [string, string, string];
+type PickerOption =
+  | [string, string]
+  | [string, string, string]
+  | { separator: true; value: string; label: string };
 
 /**
  * Model picker options from the live SDK roster, else the fallback. The
@@ -52,7 +61,34 @@ type PickerOption = [string, string] | [string, string, string];
  */
 function modelOptions(models: ModelOption[]): PickerOption[] {
   if (models.length === 0) return FALLBACK_MODELS;
-  return models.map((m) => [m.value, modelLabel(m)]);
+  const options: PickerOption[] = [];
+  const order: Array<NonNullable<ModelOption["provider"]>> = [
+    "claude",
+    "ollama",
+    "codex",
+  ];
+  for (const provider of order) {
+    const rows = models.filter((m) => (m.provider ?? "claude") === provider);
+    if (rows.length === 0) continue;
+    options.push({
+      separator: true,
+      value: `provider:${provider}`,
+      label: providerLabel(provider),
+    });
+    options.push(...rows.map((m) => [m.value, modelLabel(m)] as PickerOption));
+  }
+  return options;
+}
+
+function providerLabel(provider: NonNullable<ModelOption["provider"]>): string {
+  switch (provider) {
+    case "ollama":
+      return "Ollama";
+    case "codex":
+      return "Codex";
+    default:
+      return "Claude";
+  }
 }
 
 /**
@@ -61,10 +97,34 @@ function modelOptions(models: ModelOption[]): PickerOption[] {
  * a parseable version falls back to the bare family name.
  */
 function modelLabel(m: ModelOption): string {
+  if (m.provider === "codex") return m.label;
   if (m.value === "default") return m.label;
-  const head = (m.description ?? "").split("·")[0].trim();
+  const head = ((m.description ?? "").split("·")[0] ?? "").trim();
   const version = head.replace(/\s+with\b.*$/i, "").trim();
   return version || m.label;
+}
+
+function effortOptions(model: ModelOption | undefined): PickerOption[] {
+  const levels = model?.reasoningLevels;
+  const available =
+    levels && levels.length > 0
+      ? levels
+      : ["low", "medium", "high", "xhigh", "max"];
+  return [
+    ["default", "Reasoning: default"],
+    ...available.map((level) => [level, effortLabel(level)] as PickerOption),
+  ];
+}
+
+function effortLabel(level: string): string {
+  switch (level) {
+    case "xhigh":
+      return "Extra High";
+    case "ultra":
+      return "Ultra";
+    default:
+      return level.charAt(0).toUpperCase() + level.slice(1);
+  }
 }
 
 /**
@@ -133,6 +193,22 @@ export const Composer = memo(function Composer() {
     () => matchMentions(mentionEntries, mentionFilter, mentionDir, filePaths),
     [mentionEntries, mentionFilter, mentionDir, filePaths]
   );
+  const selectedModel = useMemo(
+    () => vm.models.find((model) => model.value === vm.model),
+    [vm.models, vm.model]
+  );
+  const reasoningOptions = useMemo(
+    () => effortOptions(selectedModel),
+    [selectedModel]
+  );
+  useEffect(() => {
+    if (
+      vm.effort !== "default" &&
+      !reasoningOptions.some((option) => optionValue(option) === vm.effort)
+    ) {
+      vm.changeEffort("default");
+    }
+  }, [vm, reasoningOptions]);
   // Stays open while a folder loads, and on an empty folder, so stepping
   // into one never looks like the menu just vanished.
   const mentionOpen =
@@ -448,7 +524,6 @@ export const Composer = memo(function Composer() {
                   <motion.button
                     whileTap={{ scale: 0.92 }}
                     onClick={vm.cancel}
-                    disabled={vm.cancelling}
                     className={cn(
                       "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
                       "text-white hover:opacity-90",
@@ -468,7 +543,9 @@ export const Composer = memo(function Composer() {
                     whileTap={{ scale: 0.92 }}
                     disabled={
                       !vm.connected ||
-                      (!vm.input.trim() && vm.images.length === 0)
+                      (!vm.input.trim() &&
+                        vm.images.length === 0 &&
+                        vm.promptFile === NO_PROMPT_FILE)
                     }
                     onClick={vm.send}
                     className={cn(
@@ -501,13 +578,12 @@ export const Composer = memo(function Composer() {
               <ComposerSelect
                 value={vm.effort}
                 onChange={(v) => vm.changeEffort(v as EffortChoice)}
-                options={[
-                  ["default", "Reasoning: default"],
-                  ["low", "Low"],
-                  ["medium", "Medium"],
-                  ["high", "High"],
-                  ["max", "Max"],
-                ]}
+                options={reasoningOptions}
+              />
+              <PromptFileMenu
+                value={vm.promptFile}
+                files={vm.promptFiles}
+                onChange={vm.setPromptFile}
               />
               <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
                 <input
@@ -774,11 +850,180 @@ function ComposerSelect(props: {
       value={props.value}
       onChange={props.onChange}
       direction="up"
-      options={props.options.map(([value, label, hint]) => ({
-        value,
-        label,
-        hint,
-      }))}
+      options={props.options.map((option) =>
+        Array.isArray(option)
+          ? {
+              value: option[0],
+              label: option[1],
+              hint: option[2],
+            }
+          : option
+      )}
     />
+  );
+}
+
+function optionValue(option: PickerOption): string {
+  return Array.isArray(option) ? option[0] : option.value;
+}
+
+/**
+ * Prompt-file picker: workspace .md files (the .atelier catalog) offered
+ * as ready-made prompts. Always visible; the menu has a search box, and
+ * an empty catalog (or search) offers "Create markdown file", which jumps
+ * to the Markdown panel with its create form open.
+ */
+function PromptFileMenu(props: {
+  value: string;
+  files: MarkdownFile[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = props.files.find((f) => f.path === props.value);
+
+  // Click-outside / Escape close; the search resets on every open.
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const onPointerDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? props.files.filter(
+        (f) =>
+          f.title.toLowerCase().includes(q) || f.path.toLowerCase().includes(q)
+      )
+    : props.files;
+
+  const pick = (value: string) => {
+    props.onChange(value);
+    setOpen(false);
+  };
+
+  const startCreate = () => {
+    setOpen(false);
+    useMarkdownStore.getState().setCreating(true);
+    useWorkspaceStore.getState().setActivityView("markdown");
+  };
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "flex h-6 cursor-pointer items-center gap-1 rounded-md bg-muted/80",
+          "px-1.5 text-[11px] outline-none",
+          selected
+            ? "text-primary"
+            : "text-muted-foreground hover:text-foreground"
+        )}
+      >
+        <span className="max-w-[9rem] truncate">
+          {selected?.title ?? "Prompt file"}
+        </span>
+        <ChevronDown
+          className={cn(
+            "h-3 w-3 shrink-0 transition-transform",
+            open && "rotate-180"
+          )}
+        />
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full left-0 z-50 mb-1 w-64 max-w-[80vw]",
+              "overflow-hidden rounded-lg border border-white/10 bg-card p-1 shadow-xl"
+            )}
+          >
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search markdown files…"
+              className={cn(
+                "mb-1 w-full rounded-md bg-muted/60 px-2 py-1 text-[11px]",
+                "outline-none placeholder:text-muted-foreground/50"
+              )}
+            />
+            {matches.length === 0 ? (
+              <div className="px-2 py-1.5">
+                <p className="text-[10px] text-muted-foreground/60">
+                  {props.files.length === 0
+                    ? "No markdown files yet."
+                    : "No matches."}
+                </p>
+                <button
+                  type="button"
+                  onClick={startCreate}
+                  className="mt-1 flex items-center gap-1 text-[11px] text-primary hover:underline"
+                >
+                  <Plus className="h-3 w-3" />
+                  Create markdown file
+                </button>
+              </div>
+            ) : (
+              <ul className="max-h-56 overflow-y-auto">
+                {props.value !== NO_PROMPT_FILE && (
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => pick(NO_PROMPT_FILE)}
+                      className="w-full rounded-md px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                    >
+                      No prompt file
+                    </button>
+                  </li>
+                )}
+                {matches.map((file) => (
+                  <li key={file.path}>
+                    <button
+                      type="button"
+                      onClick={() => pick(file.path)}
+                      className={cn(
+                        "flex w-full items-start gap-2 rounded-md px-2 py-1 text-left text-[11px]",
+                        file.path === props.value
+                          ? "text-primary"
+                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                      )}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">{file.title}</span>
+                        <span className="mt-0.5 block truncate font-mono text-[10px] leading-snug opacity-60">
+                          {file.path}
+                        </span>
+                      </span>
+                      {file.path === props.value && (
+                        <Check className="mt-0.5 h-3 w-3 shrink-0" />
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

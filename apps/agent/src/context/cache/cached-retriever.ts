@@ -6,6 +6,8 @@ import type { IndexGeneration } from "./index-generation.js";
 export interface RetrieveFilters {
   pathGlob?: string;
   kinds?: string[];
+  /** Restricts provider-neutral session-memory chunks to one conversation. */
+  conversationId?: string;
 }
 
 /** The retrieval surface the pipeline and tools actually depend on. */

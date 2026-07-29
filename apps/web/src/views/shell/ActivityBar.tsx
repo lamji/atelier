@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import {
+  BookOpen,
   Bot,
   Files,
   GitBranch,
@@ -17,6 +18,7 @@ import type { Theme } from "@/state/theme.store";
 export type ActivityView =
   | "agents"
   | "explorer"
+  | "markdown"
   | "git"
   | "knowledge"
   | "hooks"
@@ -26,6 +28,7 @@ export type ActivityView =
 const ITEMS: Array<{ id: ActivityView; icon: typeof Files; label: string }> = [
   { id: "agents", icon: Bot, label: "Agents" },
   { id: "explorer", icon: Files, label: "Explorer" },
+  { id: "markdown", icon: BookOpen, label: "Markdown" },
   { id: "git", icon: GitBranch, label: "Git" },
   { id: "knowledge", icon: Network, label: "Knowledge" },
   { id: "hooks", icon: Webhook, label: "Hooks" },

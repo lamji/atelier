@@ -4,7 +4,24 @@ import { generateCommitMessage } from "./commit-message.js";
 import type { GitService } from "./git-service.js";
 import * as ops from "./git-ops.js";
 
-export function registerGitHandlers(router: Router, git: GitService): void {
+/**
+ * @param selectedModel Reads the user's current model choice, so AI drafts
+ * follow it (an "ollama/" id runs locally). Omit to stay on the default.
+ */
+export function registerGitHandlers(
+  router: Router,
+  git: GitService,
+  selectedModel: () => string | undefined = () => undefined
+): void {
+  router.register("git.repos", async () => ({
+    repos: await git.repos(),
+    active: git.activeRepo,
+  }));
+
+  router.register("git.selectRepo", async (params) => ({
+    active: await git.select(params.repo),
+  }));
+
   router.register("git.status", async () => ({ status: await git.status() }));
 
   router.register("git.log", async (params) => ({
@@ -48,7 +65,7 @@ export function registerGitHandlers(router: Router, git: GitService): void {
   }));
 
   router.register("git.generateCommitMessage", async () => ({
-    message: await generateCommitMessage(git),
+    message: await generateCommitMessage(git, selectedModel()),
   }));
 
   // ── Commit → push → PR wizard ──────────────────────────────────────────
@@ -59,7 +76,7 @@ export function registerGitHandlers(router: Router, git: GitService): void {
   }));
 
   router.register("git.suggestBranchName", async () => ({
-    name: await suggestBranchName(git),
+    name: await suggestBranchName(git, selectedModel()),
   }));
 
   router.register("git.commitRun", async (params, ctx) => {
@@ -100,7 +117,7 @@ export function registerGitHandlers(router: Router, git: GitService): void {
   });
 
   router.register("git.generatePrDescription", (params) =>
-    generatePrDescription(git, params.base)
+    generatePrDescription(git, params.base, selectedModel())
   );
 
   router.register("git.createPr", async (params, ctx) => {

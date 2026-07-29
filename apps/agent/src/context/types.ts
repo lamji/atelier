@@ -48,9 +48,11 @@ export const BUDGETS: Record<string, ContextBudget> = {
     refTokens: 150,
     impactTokens: 400,
     companionTokens: 100,
-    planTokens: 200,
+    // Steps carry per-step detail now, not bare titles — the plan is what
+    // the implementer executes against, so it gets room to say what changes.
+    planTokens: 320,
     summaryTokens: 200,
-    totalTokens: 2200,
+    totalTokens: 2320,
     maxLevel: 5,
   },
   feature: {
@@ -58,15 +60,20 @@ export const BUDGETS: Record<string, ContextBudget> = {
     refTokens: 200,
     impactTokens: 500,
     companionTokens: 150,
-    planTokens: 300,
+    // A feature plan is the longest (up to 12 detailed steps) and the one
+    // most expensive to lose the tail of.
+    planTokens: 560,
     summaryTokens: 250,
-    totalTokens: 3200,
+    totalTokens: 3460,
     maxLevel: 5,
   },
 };
 
 /** Max chunks that may render per source file (diversity guard). */
 export const MAX_PER_PATH = 2;
+
+/** Max session-memory chunks per turn, so recall cannot crowd out code. */
+export const MAX_SESSION_MEMORY = 4;
 
 /** Ranked items considered for the code section before packing. */
 export const MAX_CODE_CANDIDATES = 12;

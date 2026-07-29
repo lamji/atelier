@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ModelOption, SlashCommand } from "@atelier/protocol";
-import { newId } from "@atelier/shared";
+import type { MarkdownFile, ModelOption, SlashCommand } from "@atelier/protocol";
+import {
+  composePromptFilePrompt,
+  conversationTitle,
+  newId,
+} from "@atelier/shared";
 import { bridge } from "@/services/bridge-client";
 import { useConnectionStore } from "@/state/connection.store";
 import { useSessionsStore, type SessionVm } from "@/state/sessions.store";
+import { useMarkdownStore } from "@/state/markdown.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
+import { useProvidersStore } from "@/state/providers.store";
 import {
   usePreferencesStore,
   type EffortChoice,
@@ -25,6 +31,20 @@ export interface PendingImage {
 }
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** A prompt file is the main prompt, so the cap is generous — but a huge
+ *  vendored md file must not blow the request. */
+const MAX_PROMPT_FILE_CHARS = 32_000;
+
+/** Sentinel for "no prompt file selected" in the composer dropdown. */
+export const NO_PROMPT_FILE = "none";
+
+const MD_REFETCH_DEBOUNCE_MS = 400;
+
+function clipPromptFile(content: string): string {
+  if (content.length <= MAX_PROMPT_FILE_CHARS) return content;
+  return `${content.slice(0, MAX_PROMPT_FILE_CHARS)}\n\n[...truncated]`;
+}
 
 /** An image was staged, or it was rejected with a reason worth showing. */
 type ImageResult =
@@ -98,6 +118,10 @@ export interface ComposerViewModel {
   removeImage: (id: string) => void;
   slashCommands: SlashCommand[];
   mentions: MentionBrowser;
+  /** Path of the md file used as the prompt, or NO_PROMPT_FILE. */
+  promptFile: string;
+  setPromptFile: (path: string) => void;
+  promptFiles: MarkdownFile[];
 }
 
 /**
@@ -140,86 +164,145 @@ export function useComposerViewModel(): ComposerViewModel {
   const [images, setImages] = useState<PendingImage[]>([]);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [promptFile, setPromptFile] = useState<string>(NO_PROMPT_FILE);
+  const promptFiles = useMarkdownStore((s) => s.files);
+  const treeVersion = useWorkspaceStore((s) => s.treeVersion);
   const mentions = useMentionBrowser();
+
+  // Keep the prompt-file dropdown's catalog fresh. The markdown store
+  // dedupes by treeVersion, so this and the Markdown panel share one RPC.
+  useEffect(() => {
+    if (!online) return;
+    const timer = setTimeout(
+      () => void useMarkdownStore.getState().refresh(treeVersion),
+      treeVersion === 0 ? 0 : MD_REFETCH_DEBOUNCE_MS
+    );
+    return () => clearTimeout(timer);
+  }, [online, treeVersion]);
 
   // Load the slash-command catalog for the composer's "/" menu.
   useEffect(() => {
     if (!online) return;
     void bridge
       .rpc("session.listCommands", {})
-      .then(({ commands }) => setSlashCommands(commands))
+      .then(({ commands }) =>
+        setSlashCommands(
+          commands.filter((command) => command.kind !== "skill" || command.enabled)
+        )
+      )
       .catch(() => undefined);
   }, [online]);
 
-  // Load the live model roster from the SDK for the model picker.
+  // Load the live model roster (Claude + any configured provider) for the
+  // picker. Re-runs when provider credentials change, so a key saved in
+  // Settings brings its models in without a reload.
+  const providerRevision = useProvidersStore((s) => s.revision);
   useEffect(() => {
     if (!online) return;
     void bridge
       .rpc("models.list", {})
       .then(({ models }) => setModels(models))
       .catch(() => undefined);
-  }, [online]);
+  }, [online, providerRevision]);
 
   // Switching chats clears the draft's attachments, not the text: the text
   // is the thought in progress, the attachments belonged to the old chat.
   useEffect(() => {
     setAttachments([]);
+    setPromptFile(NO_PROMPT_FILE);
     setError(null);
   }, [selectedId]);
 
   const send = useCallback(() => {
     const text = input.trim();
-    // An image-only message is valid; the model reads the screenshot.
-    if (!text && images.length === 0) return;
+    // An image-only or prompt-file-only message is valid.
+    if (!text && images.length === 0 && promptFile === NO_PROMPT_FILE) return;
     const store = useSessionsStore.getState();
     const id = store.selectedId;
     const selected = id ? store.sessions[id] : undefined;
     if (!id || !selected || selected.status === "working") return;
 
-    const prompt =
-      attachments.length > 0
-        ? `${text}\n\nAttached files:\n${attachments
-            .map((p) => `- ${p}`)
-            .join("\n")}`
-        : text || "(see attached image)";
-    const sent = images;
-    setInput("");
-    setAttachments([]);
-    setImages([]);
-    setError(null);
-    store.addUserMessage(
-      id,
-      newId("local"),
-      text,
-      sent.map((i) => i.dataUrl)
-    );
+    // Async because a prompt file is read at send time — never cached on
+    // select, so an edit between picking and sending is always honored.
+    // Captured before the resets below: the agent needs to know WHICH note
+    // drove this run so it can track its status and write the report back.
+    const note = promptFile === NO_PROMPT_FILE ? undefined : promptFile;
 
-    const prefs = usePreferencesStore.getState();
-    const pick = { ...prefs.defaults, ...prefs.byChat[id] };
-    void bridge
-      .rpc("task.start", {
-        conversationId: id,
-        prompt,
-        model: pick.model === "default" ? undefined : pick.model,
-        effort: pick.effort === "default" ? undefined : pick.effort,
-        planMode: pick.planMode || undefined,
-        vibe: prefs.vibe || undefined,
-        images:
-          sent.length > 0
-            ? sent.map((i) => ({ mediaType: i.mediaType, data: i.data }))
-            : undefined,
-      })
-      .then(({ taskId }) => {
-        useSessionsStore
-          .getState()
-          .taskStarted(id, taskId, titleFrom(selected, text || "image"));
-      })
-      // The session carries the failure (ChatPanel renders lastError), so
-      // don't also raise it here — one failed send, one message.
-      .catch((e: unknown) => {
-        useSessionsStore.getState().taskEnded(id, "error", errText(e));
-      });
-  }, [input, attachments, images]);
+    void (async () => {
+      let body = text;
+      if (note) {
+        let content: string;
+        try {
+          ({ content } = await bridge.rpc("fs.readFile", { path: note }));
+        } catch {
+          // Draft stays intact; the user re-picks or clears the file.
+          setError(`Couldn't read ${note}`);
+          return;
+        }
+        // Shared format: the agent splits this apart again to record what
+        // the user asked rather than the note quoting itself.
+        body = composePromptFilePrompt(clipPromptFile(content), text);
+      }
+
+      const prompt =
+        attachments.length > 0
+          ? `${body}\n\nAttached files:\n${attachments
+              .map((p) => `- ${p}`)
+              .join("\n")}`
+          : body || "(see attached image)";
+      // The transcript shows the pick, not the whole md file.
+      const shown = text || (note ? `Prompt from ${note}` : "");
+      const sent = images;
+      setInput("");
+      setAttachments([]);
+      setImages([]);
+      setPromptFile(NO_PROMPT_FILE);
+      setError(null);
+      store.addUserMessage(
+        id,
+        newId("local"),
+        shown,
+        sent.map((i) => i.dataUrl)
+      );
+
+      const prefs = usePreferencesStore.getState();
+      const pick = { ...prefs.defaults, ...prefs.byChat[id] };
+      void bridge
+        .rpc("task.start", {
+          conversationId: id,
+          prompt,
+          model: pick.model === "default" ? undefined : pick.model,
+          effort: pick.effort === "default" ? undefined : pick.effort,
+          planMode: pick.planMode || undefined,
+          vibe: prefs.vibe || undefined,
+          images:
+            sent.length > 0
+              ? sent.map((i) => ({ mediaType: i.mediaType, data: i.data }))
+              : undefined,
+          promptFile: note,
+        })
+        .then(({ taskId }) => {
+          // Read fresh rather than closed over, so the catalog refreshing
+          // does not rebuild this whole callback on every file write.
+          const noteTitle = note
+            ? useMarkdownStore.getState().files.find((f) => f.path === note)
+                ?.title
+            : undefined;
+          useSessionsStore
+            .getState()
+            .taskStarted(
+              id,
+              taskId,
+              titleFrom(selected, shown || "image", noteTitle)
+            );
+        })
+        // The session carries the failure (ChatPanel renders lastError), so
+        // don't also raise it here — one failed send, one message.
+        .catch((e: unknown) => {
+          useSessionsStore.getState().taskEnded(id, "error", errText(e));
+        });
+    })();
+  }, [input, attachments, images, promptFile]);
 
   /**
    * Stopping is not instant — the agent finishes the in-flight step, so
@@ -231,7 +314,7 @@ export function useComposerViewModel(): ComposerViewModel {
     const id = store.selectedId;
     const session = id ? store.sessions[id] : undefined;
     const taskId = session?.activeTaskId;
-    if (!id || !taskId || session?.cancelling) return;
+    if (!id || !taskId) return;
     store.taskCancelling(id);
     void bridge.rpc("task.cancel", { taskId }).catch(() => {
       // Task already finished; the store clears on its end event.
@@ -308,6 +391,9 @@ export function useComposerViewModel(): ComposerViewModel {
     removeImage,
     slashCommands,
     mentions,
+    promptFile,
+    setPromptFile,
+    promptFiles,
   };
 }
 
@@ -320,9 +406,23 @@ function statusOf(
   return sessions[selectedId]?.status === "working";
 }
 
-function titleFrom(session: SessionVm, prompt: string): string | undefined {
+/**
+ * The name this send gives the conversation, or undefined to leave it as
+ * it is. A picked note always wins: the note is the unit of work, so the
+ * session list must read as its heading no matter what was typed alongside
+ * it. Without a note the old rule stands — only an unnamed conversation
+ * takes its name from the prompt.
+ *
+ * Optimistic only; the agent persists the same value from the same helper.
+ */
+function titleFrom(
+  session: SessionVm,
+  prompt: string,
+  noteTitle?: string
+): string | undefined {
+  if (noteTitle) return conversationTitle(noteTitle);
   if (session.conversation.title !== "New conversation") return undefined;
-  return prompt.length > 60 ? `${prompt.slice(0, 57)}…` : prompt;
+  return conversationTitle(prompt);
 }
 
 function errText(e: unknown): string {

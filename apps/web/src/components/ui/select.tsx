@@ -8,12 +8,19 @@ export interface SelectOption {
   label: string;
   /** Secondary line in the menu (e.g. the model's version blurb). */
   hint?: string;
+  separator?: false;
+}
+
+export interface SelectSeparator {
+  value: string;
+  label: string;
+  separator: true;
 }
 
 export interface SelectProps {
   value: string;
   onChange: (value: string) => void;
-  options: SelectOption[];
+  options: Array<SelectOption | SelectSeparator>;
   /** Menu opens below by default; use "up" near the bottom of the view. */
   direction?: "down" | "up";
   disabled?: boolean;
@@ -36,7 +43,7 @@ export function Select({
 }: SelectProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const selected = options.find((o) => o.value === value);
+  const selected = options.find((o) => !o.separator && o.value === value);
 
   // Click-outside / Escape both close the menu.
   useEffect(() => {
@@ -96,6 +103,11 @@ export function Select({
           >
             {options.map((option) => (
               <li key={option.value}>
+                {option.separator ? (
+                  <div className="px-2 pb-1 pt-1.5 text-[9px] font-medium uppercase tracking-wide text-muted-foreground/50">
+                    {option.label}
+                  </div>
+                ) : (
                 <button
                   type="button"
                   onClick={() => {
@@ -122,6 +134,7 @@ export function Select({
                     <Check className="mt-0.5 h-3 w-3 shrink-0" />
                   )}
                 </button>
+                )}
               </li>
             ))}
           </motion.ul>

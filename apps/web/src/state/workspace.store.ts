@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { FileTreeNode } from "@atelier/protocol";
+import type { FileTreeNode, SlashCommand } from "@atelier/protocol";
+import type { ActivityView } from "@/views/shell/ActivityBar";
 
 export type RightTab =
   | "chat"
@@ -10,6 +11,9 @@ export type RightTab =
   | "rag";
 
 interface WorkspaceStore {
+  /** Which left panel the activity rail shows. Lives here (not in
+   *  AppShell state) so other views can navigate the rail. */
+  activityView: ActivityView;
   tree: FileTreeNode | null;
   treeVersion: number;
   expanded: Set<string>;
@@ -17,6 +21,8 @@ interface WorkspaceStore {
   fileContent: string | null;
   fileMtime: number | null;
   rightTab: RightTab;
+  skillDetail: { command: SlashCommand; content: string } | null;
+  setActivityView: (view: ActivityView) => void;
   setTree: (tree: FileTreeNode) => void;
   bumpTreeVersion: () => void;
   toggleExpanded: (path: string) => void;
@@ -24,9 +30,12 @@ interface WorkspaceStore {
   refreshSelectedFile: (content: string, mtime: number) => void;
   clearSelected: () => void;
   setRightTab: (tab: RightTab) => void;
+  openSkillDetail: (detail: { command: SlashCommand; content: string }) => void;
+  closeSkillDetail: () => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
+  activityView: "agents",
   tree: null,
   treeVersion: 0,
   expanded: new Set<string>(),
@@ -34,7 +43,9 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   fileContent: null,
   fileMtime: null,
   rightTab: "chat",
+  skillDetail: null,
 
+  setActivityView: (activityView) => set({ activityView }),
   setTree: (tree) => set({ tree }),
   bumpTreeVersion: () => set((s) => ({ treeVersion: s.treeVersion + 1 })),
   toggleExpanded: (path) =>
@@ -51,4 +62,6 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   clearSelected: () =>
     set({ selectedPath: null, fileContent: null, fileMtime: null }),
   setRightTab: (rightTab) => set({ rightTab }),
+  openSkillDetail: (skillDetail) => set({ skillDetail, rightTab: "chat" }),
+  closeSkillDetail: () => set({ skillDetail: null, rightTab: "chat" }),
 }));

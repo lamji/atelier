@@ -229,6 +229,25 @@ export function useGitFlowViewModel() {
     }
   }, []);
 
+  /**
+   * Stop the running fix. Same contract as the composer's stop button:
+   * the agent finishes its in-flight step, so the button only reports
+   * "Stopping…" until a real end event (cancelled / completed / error)
+   * clears it. Without this the modal's only exit from a fix that is
+   * going the wrong way is closing the whole wizard.
+   */
+  const cancelFix = useCallback(() => {
+    const conversationId = state().fixConversationId;
+    if (!conversationId) return;
+    const sessions = useSessionsStore.getState();
+    const taskId = sessions.sessions[conversationId]?.activeTaskId;
+    if (!taskId) return;
+    sessions.taskCancelling(conversationId);
+    void bridge.rpc("task.cancel", { taskId }).catch(() => {
+      // Task already finished; the store clears on its end event.
+    });
+  }, []);
+
   /** PR step 1: user said yes — draft description + load branches. */
   const beginPr = useCallback(async () => {
     const base = state().info?.defaultBranch ?? "main";
@@ -331,6 +350,7 @@ export function useGitFlowViewModel() {
     confirmBranch,
     runPush,
     startFix,
+    cancelFix,
     reRunAfterFix,
     beginPr,
     skipPr,
@@ -347,6 +367,34 @@ export function useGitFlowViewModel() {
 }
 
 export type GitFlowViewModel = ReturnType<typeof useGitFlowViewModel>;
+
+/**
+ * The scope rule for hook failures, and the one the fix agent got wrong:
+ * told "staged backend code changes require staged test updates", it went
+ * and refactored the staged source to be "more testable". That staged diff
+ * is what the user already reviewed and approved — rewriting it to satisfy
+ * a hook silently replaces their change with the agent's.
+ *
+ * The distinction the agent has to make is what the hook is complaining
+ * about: a MISSING artifact (write it) versus a DEFECT in the staged code
+ * (fix it there).
+ */
+const HOOK_SCOPE_RULE =
+  "SCOPE — read what the hook is actually demanding before you edit:\n" +
+  "- If it demands a MISSING ARTIFACT (a test, a changelog entry, docs, " +
+  "a snapshot), then CREATE OR UPDATE ONLY THAT ARTIFACT and `git add` " +
+  "it. Write the test against the staged code exactly as it is now.\n" +
+  "- Do NOT modify, refactor, reformat, or restructure the already-staged " +
+  "source to make it easier to test, tidier, or better factored. That " +
+  "diff was reviewed and approved by the user; changing it here replaces " +
+  "their work with yours, and the hook did not ask for it.\n" +
+  "- Touch staged source ONLY when the hook reports a real defect IN it " +
+  "(a lint or type error, a failing assertion, a formatting rule) — then " +
+  "fix that exact defect and nothing else.\n" +
+  "- If the artifact genuinely cannot be written without a source change " +
+  "(the code under test is unreachable — unexported, no seam, no entry " +
+  "point), make the SMALLEST change that opens it up, and say in one " +
+  "line what you changed and why it was unavoidable.";
 
 function buildFixPrompt(
   kind: FixKind,
@@ -382,6 +430,7 @@ function buildFixPrompt(
   if (extra.trim()) {
     parts.push("", `Additional instructions from the user: ${extra.trim()}`);
   }
+  if (kind === "commit" || kind === "push") parts.push("", HOOK_SCOPE_RULE);
   parts.push(
     "",
     "Fix the underlying problem by editing files in the workspace. Do " +

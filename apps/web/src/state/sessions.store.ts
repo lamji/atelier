@@ -277,20 +277,38 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         if (last && last.id === messageId) {
           const updated = items.slice();
           updated[lastIndex] = { ...last, text: last.text + delta };
-          return { items: updated };
+          return {
+            items: updated,
+            thinking: session.activeTaskId
+              ? liveStatusLine(session.thinking, delta)
+              : session.thinking,
+          };
         }
         const index = items.findIndex((i) => i.id === messageId);
         const found = index !== -1 ? items[index] : undefined;
         if (found) {
           const updated = items.slice();
           updated[index] = { ...found, text: found.text + delta };
-          return { items: updated };
+          return {
+            items: updated,
+            thinking: session.activeTaskId
+              ? liveStatusLine(session.thinking, delta)
+              : session.thinking,
+          };
         }
         return {
-          items: [
-            ...items,
-            { id: messageId, role: "assistant", text: delta, streaming: true },
-          ],
+          // During a run, assistant deltas are progress chatter. Keep them
+          // out of the transcript until chat.message.completed supplies the
+          // final answer, and surface only one replacing status line.
+          thinking: session.activeTaskId
+            ? liveStatusLine(session.thinking, delta)
+            : session.thinking,
+          items: session.activeTaskId
+            ? items
+            : [
+                ...items,
+                { id: messageId, role: "assistant", text: delta, streaming: true },
+              ],
         };
       }),
     })),
@@ -329,7 +347,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   appendThinking: (conversationId, delta) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
-        thinking: session.thinking + delta,
+        thinking: liveStatusLine(session.thinking, delta),
       })),
     })),
 
@@ -442,3 +460,11 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
     })),
 }));
+
+function liveStatusLine(current: string, delta: string): string {
+  const text = `${current}${delta}`.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const sentences = text.match(/[^.!?]+[.!?]?/g) ?? [text];
+  const latest = sentences[sentences.length - 1]?.trim() ?? text;
+  return latest.length > 180 ? latest.slice(-180).trimStart() : latest;
+}

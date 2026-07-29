@@ -1,4 +1,9 @@
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query,
+  type PermissionResult,
+  type Query,
+  type SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { Logger } from "pino";
 import { newId } from "@atelier/shared";
 import type {
@@ -23,6 +28,17 @@ import type { IncrementalIndexer } from "../knowledge/indexer/incremental-indexe
 import type { HooksEngine } from "../hooks/hooks-engine.js";
 import type { ValidationRunners } from "../validation/runners.js";
 import type { SettingsRepo } from "../storage/repositories/settings.js";
+import { runOneShot } from "../providers/one-shot.js";
+import {
+  codexModelName,
+  isCodexModel,
+  isOllamaModel,
+  ollamaModelName,
+  sdkModel,
+} from "../providers/model-routing.js";
+import { runOllamaAgentLoop } from "../providers/ollama/agent-loop.js";
+import { runCodexExec } from "../providers/codex/client.js";
+import type { CodexToolBridge } from "../providers/codex/tool-bridge.js";
 import type { PlanTracker } from "./plan-tracker.js";
 import type { TaskOptions } from "./orchestrator.js";
 import {
@@ -40,7 +56,30 @@ import {
   buildTaskSummary,
   type TaskSummaryStore,
 } from "../context/summaries/index.js";
+import type {
+  SharedSessionContext,
+  SharedSessionContextBuilder,
+} from "../context/session/index.js";
 import { rankCandidates } from "../context/rank/index.js";
+import {
+  detectWorkspaceProfile,
+  renderProjectTree,
+  renderWorkspaceProfile,
+} from "../workspace/profile/index.js";
+import type { WorkspaceProfile } from "../workspace/profile/index.js";
+import {
+  EMPTY_SCOPE,
+  inScope,
+  renderScope,
+  scopeGlob,
+  type SessionScope,
+  type SessionScopeStore,
+} from "../workspace/scope/index.js";
+import type { WorkspaceIgnore } from "../workspace/ignore.js";
+import type { GitService } from "../git/git-service.js";
+import type { ScopeGuard } from "../tools/scope-guard.js";
+import { touchesCode } from "./change-scale/index.js";
+import type { SkillLoader } from "./skill-loader.js";
 
 /** Built-in SDK tools stay disabled: everything flows through Atelier. */
 const DISABLED_BUILTINS = [
@@ -58,16 +97,20 @@ const DISABLED_BUILTINS = [
 ];
 
 /**
- * Read-only tool surface for the independent-review turn. Everything that
- * can mutate the workspace — write_file, replace_code, run_terminal — is
- * withheld so the reviewer can only judge the change, never quietly repair
- * what it is supposed to be reporting. `git` is present for the diff
- * action; the git-flow hook still blocks commit/push.
+ * The read-only tool surface, shared by the two phases that must look
+ * without touching. Everything that can mutate the workspace — write_file,
+ * replace_code, replace_many, run_terminal — is withheld, so the reviewer
+ * can only judge the change rather than quietly repair what it is supposed
+ * to be reporting, and the plan pass can only read the code it is planning
+ * against. `git` is present for the diff action; the git-flow hook still
+ * blocks commit/push.
  */
-const REVIEW_TOOLS = [
+const READ_ONLY_TOOLS = [
   "read_file",
+  "read_many_files",
   "list_dir",
   "search_workspace",
+  "search_text",
   "search_symbols",
   "retrieve_knowledge",
   "query_knowledge_graph",
@@ -78,6 +121,40 @@ const REVIEW_TOOLS = [
 
 /** Small, fast model for the structured understand/plan calls. */
 const STAGE_MODEL = "claude-haiku-4-5";
+
+/**
+ * Body of the plan-mode system reminder for the INTERNAL plan pass. The CLI
+ * wraps this with its own read-only preamble and ExitPlanMode protocol
+ * footer, so it only has to say what a good Atelier plan looks like. The
+ * scope rules mirror the stage-4 planner's — a plan that widens the job is
+ * the failure mode either way.
+ */
+const SYSTEM_PLAN_INSTRUCTIONS =
+  "Read the code you are about to change before you plan it. Then call " +
+  "ExitPlanMode with a numbered plan in which every step names the real " +
+  "files it touches and says what changes in them. Plan ONLY what the " +
+  "request requires — no cleanup, refactors, or follow-up work on files the " +
+  "user did not ask about. Never restate the request as a step " +
+  '("implement the request") and never add a bare verify step. Keep ' +
+  "exploration proportionate to the job: read what you need to make the " +
+  "steps concrete, then stop. ExitPlanMode IS how this plan is delivered " +
+  "and the same turn continues straight into the edits, so do not ask the " +
+  "user anything, do not offer to implement, and do not end the turn with " +
+  "a question. Settle any open decision on the most reasonable default and " +
+  "note it in the plan.";
+
+/**
+ * Sent when a turn that was supposed to change code did not. By the time
+ * this runs the planning is over either way — this is the turn that has to
+ * produce edits.
+ */
+const PROCEED_PROMPT =
+  "Planning is finished and you now have full edit permissions in this " +
+  "same session. Implement what you just described, using the tools. Do " +
+  "not restate the plan, do not ask whether to proceed, and do not wait " +
+  "for confirmation — settle any open question on the most reasonable " +
+  "default and note the assumption in one line in your final report. If " +
+  "the work genuinely needs no code change, say why in one line and stop.";
 
 /** Intent kinds that skip heavyweight planning and validation. */
 const LIGHT_KINDS = new Set(["question", "chat", "command"]);
@@ -119,15 +196,66 @@ export interface PipelineDeps {
   ledger: TokenLedger;
   assembler: PromptAssembler;
   summaries: TaskSummaryStore;
+  sharedSessions: SharedSessionContextBuilder;
+  codexTools: CodexToolBridge;
+  skillLoader: SkillLoader;
+  /** Per-conversation working-set lock, seeded by "@folder" mentions. */
+  scope: SessionScopeStore;
+  /** Shared ignore rules, so the scoped directory map skips build output. */
+  ignore: WorkspaceIgnore;
+  /** Routes git at the checkout the scope points to. */
+  git: GitService;
+  /** Enforces the lock at the tool boundary, where prose cannot. */
+  scopeGuard: ScopeGuard;
   log: Logger;
+}
+
+/**
+ * What the task has produced so far. Filled progressively by the stages so a
+ * run that never reaches the summary stage — cancelled or crashed — can still
+ * be written to session memory. Losing an interrupted task was the case that
+ * hurt most: the user cancels, switches provider, and asks to continue.
+ */
+export interface TaskRecord {
+  changedFiles: Set<string>;
+  /** Classified intent ("fix", "feature", "question", …). */
+  intentKind: string;
+  intentSummary: string;
+  planGoal: string;
+  steps: Array<{
+    title: string;
+    detail?: string;
+    files: string[];
+    status?: string;
+  }>;
+  validation: ValidationResult[];
+  reviewVerdict: "pass" | "fail" | null;
+  /** Set once the summary stage has written the final record. */
+  summarized: boolean;
+}
+
+export function newTaskRecord(): TaskRecord {
+  return {
+    changedFiles: new Set<string>(),
+    intentKind: "",
+    intentSummary: "",
+    planGoal: "",
+    steps: [],
+    validation: [],
+    reviewVerdict: null,
+    summarized: false,
+  };
 }
 
 export interface TaskContext {
   taskId: string;
   conversationId: string;
   prompt: string;
-  /** Recent prior user turns (oldest→newest), for anchoring retrieval. */
-  priorPrompts: string[];
+  /** Prior conversation turns (oldest→newest), including assistant answers. */
+  priorTurns: Array<{
+    role: "user" | "assistant";
+    text: string;
+  }>;
   messageId: string;
   opts: TaskOptions;
   abort: AbortController;
@@ -135,6 +263,12 @@ export interface TaskContext {
   onSdkSessionId: (sessionId: string) => void;
   /** Streamed assistant text so far — survives cancellation. */
   collectedText: string;
+  /** How many times this run has been pushed to stop planning and edit. */
+  nudges: number;
+  /** Progressive record of the work, for summaries and interrupted saves. */
+  record: TaskRecord;
+  /** The working-set lock in force for this turn. Resolved before stage 1. */
+  scope: SessionScope;
 }
 
 export interface PipelineOutcome {
@@ -149,10 +283,133 @@ export interface PipelineOutcome {
  * only ever invoked inside stages, never free-running.
  */
 export class PipelineExecutor {
+  /**
+   * Detected once per process and reused verbatim. It must stay
+   * byte-stable: it rides in the static half of the system prompt, so a
+   * value that changed mid-session would invalidate the provider prompt
+   * cache on every turn.
+   */
+  private workspaceBlock?: Promise<string>;
+
+  /** Cached workspace profile — the scope lock maps mentions onto it. */
+  private profile?: Promise<WorkspaceProfile>;
+
+  /**
+   * Directory maps, cached per locked root. Each is byte-stable for the
+   * process, so a conversation that stays in one project keeps its prompt
+   * prefix intact across turns.
+   */
+  private treeBlocks = new Map<string, Promise<string>>();
+
   constructor(private deps: PipelineDeps) {}
 
+  private workspaceProfile(): Promise<WorkspaceProfile> {
+    this.profile ??= detectWorkspaceProfile(this.deps.config.workspaceRoot);
+    return this.profile;
+  }
+
+  /**
+   * The per-conversation half of the layout story: which project this
+   * session is locked to, which files it has already touched, and the
+   * directory map of the locked project.
+   *
+   * The map is the fix for the failure the static block could not prevent.
+   * That block is depth-1 by necessity — it rides on every turn for every
+   * project — so it can only say "src/ exists", and the model filled the
+   * rest in from convention. Scoping the deep map to the locked project is
+   * what makes the real folder names affordable.
+   */
+  private async scopeContext(ctx: TaskContext): Promise<string> {
+    const scope = ctx.scope;
+    if (scope.roots.length === 0 && scope.anchors.length === 0) return "";
+
+    const trees = await Promise.all(
+      scope.roots.map((root) => this.projectTree(root))
+    );
+    return [renderScope(scope), ...trees].filter(Boolean).join("\n");
+  }
+
+  /**
+   * Resolves this turn's scope before any stage runs, and points git at
+   * the checkout it names.
+   *
+   * Order matters: retrieval is the first stage that can go wide, so the
+   * lock has to exist before it, not alongside it.
+   */
+  private async applyScope(ctx: TaskContext): Promise<void> {
+    let scope: SessionScope;
+    try {
+      const profile = await this.workspaceProfile();
+      scope = this.deps.scope.resolve(ctx.conversationId, ctx.prompt, profile);
+    } catch (error) {
+      // A scope we cannot compute must not take the task down with it —
+      // an unlocked turn is the old behavior, not a broken one.
+      this.deps.log.warn({ error }, "scope resolution failed");
+      return;
+    }
+    ctx.scope = scope;
+    this.deps.scopeGuard.bind(ctx.taskId, scope);
+    if (scope.roots.length === 0 && scope.anchors.length === 0) return;
+
+    let repo: string | null = null;
+    const first = scope.roots[0];
+    if (first) {
+      try {
+        await this.deps.git.focus(first);
+        repo = this.deps.git.activeRepo;
+      } catch (error) {
+        this.deps.log.warn({ error, root: first }, "git focus failed");
+      }
+    }
+    this.deps.bus.publish(
+      "scope.locked",
+      {
+        roots: scope.roots,
+        anchors: scope.anchors.slice(0, 12),
+        source: scope.source,
+        changed: scope.changed,
+        repo,
+      },
+      ctx.taskId
+    );
+  }
+
+  private projectTree(root: string): Promise<string> {
+    let block = this.treeBlocks.get(root);
+    if (!block) {
+      block = renderProjectTree(
+        this.deps.config.workspaceRoot,
+        root,
+        this.deps.ignore
+      ).catch((error) => {
+        this.deps.log.warn({ error, root }, "project tree render failed");
+        return "";
+      });
+      this.treeBlocks.set(root, block);
+    }
+    return block;
+  }
+
+  /**
+   * Tells the model what kind of folder it is in — one project, a
+   * monorepo, or a container of unrelated checkouts — and the real
+   * top-level directories of each. Without it the model infers a layout
+   * from convention and calls tools with paths that never existed.
+   */
+  private workspaceLayout(): Promise<string> {
+    this.workspaceBlock ??= this.workspaceProfile()
+      .then(renderWorkspaceProfile)
+      .catch((error) => {
+        this.deps.log.warn({ error }, "workspace profile detection failed");
+        return "";
+      });
+    return this.workspaceBlock;
+  }
+
   async run(ctx: TaskContext): Promise<PipelineOutcome> {
-    const changedFiles = new Set<string>();
+    // Lives on the context, not this frame: the orchestrator needs it to
+    // write a summary if the task is cancelled or crashes before stage 9.
+    const changedFiles = ctx.record.changedFiles;
     const unsubscribe = this.deps.bus.subscribe((event) => {
       if (event.topic === "edit.applied" && event.taskId === ctx.taskId) {
         const path = (event.payload as { path: string }).path;
@@ -160,12 +417,18 @@ export class PipelineExecutor {
         // Advance the plan checklist live from real edits, so it moves even
         // when the model doesn't call update_plan_step itself.
         this.deps.planTracker.noteFileEdited(ctx.taskId, path);
+        // An edited file becomes an anchor: the next turn is usually "now
+        // make it do X" with no path named at all.
+        this.deps.scope.noteTouched(ctx.conversationId, path);
       }
     });
 
     try {
+      await this.applyScope(ctx);
       const intent = await this.stage(ctx, "understand", async () => {
         const result = await this.understand(ctx);
+        ctx.record.intentKind = result.kind;
+        ctx.record.intentSummary = result.summary;
         return {
           value: result,
           detail: `${result.kind}: ${clip(result.summary, 80)}`,
@@ -175,14 +438,27 @@ export class PipelineExecutor {
       const retrieval = await this.stage(ctx, "retrieve", async () => {
         const base =
           [intent.summary, ...intent.targets].join(" ").trim() || ctx.prompt;
-        const queryText = anchoredQuery(base, ctx.priorPrompts);
+        const queryText = anchoredQuery(base, ctx.priorTurns);
         // Over-fetch, then re-rank with signals retrieval cannot see
         // (target proximity, recency, lesson priority) and keep the top.
-        const raw = await this.deps.retriever.retrieve(queryText, 24);
+        // The lock is a filter here, not a ranking hint: three checkouts
+        // holding a near-identical badge.tsx score the same on similarity,
+        // so nothing but a hard glob keeps the other two out.
+        const raw = await this.deps.retriever.retrieve(queryText, 24, {
+          conversationId: ctx.conversationId,
+          pathGlob: scopeGlob(ctx.scope),
+        });
+        // The glob prunes at the source for a single-root lock; this is
+        // what makes a two-folder lock exact, and it also catches chunk
+        // kinds the glob arm does not reach.
+        const scoped = raw.chunks.filter(
+          (chunk) =>
+            chunk.kind === "session-memory" || inScope(ctx.scope, chunk.path)
+        );
         const result = {
           ...raw,
           chunks: rankCandidates({
-            chunks: raw.chunks,
+            chunks: scoped,
             targets: intent.targets,
             graph: this.deps.graph,
             db: this.deps.db,
@@ -195,6 +471,23 @@ export class PipelineExecutor {
           detail: `${result.strategy} · ${result.chunks.length} chunks`,
         };
       });
+
+      // Skills are opt-in: only what the user typed as a leading slash
+      // command. Nothing is published on a plain prompt, so a turn that
+      // invoked no skill shows no skill line at all.
+      const skills = this.deps.skillLoader.load(ctx.prompt);
+      if (skills.skills.length > 0) {
+        this.deps.bus.publish(
+          "skills.selected",
+          {
+            skills: skills.skills.map((skill) => ({
+              id: skill.id,
+              name: skill.name,
+            })),
+          },
+          ctx.taskId
+        );
+      }
 
       const light = LIGHT_KINDS.has(intent.kind);
 
@@ -230,12 +523,22 @@ export class PipelineExecutor {
       });
 
       const plan = await this.stage(ctx, "plan", async () => {
-        const result = light
-          ? this.trivialPlan(ctx, intent)
-          : await this.buildPlan(ctx, intent, retrieval, impact);
+        const built = light
+          ? { plan: this.trivialPlan(ctx, intent), degraded: false }
+          : await this.buildPlan(ctx, intent, retrieval, impact, skills.context);
+        const result = built.plan;
         this.deps.planTracker.setPlan(result);
         this.deps.bus.publish("plan.created", result, ctx.taskId);
-        return { value: result, detail: `${result.steps.length} steps` };
+        ctx.record.planGoal = result.goal;
+        ctx.record.steps = recordSteps(result.steps);
+        return {
+          value: result,
+          // A blind fallback is a FAILED plan stage, not a two-step plan.
+          ok: !built.degraded,
+          detail: built.degraded
+            ? "planner returned no usable JSON — generic fallback plan"
+            : `${result.steps.length} steps`,
+        };
       });
 
       // Blast radius is computed from the PLAN's concrete target files, not
@@ -278,13 +581,35 @@ export class PipelineExecutor {
           plan,
           constraints: intent.constraints,
         });
+        // Recall is COMPLEMENTARY to retrieval, never replaced by it: RAG
+        // finds the relevant old work, the shared block carries the recent
+        // exchange, and it drops the summaries RAG already returned. Both
+        // ride into every provider identically — this is what survives a
+        // model or provider switch mid-conversation.
+        const recalled = this.recallSession(ctx, retrieval, intent.kind);
+        const appendContext = [recalled.text, skills.context, context]
+          .filter(Boolean)
+          .join("\n");
         // Attached images ride only on this first turn.
+        //
+        // The plan pass runs on editing turns only: a question or a chat
+        // reply has nothing to plan, and the Plan checkbox already owns the
+        // interactive version. Non-Claude providers ignore the flag — they
+        // return from their own branches before it is read.
         const result = await this.streamSession(
           ctx,
           ctx.prompt,
-          context,
-          ctx.opts.images
+          appendContext,
+          ctx.opts.images,
+          "execute",
+          { systemPlan: !light }
         );
+        // An editing turn that changed nothing has, in practice, ended by
+        // offering to implement rather than implementing. Push it once —
+        // no-ops if the plan pass already had to do the same.
+        if (!light && changedFiles.size === 0) {
+          result.text += await this.nudgeToImplement(ctx, appendContext);
+        }
         return {
           value: result,
           detail: `${changedFiles.size} file(s) changed`,
@@ -297,6 +622,15 @@ export class PipelineExecutor {
           return {
             value: [] as ValidationResult[],
             detail: "no changes to validate",
+          };
+        }
+        // Typecheck/lint/test read code. A turn that only moved an env
+        // value or a line of prose cannot change their verdict, so running
+        // the whole suite is minutes spent to re-confirm the last result.
+        if (!touchesCode([...changedFiles])) {
+          return {
+            value: [] as ValidationResult[],
+            detail: "no code changed — validators skipped",
           };
         }
         const { results, extraText } = await this.validateWithFixLoop(ctx);
@@ -312,6 +646,7 @@ export class PipelineExecutor {
                 : `${failed} validator(s) still failing`,
         };
       });
+      ctx.record.validation = validation;
 
       await this.stage(ctx, "knowledge", async () => {
         await this.deps.indexer.drainFor([...changedFiles]);
@@ -332,10 +667,12 @@ export class PipelineExecutor {
         }
         const { text, detail, passed } = await this.independentReview(
           ctx,
-          changedFiles
+          changedFiles,
+          intent
         );
         assistantText += text;
         reviewVerdict = passed ? "pass" : "fail";
+        ctx.record.reviewVerdict = reviewVerdict;
         return { value: undefined, detail, ok: passed };
       });
 
@@ -355,15 +692,30 @@ export class PipelineExecutor {
           ctx.taskId
         );
         // Conversation memory: later tasks receive this compressed record
-        // instead of replayed history.
-        this.deps.summaries.save(
+        // instead of replayed history, and each unit of work becomes its own
+        // retrievable chunk so a switch mid-thread can recall just that part.
+        ctx.record.summarized = true;
+        // Live statuses, captured before the tracker entry is cleared: the
+        // record is what the note report and the interrupted-save path read.
+        ctx.record.steps = recordSteps(
+          this.deps.planTracker.get(ctx.taskId)?.steps ?? plan.steps
+        );
+        await this.deps.summaries.save(
           buildTaskSummary({
             taskId: ctx.taskId,
             conversationId: ctx.conversationId,
             intentSummary: intent.summary,
+            originalPrompt: ctx.prompt,
+            assistantText,
             changedFiles: [...changedFiles],
             validation,
             planGoal: plan.goal,
+            // Live statuses from the tracker: completeAll just ran, and the
+            // record was refreshed from it above, so this reflects what
+            // actually got done rather than the plan as first drafted.
+            steps: ctx.record.steps,
+            reviewVerdict,
+            status: "completed",
           })
         );
         return { value: undefined, detail: clip(text, 100) };
@@ -372,6 +724,9 @@ export class PipelineExecutor {
       return { assistantText, sdkSessionId: ctx.sdkSessionId };
     } finally {
       unsubscribe();
+      // The lock is stored per conversation; this only drops the per-task
+      // binding so a finished taskId cannot leak into a later run.
+      this.deps.scopeGuard.release(ctx.taskId);
     }
   }
 
@@ -418,7 +773,7 @@ export class PipelineExecutor {
     // Same session anchor as retrieval: a follow-up ("now add a filter")
     // resolves against the recent turns, so its summary/targets carry the
     // subject instead of classifying a subjectless line in isolation.
-    const anchor = intentAnchor(ctx.priorPrompts);
+    const anchor = intentAnchor(ctx.priorTurns);
     try {
       const raw = await this.shortSdkCall(
         ctx,
@@ -430,7 +785,12 @@ export class PipelineExecutor {
           "targets = ONLY files/symbols named in the LATEST request; never " +
           "copy paths from the recent-turn context, and never list something " +
           "the latest request says is already done/reverted. constraints = " +
-          'explicit scope limits ("only", "just", "revert", "do not ...").\n' +
+          'explicit scope limits ("only", "just", "revert", "do not ..."), ' +
+          "AND any wording that pins the fix down rather than opening it " +
+          'up — "direct fix", "quick fix", "simplest", "for now", or the ' +
+          "user naming the exact file and the exact edit to make in it. " +
+          "Capture that instruction verbatim as a constraint: it is what " +
+          "stops later stages widening the job.\n" +
           'JSON shape: {"kind":"question|chat|command|edit|fix|feature|refactor",' +
           '"summary":"one line","targets":["file paths or symbol names ' +
           'mentioned"],"constraints":["explicit constraints"]}'
@@ -474,12 +834,18 @@ export class PipelineExecutor {
     };
   }
 
+  /**
+   * Stage 4. Returns the plan plus whether it is the blind fallback, so the
+   * stage can report a planning failure instead of passing a generic
+   * two-step checklist off as a real plan.
+   */
   private async buildPlan(
     ctx: TaskContext,
     intent: Intent,
     retrieval: RetrievalResult,
-    impact: { deps: { files: string[] }; riskNotes: string[] }
-  ): Promise<Plan> {
+    impact: { deps: { files: string[] }; riskNotes: string[] },
+    skillContext = ""
+  ): Promise<{ plan: Plan; degraded: boolean }> {
     const fallback: Plan = {
       id: newId("plan"),
       taskId: ctx.taskId,
@@ -512,34 +878,75 @@ export class PipelineExecutor {
           ...impact.deps.files.slice(0, 8),
         ]),
       ];
+      // The planner used to see the LATEST turn only. A terse follow-up
+      // ("implement", "continue") carries no subject, so it planned a single
+      // word — which is exactly what a generic "Implement the request"
+      // checklist is. Anchor it the way understand() and retrieve already are.
+      const task = planTask(ctx, retrieval);
+      const maxSteps = stepBudget(intent, task.full);
+      const evidence = codeEvidence(retrieval);
       const contextLines = [
-        `Request: ${clip(ctx.prompt, 1200)}`,
+        `Request (latest turn): ${clip(ctx.prompt, 1200)}`,
+        task.anchor
+          ? "Conversation so far — the latest turn continues THIS work, so " +
+            `plan the work described here:\n${task.anchor}`
+          : "",
         `Intent: ${intent.kind} — ${intent.summary}`,
+        intent.targets.length > 0
+          ? `Files/symbols the user named: ${intent.targets.join(", ")}`
+          : "",
         intent.constraints.length > 0
           ? "Explicit scope limits from the user (honor exactly): " +
             intent.constraints.join(" | ")
           : "",
+        evidence
+          ? "Code from the repo — ground every step in what these actually " +
+            "show, and never name a path that appears in neither these " +
+            `excerpts nor the workspace layout:\n${evidence}`
+          : "",
+        // These overlap the excerpts above by design: reading a file is how
+        // a step gets concrete, but being readable was never permission to
+        // change it — that conflation is what turned retrieval into a to-do
+        // list before.
         riskFiles.length > 0
           ? "Regression-risk files (DO NOT edit unless the request requires " +
-            "it, listed only so you avoid breaking them): " +
+            "it, listed only so you avoid breaking them — several are quoted " +
+            "above, and being quoted is context, not a task): " +
             riskFiles.join(", ")
           : "",
         impact.riskNotes.length > 0
           ? `Risk notes from past lessons: ${impact.riskNotes.join(" | ")}`
           : "",
+        skillContext
+          ? `Skills the user invoked (follow these constraints):\n${skillContext}`
+          : "",
       ].filter(Boolean);
+      // The planner names concrete file paths, so it needs the folder
+      // shape as much as the implementer does.
       const raw = await this.shortSdkCall(
         ctx,
-        "You are a senior engineer writing a MINIMAL implementation plan. " +
-          "Plan ONLY what the explicit request requires. Do NOT add " +
-          "follow-up, refactor, or verify steps for files the user did not " +
-          "name; the regression-risk files are context to avoid breaking, " +
-          "NOT tasks. Honor any explicit scope limits exactly. Reply with " +
-          "ONLY valid JSON, no prose.",
+        (await this.workspaceLayout()) +
+          (await this.scopeContext(ctx)) +
+          "You are a senior engineer writing an implementation plan that " +
+          "another engineer will execute step by step, in order. Two rules " +
+          "pull against each other and BOTH bind you. Scope: plan ONLY what " +
+          "the request requires — no follow-up, refactor or cleanup steps " +
+          "for files the user did not ask about, and the regression-risk " +
+          "files are context to avoid breaking, NOT tasks. Depth: inside " +
+          "that scope be CONCRETE — each step names the real files it " +
+          "touches and its detail says what changes in them and why, in " +
+          "terms of the code you were shown. A step a stranger could not " +
+          "act on without re-reading the whole repo is not a step. Never " +
+          'restate the request as a step ("implement the request") or add a ' +
+          "bare verify step. Honor any explicit scope limits exactly. Reply " +
+          "with ONLY valid JSON, no prose.",
         `${contextLines.join("\n")}\n\n` +
-          'JSON shape: {"goal":"one line","steps":[{"title":"...",' +
-          '"detail":"optional","files":["paths"]}]} — use as few steps as ' +
-          "the request needs, no filler."
+          'JSON shape: {"goal":"one line","steps":[{"title":"imperative, ' +
+          '<=10 words","detail":"what changes in these files and why, 1-2 ' +
+          'sentences","files":["real repo paths"]}]}\n' +
+          `Use as many steps as the work genuinely has, up to ${maxSteps}. ` +
+          "detail and files are required on every step. Order the steps so " +
+          "each one is executable when its turn comes."
       );
       const parsed = extractJson(raw) as {
         goal?: string;
@@ -550,25 +957,34 @@ export class PipelineExecutor {
         !Array.isArray(parsed.steps) ||
         parsed.steps.length === 0
       ) {
-        return fallback;
+        // Used to return the fallback silently, which reads downstream
+        // exactly like a task that genuinely needed two steps.
+        this.deps.log.warn(
+          { raw: clip(raw, 400) },
+          "plan JSON unusable; using fallback"
+        );
+        return { plan: fallback, degraded: true };
       }
       return {
-        id: newId("plan"),
-        taskId: ctx.taskId,
-        goal: clip(parsed.goal ?? intent.summary, 200),
-        steps: parsed.steps.slice(0, 6).map((step) => ({
-          id: newId("step"),
-          title: clip(step.title ?? "Step", 120),
-          detail: step.detail ? clip(step.detail, 300) : undefined,
-          files: asStringArray(step.files).slice(0, 6),
-          status: "pending" as const,
-        })),
-        createdAt: Date.now(),
+        plan: {
+          id: newId("plan"),
+          taskId: ctx.taskId,
+          goal: clip(parsed.goal ?? intent.summary, 200),
+          steps: parsed.steps.slice(0, maxSteps).map((step) => ({
+            id: newId("step"),
+            title: clip(step.title ?? "Step", 120),
+            detail: step.detail ? clip(step.detail, 300) : undefined,
+            files: asStringArray(step.files).slice(0, 6),
+            status: "pending" as const,
+          })),
+          createdAt: Date.now(),
+        },
+        degraded: false,
       };
     } catch (error) {
       if (ctx.abort.signal.aborted) throw error;
       this.deps.log.warn({ err: error }, "plan call failed; using fallback");
-      return fallback;
+      return { plan: fallback, degraded: true };
     }
   }
 
@@ -588,13 +1004,29 @@ export class PipelineExecutor {
   private async independentReview(
     ctx: TaskContext,
     /** Live set: a repair round adds to it, and the re-review must see that. */
-    changed: Set<string>
+    changed: Set<string>,
+    intent: Intent
   ): Promise<{ text: string; detail: string; passed: boolean }> {
-    const maxAttempts = 1 + this.deps.settings.get().maxReviewRetries;
+    // Review depth follows the change. When no code moved there is nothing
+    // for a repair round to legitimately repair, so the reviewer reports
+    // once and the loop stops: the findings still reach the user, but no
+    // agent is dispatched to act on them. The clone sweep goes with it —
+    // an env file has no twin to find, and the probe boots the embedder.
+    const deep = touchesCode([...changed]);
+    // Retry budget follows the size of the change. Measured across ~50 real
+    // reviews: a single pass costs ~30-45% of the execute stage, two costs
+    // ~160%, three costs 200-450%. Spending three rounds on a one- or
+    // two-file edit is where that went — the budget was flat regardless of
+    // how much there was to get wrong.
+    const maxAttempts = deep
+      ? 1 + Math.min(this.deps.settings.get().maxReviewRetries, retryBudget(changed.size))
+      : 1;
     let text = "";
     let verdict: "pass" | "fail" = "fail";
     let findings: string[] = [];
     let attempt = 0;
+    /** Previous round's findings, to detect a loop that is not converging. */
+    let lastFindings = "";
     let changedFiles: string[] = [];
     let similar: CloneHit[] = [];
     let companionFiles: string[] = [];
@@ -607,24 +1039,39 @@ export class PipelineExecutor {
       const current = [...changed];
       if (current.length !== changedFiles.length) {
         changedFiles = current;
-        similar = await this.deps.clones
-          .siblingsOf(changedFiles)
-          .catch((error: unknown) => {
-            this.deps.log.warn({ err: error }, "clone scan failed");
-            return [];
-          });
+        similar = deep
+          ? await this.deps.clones
+              .siblingsOf(changedFiles)
+              .catch((error: unknown) => {
+                this.deps.log.warn({ err: error }, "clone scan failed");
+                return [];
+              })
+          : [];
         companionFiles = companionFilesFor(
           this.deps.config.workspaceRoot,
           changedFiles
         );
       }
+      // The reviewer used to open with a `git diff` tool call and then read
+      // each changed file — every one a model round trip on a cold session.
+      // Fetching it here costs milliseconds and hands the reviewer the thing
+      // it was going to ask for anyway, so the turn starts with the evidence
+      // instead of spending itself collecting it.
+      const diff = await this.reviewDiff(ctx);
       const result = await this.streamSession(
         ctx,
-        buildReviewPrompt({ changedFiles, similar, companionFiles }),
+        buildReviewPrompt({
+          changedFiles,
+          similar,
+          companionFiles,
+          request: ctx.prompt,
+          constraints: intent.constraints,
+          diff,
+        }),
         "",
         undefined,
         "review",
-        { resume: false, allowedTools: REVIEW_TOOLS }
+        { resume: false, allowedTools: READ_ONLY_TOOLS }
       );
       const parsed = extractVerdict(result.text);
       verdict = parsed.verdict;
@@ -655,6 +1102,21 @@ export class PipelineExecutor {
 
       if (verdict === "pass" || attempt === maxAttempts) break;
 
+      // A repair round that changed nothing the reviewer cares about means
+      // the loop is not converging, and another round costs another review
+      // plus another fix to arrive at the same place. The worst runs in the
+      // timeline are exactly this shape — fail, fail, fail across three
+      // rounds, ending failed anyway, on a two-file change. Stop and report.
+      const signature = findings.join("\n");
+      if (signature === lastFindings) {
+        this.deps.log.warn(
+          { taskId: ctx.taskId, attempt },
+          "review findings unchanged after repair; stopping the loop"
+        );
+        break;
+      }
+      lastFindings = signature;
+
       // Failed with nothing actionable (the reviewer broke protocol): spend
       // the remaining attempt on another review rather than handing the
       // implementer an empty list of things to fix.
@@ -669,7 +1131,7 @@ export class PipelineExecutor {
           attempt,
           maxAttempts,
         }),
-        "",
+        this.repairContext(ctx),
         undefined,
         "fix"
       );
@@ -683,7 +1145,8 @@ export class PipelineExecutor {
         verdict === "pass"
           ? `review PASSED (attempt ${attempt}/${maxAttempts})`
           : `review FAILED after ${attempt} attempt(s): ` +
-            `${findings.length} finding(s)`,
+            `${findings.length} finding(s)` +
+            (deep ? "" : " — reported only, no code changed to repair"),
     };
   }
 
@@ -730,46 +1193,187 @@ export class PipelineExecutor {
                 : clip(f.rawOutput ?? "unknown failure", 1500))
           )
           .join("\n");
-      const fix = await this.streamSession(ctx, feedback, "", undefined, "fix");
+      const fix = await this.streamSession(
+        ctx,
+        feedback,
+        this.repairContext(ctx),
+        undefined,
+        "fix"
+      );
       extraText += fix.text;
     }
     return { results, extraText };
   }
 
+  /**
+   * The provider-neutral memory for this turn: the session-memory chunks
+   * retrieval already surfaced, plus the recent exchange those chunks do not
+   * cover. Publishes `session.recalled` so recall is visible in the chat
+   * console exactly like knowledge retrieval and impact analysis are.
+   */
+  private recallSession(
+    ctx: TaskContext,
+    retrieval: RetrievalResult,
+    intentKind: string
+  ): SharedSessionContext {
+    const chunks = retrieval.chunks.filter((c) => c.kind === "session-memory");
+    // Whatever RAG already returned is not worth sending a second time as a
+    // summary line; the chunk carries strictly more of the same task.
+    const excludeTaskIds = this.deps.summaries.taskIdsForChunks(
+      chunks.map((chunk) => chunk.id)
+    );
+    const shared = this.deps.sharedSessions.build({
+      conversationId: ctx.conversationId,
+      currentTaskId: ctx.taskId,
+      excludeTaskIds,
+      maxTokens: sessionTokensFor(intentKind),
+    });
+    if (chunks.length === 0 && shared.tokens === 0) return shared;
+
+    const chunkTokens = chunks.reduce((n, c) => n + (c.tokenCount ?? 0), 0);
+    this.deps.bus.publish(
+      "session.recalled",
+      {
+        chunks: chunks.length,
+        summaries: shared.summaries,
+        turns: shared.turns,
+        tokens: shared.tokens + chunkTokens,
+        labels: [
+          ...chunks.slice(0, 3).map((chunk) => chunkLabel(chunk.preview)),
+          ...shared.labels,
+        ]
+          .filter(Boolean)
+          .slice(0, 4),
+      },
+      ctx.taskId
+    );
+    return shared;
+  }
+
+  private repairContext(ctx: TaskContext): string {
+    const current =
+      ctx.collectedText.trim().length > 0
+        ? "CURRENT TASK TRANSCRIPT SO FAR:\n" + clip(ctx.collectedText, 1600)
+        : "";
+    const shared = this.deps.sharedSessions.build({
+      conversationId: ctx.conversationId,
+      currentTaskId: ctx.taskId,
+    });
+    return [shared.text, current].filter(Boolean).join("\n");
+  }
+
+  /**
+   * Writes session memory for a task that never reached the summary stage.
+   * Without this a cancelled task leaves no retrievable trace, which is
+   * exactly the turn a user is most likely to follow with "continue" on a
+   * different provider.
+   */
+  async saveInterruptedSummary(
+    ctx: TaskContext,
+    status: "cancelled" | "error"
+  ): Promise<void> {
+    if (ctx.record.summarized) return;
+    const record = ctx.record;
+    // Live statuses while the tracker entry still exists — the task finishes
+    // right after this and clears it. Without the refresh, a step that
+    // genuinely got done is reported as work the run never reached.
+    const live = this.deps.planTracker.get(ctx.taskId)?.steps;
+    if (live) record.steps = recordSteps(live);
+    const hasWork =
+      record.changedFiles.size > 0 ||
+      ctx.collectedText.trim().length > 0 ||
+      record.intentSummary.length > 0;
+    if (!hasWork) return;
+    ctx.record.summarized = true;
+    await this.deps.summaries.save(
+      buildTaskSummary({
+        taskId: ctx.taskId,
+        conversationId: ctx.conversationId,
+        intentSummary: record.intentSummary || clip(ctx.prompt, 120),
+        originalPrompt: ctx.prompt,
+        changedFiles: [...record.changedFiles],
+        validation: record.validation,
+        planGoal: record.planGoal,
+        steps: record.steps,
+        reviewVerdict: record.reviewVerdict,
+        status,
+        partialText: ctx.collectedText,
+      })
+    );
+  }
+
   // ----------------------------------------------------------- SDK calls
 
-  /** One-shot structured call on the small model: no tools, one turn. */
+  /**
+   * One-shot structured call: no tools, one turn. Routed by provider — an
+   * Ollama selection runs on the local daemon, anything else on the small
+   * Claude model. The prompt is built identically either way, so the RAG,
+   * knowledge and impact context in it is unaffected by the choice.
+   */
   private async shortSdkCall(
     ctx: TaskContext,
     systemPrompt: string,
     prompt: string
   ): Promise<string> {
-    const stream = query({
+    return runOneShot({
+      model: ctx.opts.model,
+      claudeFallback: STAGE_MODEL,
+      system: systemPrompt,
       prompt,
-      options: {
-        cwd: this.deps.config.workspaceRoot,
-        systemPrompt,
-        model: STAGE_MODEL,
-        maxTurns: 1,
-        disallowedTools: DISABLED_BUILTINS,
-        strictMcpConfig: true,
-        settingSources: [],
-        abortController: ctx.abort,
-      },
+      cwd: this.deps.config.workspaceRoot,
+      signal: ctx.abort.signal,
+      effort: ctx.opts.effort,
     });
-    let text = "";
-    for await (const message of stream) {
-      const m = message as Record<string, unknown>;
-      if (m.type === "result" && typeof m.result === "string") {
-        text = m.result;
-      }
+  }
+
+  /**
+   * The working-tree patch, fetched server-side for the review prompt. Best
+   * effort: on a non-repo workspace or a git failure the reviewer simply
+   * falls back to reading files with its own tools, exactly as before, so a
+   * missing diff costs speed rather than correctness.
+   */
+  private async reviewDiff(ctx: TaskContext): Promise<string> {
+    try {
+      const result = await this.deps.tools.run<{ diff?: string }>(
+        "git",
+        { action: "diff" },
+        ctx.taskId,
+        ctx.abort.signal
+      );
+      return typeof result?.diff === "string" ? result.diff : "";
+    } catch (error) {
+      this.deps.log.warn({ err: error }, "review diff unavailable");
+      return "";
     }
-    return text;
+  }
+
+  /**
+   * Swap the stage-4 plan for the one the plan pass just produced. Stage 4
+   * still runs and still publishes first — it is the floor, and the only
+   * plan there is on a provider without plan mode or on a turn where the
+   * model never calls ExitPlanMode. This supersedes it when a real,
+   * code-grounded plan arrives, and the UI follows because it renders from
+   * plan.created either way. A plan we cannot parse into steps is dropped
+   * rather than replacing a usable one with an empty checklist.
+   */
+  private adoptPlan(ctx: TaskContext, markdown: string): void {
+    const plan = planFromMarkdown(ctx.taskId, markdown, ctx.record.planGoal);
+    if (!plan) {
+      this.deps.log.warn(
+        { raw: clip(markdown, 400) },
+        "plan text had no parsable steps; keeping stage-4 plan"
+      );
+      return;
+    }
+    this.deps.planTracker.setPlan(plan);
+    this.deps.bus.publish("plan.created", plan, ctx.taskId);
+    ctx.record.planGoal = plan.goal;
+    ctx.record.steps = recordSteps(plan.steps);
   }
 
   /**
    * The main interactive session (stage 6 + validation fix rounds):
-   * streams deltas to chat, resumes the conversation's SDK session, and
+   * streams deltas to chat, keeps an in-task SDK session when available, and
    * exposes Atelier tools through the in-process MCP server.
    */
   private async streamSession(
@@ -778,7 +1382,12 @@ export class PipelineExecutor {
     appendContext = "",
     images?: ImageAttachment[],
     purpose: ContextPurpose = "execute",
-    opts: { resume?: boolean; allowedTools?: string[] } = {}
+    opts: {
+      resume?: boolean;
+      allowedTools?: string[];
+      /** Run the internal plan pass before editing — Claude models only. */
+      systemPlan?: boolean;
+    } = {}
   ): Promise<{ text: string }> {
     const resume = opts.resume ?? true;
     const sdkContext: SdkToolContext = {
@@ -788,13 +1397,107 @@ export class PipelineExecutor {
     const mcpServer = createAtelierMcpServer(this.deps.tools, () => sdkContext);
     let text = "";
 
-    // With images, the turn is a structured multimodal user message; plain
-    // text stays a plain string prompt (the common path).
-    const promptInput =
-      images && images.length > 0 ? imagePrompt(prompt, images) : prompt;
+    const hasImages = images !== undefined && images.length > 0;
+    // Provider-neutral: the same layout block precedes the rules on every
+    // backend, so a Codex or Ollama run knows the folder shape too.
+    const layout = await this.workspaceLayout();
+    // Rides AFTER the static rules, never between them: the lock changes
+    // per conversation, and splitting the static prefix would invalidate
+    // the provider prompt cache on every turn.
+    const scoped = await this.scopeContext(ctx);
 
+    if (isOllamaModel(ctx.opts.model)) {
+      return {
+        text: await runOllamaAgentLoop({
+          model: ollamaModelName(ctx.opts.model as string),
+          system:
+            layout +
+            SYSTEM_RULES +
+            (ctx.opts.vibe ? VIBE_RULES : "") +
+            scoped +
+            appendContext,
+          prompt,
+          images,
+          tools: this.deps.tools,
+          taskId: ctx.taskId,
+          signal: ctx.abort.signal,
+          emitText: (delta) => {
+            ctx.collectedText += delta;
+            this.deps.bus.publish(
+              "chat.message.delta",
+              {
+                conversationId: ctx.conversationId,
+                messageId: ctx.messageId,
+                delta,
+              },
+              ctx.taskId
+            );
+          },
+        }),
+      };
+    }
+
+    if (isCodexModel(ctx.opts.model)) {
+      const toolBridge = await this.deps.codexTools.session(
+        ctx.taskId,
+        ctx.abort.signal
+      );
+      const text = await runCodexExec({
+        cwd: this.deps.config.workspaceRoot,
+        model: codexModelName(ctx.opts.model as string),
+        sandbox: ctx.opts.planMode ? "read-only" : "workspace-write",
+        effort: ctx.opts.effort,
+        signal: ctx.abort.signal,
+        toolBridge,
+        images,
+        telemetry: {
+          bus: this.deps.bus,
+          taskId: ctx.taskId,
+          conversationId: ctx.conversationId,
+          messageId: ctx.messageId,
+        },
+        prompt:
+          layout +
+          SYSTEM_RULES +
+          CODEX_MCP_RULES +
+          (ctx.opts.vibe ? VIBE_RULES : "") +
+          scoped +
+          appendContext +
+          "\n\n" +
+          prompt,
+      }).finally(() => toolBridge.dispose());
+      if (text) ctx.collectedText += text;
+      return { text };
+    }
+
+    // The INTERNAL plan pass. Distinct from the Plan checkbox
+    // (ctx.opts.planMode), which is the interactive mode: there the plan goes
+    // to the user, they collaborate on it, and the turn stops at approval.
+    // This one never prompts — it captures the plan the model produces and
+    // flips the SAME session to execute, so every file the planner read is
+    // still in context when the implementer starts. The checkbox wins if
+    // both are on, because a user asking to plan wants to be asked.
+    const systemPlan = opts.systemPlan === true && !ctx.opts.planMode;
+    const planning = systemPlan || ctx.opts.planMode === true;
+
+    // canUseTool closes over the query it belongs to, so the handle is
+    // declared first and assigned below; it is only ever read from inside a
+    // tool callback, which cannot fire before query() has returned.
+    let session: Query | undefined;
+    // canUseTool IS the permission layer, so a blanket allow inside it would
+    // override plan mode's own read-only gate for Atelier's MCP tools. This
+    // flag is what keeps the plan pass honest until ExitPlanMode flips it.
+    let planPhase = systemPlan;
+
+    // With images, the Claude turn is a structured multimodal user message.
+    // The plan pass also needs streaming input — setPermissionMode is only
+    // available in that mode — so plain text is wrapped the same way there.
     const stream = query({
-      prompt: promptInput,
+      prompt: hasImages
+        ? imagePrompt(prompt, images)
+        : systemPlan
+          ? streamedPrompt(prompt)
+          : prompt,
       options: {
         cwd: this.deps.config.workspaceRoot,
         systemPrompt: {
@@ -803,24 +1506,62 @@ export class PipelineExecutor {
           // Stable-first ordering for prompt caching: static rule blocks
           // precede the per-task context, and each block is byte-stable.
           append:
+            layout +
             SYSTEM_RULES +
             (ctx.opts.vibe ? VIBE_RULES : "") +
+            scoped +
             appendContext,
         },
-        permissionMode: ctx.opts.planMode ? "plan" : "bypassPermissions",
-        ...(ctx.opts.model ? { model: ctx.opts.model } : {}),
-        ...(ctx.opts.effort ? { effort: ctx.opts.effort } : {}),
+        permissionMode: planning ? "plan" : "bypassPermissions",
+        ...(systemPlan
+          ? {
+              planModeInstructions: SYSTEM_PLAN_INSTRUCTIONS,
+              canUseTool: async (
+                name: string,
+                input: Record<string, unknown>
+              ): Promise<PermissionResult> => {
+                if (name === "ExitPlanMode") {
+                  const raw = typeof input.plan === "string" ? input.plan : "";
+                  if (raw) this.adoptPlan(ctx, raw);
+                  // The flip is the whole point: same session, so the reads
+                  // that produced the plan are still context for the edits.
+                  await session?.setPermissionMode("bypassPermissions");
+                  planPhase = false;
+                  return { behavior: "allow", updatedInput: input };
+                }
+                if (planPhase && !READ_ONLY_TOOLS.includes(name)) {
+                  return {
+                    behavior: "deny",
+                    message:
+                      "Still planning — that tool writes. Read what you " +
+                      "need, then call ExitPlanMode with the plan.",
+                  };
+                }
+                return { behavior: "allow", updatedInput: input };
+              },
+            }
+          : {}),
+        // This path is only for Claude models. Ollama selections are handled
+        // by runOllamaAgentLoop above because the Claude SDK cannot run them.
+        ...(sdkModel(ctx.opts.model)
+          ? { model: sdkModel(ctx.opts.model) }
+          : {}),
+        ...(sdkEffort(ctx.opts.effort)
+          ? { effort: sdkEffort(ctx.opts.effort) }
+          : {}),
         disallowedTools: DISABLED_BUILTINS,
         mcpServers: { [MCP_SERVER_NAME]: mcpServer },
         strictMcpConfig: true,
         allowedTools: opts.allowedTools ?? [`mcp__${MCP_SERVER_NAME}__*`],
         includePartialMessages: true,
-        // user+project so .claude/commands and skills stay executable.
-        settingSources: ["user", "project"],
+        // Atelier injects selected skills itself so disabled skills cannot
+        // leak through Claude's native user/project settings.
+        settingSources: [],
         abortController: ctx.abort,
         ...(resume && ctx.sdkSessionId ? { resume: ctx.sdkSessionId } : {}),
       },
     });
+    session = stream;
 
     for await (const message of stream) {
       const m = message as Record<string, unknown>;
@@ -888,7 +1629,50 @@ export class PipelineExecutor {
         }
       }
     }
+    // A turn that ends still in the plan phase never reached ExitPlanMode, so
+    // the flip never happened and nothing was ever allowed to change — the
+    // user gets an analysis and an offer to implement. Take the plan the
+    // model wrote as prose and carry the SAME session into the edits.
+    if (planPhase) {
+      if (text) this.adoptPlan(ctx, text);
+      return { text: text + (await this.nudgeToImplement(ctx, appendContext)) };
+    }
     return { text };
+  }
+
+  /**
+   * Pushes a stalled run into actually editing — at most once per task.
+   *
+   * Two shapes end a turn with an analysis instead of a change: the plan
+   * pass never calls ExitPlanMode, so nothing was ever permitted to write;
+   * or it exits and then asks ("say the word and I'll implement it").
+   * Unattended, both are a failed turn — plan mode is the user's checkbox,
+   * and with it off, planning is what happens BEFORE editing in the same
+   * turn, not instead of it.
+   *
+   * The continuation resumes the same session, so every file the planner
+   * read is still in context. Bounded to one so a run that genuinely has
+   * nothing to change cannot be made to loop here.
+   */
+  private async nudgeToImplement(
+    ctx: TaskContext,
+    appendContext: string
+  ): Promise<string> {
+    if (ctx.nudges > 0 || ctx.abort.signal.aborted) return "";
+    ctx.nudges += 1;
+    this.deps.log.warn(
+      { taskId: ctx.taskId },
+      "turn ended without edits; continuing the session into implementation"
+    );
+    const { text } = await this.streamSession(
+      ctx,
+      PROCEED_PROMPT,
+      appendContext,
+      undefined,
+      "execute",
+      { systemPlan: false }
+    );
+    return text ? `\n\n${text}` : "";
   }
 
   private recordTestRun(
@@ -911,7 +1695,66 @@ export class PipelineExecutor {
   }
 }
 
-const SYSTEM_RULES =
+function sdkEffort(
+  effort: TaskOptions["effort"]
+): Exclude<TaskOptions["effort"], "ultra"> | undefined {
+  return effort === "ultra" ? undefined : effort;
+}
+
+/**
+ * Token cap for the shared memory block. A bare "continue" classifies as
+ * chat, which is precisely the turn that needs the thread most — so the light
+ * budget stays generous here even though its code budget is small.
+ */
+function sessionTokensFor(intentKind: string): number {
+  if (intentKind === "feature" || intentKind === "refactor") return 1100;
+  return 900;
+}
+
+/** What a recalled memory chunk was about, for the console line. */
+function chunkLabel(preview: string): string {
+  const lines = preview.split("\n");
+  const work = lines.find((line) => line.startsWith("Work: "));
+  const summary = lines.find((line) => line.startsWith("Summary: "));
+  const head = (work ?? summary ?? lines[0] ?? "")
+    .replace(/^(Work|Summary):\s*/, "")
+    .replace(/^request:\s*/i, "")
+    .split(" · ")[0]
+    ?.trim();
+  if (!head) return "";
+  return head.length > 60 ? `${head.slice(0, 57)}…` : head;
+}
+
+/** Exported so Settings can display exactly what the agent is told. */
+export const SYSTEM_RULES =
+  "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
+  "answer you mid-turn. Never end a turn by asking whether to proceed, by " +
+  "offering to implement (\"say the word and I'll…\"), or by waiting on a " +
+  "decision. Where something is genuinely ambiguous, choose the most " +
+  "reasonable default, state it in one line as an assumption, and build " +
+  "it. A turn that analyses the work and stops short of doing it has " +
+  "failed the request, however good the analysis. The blocking hooks " +
+  "(terminal approval, git flow) are the ONLY things that pause for the " +
+  "user, and they ask on your behalf. Planning is what you do before " +
+  "editing in the same turn, never instead of editing — the user has " +
+  "their own Plan checkbox for when they want to be asked first.\n" +
+  "SIMPLEST FIX WINS: match the size of the solution to the size of the " +
+  "problem. If a one-line change, a CSS rule, or an existing helper solves " +
+  "it, do that — do not introduce a new abstraction, config layer, service, " +
+  "or dependency for a small bug. Before writing anything, ask whether the " +
+  "codebase already does this somewhere and reuse it. Prefer editing an " +
+  "existing file over creating new ones, and changing a value over changing " +
+  "a structure. Only reach for the bigger design when the simple fix is " +
+  "actually wrong — not merely less elegant — and say in one line why. " +
+  "Scope creep is a defect: fix what was asked, not what is nearby.\n" +
+  "NO OVERSCOPING: work the reported issue and the code retrieval actually " +
+  "returned — nothing else. The retrieved chunks and the user's description " +
+  "define the boundary of the task. Do not widen it because adjacent code " +
+  "looks wrong, could be refactored, or lacks tests; do not rewrite files " +
+  "you merely passed through. If you spot a real problem outside the " +
+  "boundary, finish the asked-for fix first, then mention it in one line — " +
+  "let the user decide. Touching more files than the issue requires is a " +
+  "failure, not thoroughness.\n" +
   "STRICT WORKSPACE CONFINEMENT: You may only read, create, modify, " +
   "search, and run commands INSIDE the current workspace directory. All " +
   "file paths must be workspace-relative. Requests to work outside the " +
@@ -936,6 +1779,15 @@ const SYSTEM_RULES =
   "effort, or you hit a non-obvious gotcha, call save_lesson with a tiny " +
   "distilled insight anchored to the symbols/files involved. Retrieved " +
   "chunks of kind 'lesson' are hard-won knowledge — respect them.\n" +
+  "TARGETED EDITS (enforced by a blocking hook): edit existing files with " +
+  "replace_code / replace_many, not write_file. Change the lines that are " +
+  "wrong and leave the rest alone — restating a file that was mostly " +
+  "already correct hides the real change in the diff and risks dropping " +
+  "code you never meant to touch. write_file is for new files and for a " +
+  "file whose content is genuinely being thrown away. If replace_code " +
+  "fails, fix the oldString (check exact whitespace and indentation, or " +
+  "add surrounding lines for uniqueness) rather than falling back to a " +
+  "whole-file rewrite.\n" +
   "MODULARITY RULE (enforced by a blocking hook): ONE file = ONE " +
   "top-level function/component/class. Split helpers into " +
   "one-file-per-function folders with an index.ts barrel. Types, " +
@@ -976,6 +1828,16 @@ const SYSTEM_RULES =
   "one '- ' bullet per change or finding, each a short standalone line. " +
   "Never chain several sentences into one run-on paragraph.\n";
 
+const CODEX_MCP_RULES =
+  "CODEX TOOL ROUTING: use the Atelier MCP tools for workspace actions. " +
+  "Prefer search_workspace or search_text over rg/grep, read_many_files " +
+  "over repeated reads, read_file over Get-Content/cat, list_dir over " +
+  "directory shell commands, git over shell git, and replace_many over " +
+  "repeated replace_code/write_file calls. Do not use Codex native " +
+  "shell for git, reading, searching, listing, or editing when an Atelier " +
+  "MCP tool fits. Use run_terminal only for builds/tests/package commands " +
+  "or when no semantic Atelier tool fits.\n";
+
 /**
  * A one-shot streaming-input prompt carrying a multimodal user message:
  * the task text plus each attached image as a base64 content block. The
@@ -1002,6 +1864,98 @@ async function* imagePrompt(
     parent_tool_use_id: null,
     message: { role: "user", content },
   } as unknown as SDKUserMessage;
+}
+
+/**
+ * How many repair rounds a change of this size is worth. A one- or two-file
+ * edit that fails review twice is not going to pass on the third try — the
+ * timeline shows those runs ending `fail,fail,fail` after burning more time
+ * than the implementation itself. Wide changes keep the full budget, because
+ * there the extra round is usually fixing something real.
+ */
+export function retryBudget(fileCount: number): number {
+  if (fileCount <= 2) return 1;
+  if (fileCount <= 6) return 2;
+  return 3;
+}
+
+/**
+ * Streaming-input wrapper for a plain text turn. Same one-shot shape as
+ * imagePrompt — the plan pass needs it because setPermissionMode is only
+ * available in streaming input mode, not for a plain string prompt.
+ */
+async function* streamedPrompt(text: string): AsyncGenerator<SDKUserMessage> {
+  yield {
+    type: "user",
+    parent_tool_use_id: null,
+    message: { role: "user", content: text },
+  } as unknown as SDKUserMessage;
+}
+
+/**
+ * Turn ExitPlanMode's markdown into Atelier's checklist. Numbered or
+ * bulleted lines become steps; the first ordinary line becomes the goal.
+ * Paths are pulled out of each line because they are what drives live
+ * progress — PlanTracker.noteFileEdited matches an edit to the step that
+ * owns the file, so a step with no files never advances on its own.
+ */
+export function planFromMarkdown(
+  taskId: string,
+  markdown: string,
+  fallbackGoal?: string
+): Plan | null {
+  const lines = markdown.split("\n").map((line) => line.trim());
+  const bullet = /^(?:\d+[.)]|[-*+])\s+/;
+  const steps = lines
+    .filter((line) => bullet.test(line))
+    .map((line) => stripMarkdown(line.replace(bullet, "")))
+    .filter((line) => line.length > 0)
+    .slice(0, 12)
+    .map((line) => ({
+      id: newId("step"),
+      // Steps read "Title — what changes"; the head is the checklist label
+      // and the whole line is the detail the implementer receives.
+      title: clip(line.split(/\s[—:-]\s/)[0] ?? line, 120),
+      detail: clip(line, 300),
+      files: pathsIn(line),
+      status: "pending" as const,
+    }));
+  if (steps.length === 0) return null;
+  const goal = lines.find(
+    (line) => line.length > 0 && !bullet.test(line) && !line.startsWith("#")
+  );
+  return {
+    id: newId("plan"),
+    taskId,
+    goal: clip(stripMarkdown(goal ?? fallbackGoal ?? "Implement the plan"), 200),
+    steps,
+    createdAt: Date.now(),
+  };
+}
+
+/** Backticked or slash-bearing file paths named in a plan step. */
+function pathsIn(line: string): string[] {
+  const found = new Set<string>();
+  for (const match of line.matchAll(/`([^`]+)`/g)) {
+    const token = match[1]!.trim();
+    if (token.includes("/") || /^[\w.@-]+\.[a-zA-Z]{1,6}$/.test(token)) {
+      found.add(token);
+    }
+  }
+  if (found.size === 0) {
+    const bare = /\b[\w.@-]+(?:\/[\w.@-]+)+\.[a-zA-Z]{1,6}\b/g;
+    for (const match of line.matchAll(bare)) found.add(match[0]);
+  }
+  return [...found].slice(0, 6);
+}
+
+/** Drop the inline markup a checklist row should not carry. */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/`/g, "")
+    .replace(/\*\*|__/g, "")
+    .replace(/^#+\s*/, "")
+    .trim();
 }
 
 function buildSummary(
@@ -1102,6 +2056,20 @@ function extractJson(text: string): unknown {
   }
 }
 
+/**
+ * Plan steps as the durable record keeps them. `detail` rides along because
+ * the note report is the one consumer that shows a step to a human later,
+ * and a bare title is not a description of what changed.
+ */
+function recordSteps(steps: Plan["steps"]): TaskRecord["steps"] {
+  return steps.map((step) => ({
+    title: step.title,
+    detail: step.detail,
+    files: step.files,
+    status: step.status,
+  }));
+}
+
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((v): v is string => typeof v === "string")
@@ -1166,25 +2134,114 @@ function scrapeIssueLines(text: string): string[] {
 /**
  * Anchor retrieval to the session. A follow-up like "now add a filter" has
  * no subject of its own, so retrieval drifts to unrelated files. Folding a
- * short tail of recent user turns into the query keeps the subject ("site
- * map") in view. The current ask leads so its terms win the keyword cap and
- * dominate the mean-pooled query vector; the anchor only nudges — and it
- * matters most exactly when the current turn is terse.
+ * short tail of the recent exchange into the query keeps both the subject
+ * and the assistant's proposed next action in view. The current ask leads so
+ * its terms win the keyword cap and dominate the mean-pooled query vector;
+ * the anchor only nudges — and it matters most when the current turn is terse.
  */
-function anchoredQuery(base: string, priorPrompts: string[]): string {
-  const anchor = priorPrompts
+function anchoredQuery(
+  base: string,
+  priorTurns: TaskContext["priorTurns"]
+): string {
+  const anchor = priorTurns
     .slice(-2)
-    .map((p) => clip(p, 160))
-    .join(" ")
+    .map(
+      (turn) =>
+        `${turn.role}: ${clipConversationTurn(turn.text, 320)}`
+    )
+    .join("\n")
     .trim();
   return anchor ? `${base}\n\ncontext: ${anchor}` : base;
 }
 
-/** Recent user turns rendered as a context block for the intent classifier. */
-function intentAnchor(priorPrompts: string[]): string {
-  const recent = priorPrompts.slice(-2).map((p) => clip(p, 200));
+/** Recent exchange rendered as a context block for the intent classifier. */
+function intentAnchor(priorTurns: TaskContext["priorTurns"]): string {
+  const recent = priorTurns
+    .slice(-2)
+    .map(
+      (turn) =>
+        `- ${turn.role}: ${clipConversationTurn(turn.text, 600)}`
+    );
   if (recent.length === 0) return "";
-  return `Recent turns:\n${recent.map((p) => `- ${p}`).join("\n")}\n\n`;
+  return `Recent turns:\n${recent.join("\n")}\n\n`;
+}
+
+/**
+ * What the plan stage is actually being asked to build. The latest turn is
+ * often a single word — "implement", "continue" — and the subject then lives
+ * in the recent exchange and in the session-memory chunks retrieval recalled
+ * (which carry the original request verbatim). Folding both in is what stops
+ * the planner from planning a word. Deeper than the intent anchor on purpose:
+ * classifying one line needs less history than planning the whole job.
+ */
+function planTask(
+  ctx: TaskContext,
+  retrieval: RetrievalResult
+): { anchor: string; full: string } {
+  const turns = ctx.priorTurns
+    .slice(-4)
+    .map((turn) => `- ${turn.role}: ${clipConversationTurn(turn.text, 500)}`);
+  const recalled = retrieval.chunks
+    .filter((chunk) => chunk.kind === "session-memory")
+    .slice(0, 2)
+    .map((chunk) => `- recalled: ${clip(chunk.preview, 400)}`);
+  const anchor = [...turns, ...recalled].join("\n");
+  return { anchor, full: `${ctx.prompt}\n${anchor}` };
+}
+
+/**
+ * How many steps the plan may spend. Plan cost has to track the size of the
+ * job in both directions: a one-line fix still gets a short checklist, while
+ * a multi-file feature is allowed the steps it genuinely has instead of
+ * being clipped to six and losing the tail of the work.
+ */
+function stepBudget(intent: Intent, taskText: string): number {
+  const broad = intent.kind === "feature" || intent.kind === "refactor";
+  const score =
+    (broad ? 1 : 0) +
+    (taskText.length > 1200 ? 1 : 0) +
+    (intent.targets.length >= 3 ? 1 : 0);
+  if (score >= 2) return 12;
+  return score === 1 ? 8 : 5;
+}
+
+/**
+ * Excerpts of the code the plan will touch. The plan stage used to receive
+ * file PATHS only, so its steps could not say what changes inside them —
+ * "based on code understanding" was structurally impossible. Bounded on
+ * purpose: a handful of chunks grounds the steps without turning a cheap
+ * stage call into a second context assembly. Lessons and session memory are
+ * excluded — they are handled elsewhere and are not code to plan against.
+ */
+function codeEvidence(retrieval: RetrievalResult): string {
+  return retrieval.chunks
+    .filter(
+      (chunk) =>
+        chunk.kind === "code" ||
+        chunk.kind === "doc" ||
+        chunk.kind === "feature-summary"
+    )
+    .slice(0, 5)
+    .map((chunk) => {
+      const rows =
+        chunk.startRow !== undefined
+          ? `:${chunk.startRow}-${chunk.endRow ?? chunk.startRow}`
+          : "";
+      return `--- ${chunk.path}${rows}\n${clip(chunk.preview, 500)}`;
+    })
+    .join("\n");
+}
+
+/**
+ * A recommendation is commonly at the end of a long answer. Preserve both
+ * ends so an anchor never degenerates into only the answer's preamble.
+ */
+function clipConversationTurn(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const marker = " … [middle omitted] … ";
+  const available = maxChars - marker.length;
+  const head = Math.floor(available * 0.4);
+  return `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`;
 }
 
 function looksLikeQuestion(prompt: string): boolean {

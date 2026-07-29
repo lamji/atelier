@@ -16,6 +16,32 @@ export class SettingsRepo {
     return Settings.parse({ ...this.defaults, ...stored });
   }
 
+  /**
+   * Raw key access, for values that live in this table but aren't part of
+   * the Settings schema (provider credentials). Settings.parse strips
+   * unknown keys, so these never leak into settings.get.
+   */
+  getRaw(key: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.value) as string;
+    } catch {
+      return undefined;
+    }
+  }
+
+  setRaw(key: string, value: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO settings(key, value) VALUES(?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+      )
+      .run(key, JSON.stringify(value));
+  }
+
   save(partial: Partial<Settings>): Settings {
     const stmt = this.db.prepare(
       "INSERT INTO settings(key, value) VALUES(?, ?) " +

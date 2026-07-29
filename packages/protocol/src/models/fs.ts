@@ -25,6 +25,23 @@ export type FileTreeNode = {
   children?: FileTreeNode[];
 };
 
+/** Workflow state of a note, stored as `status:` in its frontmatter. */
+export const MarkdownStatus = z.enum(["todo", "in-progress", "review", "done"]);
+export type MarkdownStatus = z.infer<typeof MarkdownStatus>;
+
+export const MarkdownFile = z.object({
+  /** Workspace-relative, forward-slash path. */
+  path: z.string(),
+  /** First `# heading`, or the filename when the file has none. */
+  title: z.string(),
+  /** First prose line after the title, capped server-side. */
+  description: z.string(),
+  /** From frontmatter `status:`; "todo" when absent or unrecognized. */
+  status: MarkdownStatus,
+  mtime: z.number(),
+});
+export type MarkdownFile = z.infer<typeof MarkdownFile>;
+
 export const SearchMatch = z.object({
   path: z.string(),
   row: z.number(),

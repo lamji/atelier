@@ -18,12 +18,15 @@ const SYSTEM_PROMPT =
  * working-tree state when nothing is staged. The result goes into the
  * commit box on the UI, where the user can still edit it.
  */
-export async function generateCommitMessage(git: GitService): Promise<string> {
+export async function generateCommitMessage(
+  git: GitService,
+  model?: string
+): Promise<string> {
   const context = await collectChangeContext(git);
   if (!context) {
     throw new Error("No changes to describe — the working tree is clean");
   }
-  const message = await oneShotDraft(SYSTEM_PROMPT, context);
+  const message = await oneShotDraft(SYSTEM_PROMPT, context, model);
   if (!message) throw new Error("The model returned an empty message");
   return message;
 }

@@ -42,7 +42,7 @@ async function loadAndAutoSelect(): Promise<void> {
   // "no project open", during the list → start → handshake round trip.
   store.setBootstrapping(true);
   try {
-    const { projects } = await hub.rpc("projects.list", {});
+    const { projects, initialId } = await hub.rpc("projects.list", {});
     store.setProjects(projects);
     if (store.activeId) return; // already on a project (reconnect)
 
@@ -58,15 +58,28 @@ async function loadAndAutoSelect(): Promise<void> {
       }
     }
 
-    const target = pickInitial(projects);
+    const target = pickInitial(projects, initialId);
     if (target) await switchProject(target.id);
   } finally {
     useProjectsStore.getState().setBootstrapping(false);
   }
 }
 
-/** Most-recently opened, else the first running, else the first known. */
-function pickInitial(projects: ProjectInfo[]): ProjectInfo | undefined {
+/**
+ * The project this supervisor was launched for (`atelier debug` / `run` in
+ * that folder), else most-recently opened, else the first running, else the
+ * first known. Launch intent has to win: the initial project's agent is
+ * still starting at this point, so its lastOpenedAt is not stamped yet and
+ * a purely recency-based pick would open — and start — last session's
+ * project instead.
+ */
+function pickInitial(
+  projects: ProjectInfo[],
+  initialId?: string
+): ProjectInfo | undefined {
+  const launched = projects.find((p) => p.id === initialId);
+  if (launched) return launched;
+
   const byRecent = [...projects].sort(
     (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0)
   );

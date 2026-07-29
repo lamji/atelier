@@ -41,7 +41,11 @@ export type ProjectEndpoint = z.infer<typeof ProjectEndpoint>;
 export const projectsMethods = {
   "projects.list": {
     params: z.object({}).optional(),
-    result: z.object({ projects: z.array(ProjectInfo) }),
+    result: z.object({
+      projects: z.array(ProjectInfo),
+      /** The project this supervisor was launched for, if any. */
+      initialId: z.string().optional(),
+    }),
   },
   "projects.add": {
     params: z.object({ path: z.string() }),

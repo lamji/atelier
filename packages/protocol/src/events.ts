@@ -87,6 +87,45 @@ export const eventPayloads = {
     constraints: z.array(z.string()).default([]),
   }),
   "knowledge.retrieved": RetrievalResult,
+  /**
+   * The conversation's working-set lock for this turn. Published whenever a
+   * scope is in force — including the turns that merely inherit it — so the
+   * user can see that a folder mentioned three messages ago is still the
+   * only place the agent is allowed to work.
+   */
+  "scope.locked": z.object({
+    /** Locked project directories, workspace-relative. */
+    roots: z.array(z.string()),
+    /** Files this conversation is already working on, newest first. */
+    anchors: z.array(z.string()).default([]),
+    /** Whether this turn set the lock or inherited an earlier one. */
+    source: z.enum(["mention", "inherited", "none"]),
+    /** True when this turn's mentions moved the lock somewhere new. */
+    changed: z.boolean().default(false),
+    /** Checkout git was pointed at, when the lock resolved to one. */
+    repo: z.string().nullable().default(null),
+  }),
+  /**
+   * Provider-neutral session memory carried into this turn's prompt. Published
+   * on every turn that recalls anything, so switching model/provider shows the
+   * same visible evidence as knowledge retrieval and impact analysis.
+   */
+  "session.recalled": z.object({
+    /** Session-memory chunks RAG surfaced for this conversation. */
+    chunks: z.number(),
+    /** Compressed task summaries replayed in the memory block. */
+    summaries: z.number(),
+    /** Prior user/assistant turns replayed verbatim in the memory block. */
+    turns: z.number(),
+    /** Approximate token cost of everything above. */
+    tokens: z.number(),
+    /** Short labels for the recalled work, newest first. */
+    labels: z.array(z.string()).default([]),
+  }),
+  // Only skills the user invoked explicitly (leading slash command).
+  "skills.selected": z.object({
+    skills: z.array(z.object({ id: z.string(), name: z.string() })),
+  }),
   "impact.analyzed": z.object({
     affectedFiles: z.array(z.string()),
     affectedSymbols: z.array(z.string()),

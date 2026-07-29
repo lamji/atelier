@@ -39,9 +39,21 @@ export function portInUse(port: number): Promise<boolean> {
   });
 }
 
-/** Bind-test ports upward from `start` until one is free. */
-export async function freePort(start: number, span = 100): Promise<number> {
+/**
+ * Bind-test ports upward from `start` until one is free.
+ *
+ * `skip` excludes ports that are spoken for but not yet bound — a child
+ * process that has been spawned with a port but has not listened on it yet
+ * still looks free to a bind test, so callers handing out ports to several
+ * children must pass the ones they already handed out.
+ */
+export async function freePort(
+  start: number,
+  span = 100,
+  skip: ReadonlySet<number> = new Set()
+): Promise<number> {
   for (let port = start; port < start + span; port++) {
+    if (skip.has(port)) continue;
     const free = await new Promise<boolean>((resolve) => {
       const server = net.createServer();
       server.once("error", () => resolve(false));

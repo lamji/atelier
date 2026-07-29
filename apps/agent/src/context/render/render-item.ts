@@ -20,6 +20,9 @@ export function renderItem(
 ): string {
   const head = header(chunk, db);
   if (level === 1) return head;
+  if (chunk.kind === "session-memory") {
+    return `${head}\n${clip(chunk.preview, PREVIEW_CAP_CHARS)}`;
+  }
   const sym = chunk.symbolId ? symbolInfo(db, chunk.symbolId) : null;
   if (level === 2) {
     return sym?.doc ? `${head}\n  ${firstLines(sym.doc, 3)}` : head;

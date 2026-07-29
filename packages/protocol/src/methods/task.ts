@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TaskInfo } from "../models/conversation.js";
+import { ReasoningEffort } from "../models/model-option.js";
 import { EventFrame } from "../envelope.js";
 
 /** A base64-encoded image attached to a message (screenshot, paste, drop). */
@@ -17,12 +18,15 @@ export const taskMethods = {
       conversationId: z.string(),
       prompt: z.string(),
       model: z.string().optional(),
-      effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+      effort: ReasoningEffort.optional(),
       planMode: z.boolean().optional(),
       /** Vibe coding: autonomous product-builder mode for this task. */
       vibe: z.boolean().optional(),
       /** Pasted/dropped/picked images the model should see this turn. */
       images: z.array(ImageAttachment).optional(),
+      /** The `.atelier/*.md` note this prompt came from. Its status follows
+       *  the task, and the run's report is appended to it when it ends. */
+      promptFile: z.string().optional(),
     }),
     result: z.object({ taskId: z.string() }),
   },

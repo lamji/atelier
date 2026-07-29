@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ReasoningEffort } from "@atelier/protocol";
 
 const VIBE_KEY = "atelier.vibe";
 const DEFAULTS_KEY = "atelier.composer.defaults";
@@ -11,7 +12,7 @@ const MAX_REMEMBERED_CHATS = 200;
 
 /** Any SDK model value, or "default" to let the agent decide. */
 export type ModelChoice = string;
-export type EffortChoice = "default" | "low" | "medium" | "high" | "max";
+export type EffortChoice = "default" | ReasoningEffort;
 
 /** The composer picks that ride along with task.start. */
 export interface ComposerPrefs {

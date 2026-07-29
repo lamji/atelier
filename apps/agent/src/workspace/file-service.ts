@@ -1,13 +1,16 @@
 ﻿import fs from "node:fs/promises";
 import path from "node:path";
-import { newId } from "@atelier/shared";
+import { newId, pathDirname } from "@atelier/shared";
 import type {
   Diff,
   FileEntry,
   FileTreeNode,
+  MarkdownFile,
+  MarkdownStatus,
   SearchMatch,
 } from "@atelier/protocol";
 import type { EventBus } from "../events/event-bus.js";
+import { workspaceFsError } from "./fs-error.js";
 import type { PathGuard } from "./path-guard.js";
 import type { WorkspaceIgnore } from "./ignore.js";
 
@@ -15,8 +18,38 @@ const MAX_READ_BYTES = 2 * 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
 const MAX_TREE_NODES = 10_000;
 
+/** Caps for the markdown catalog: file count, head bytes, blurb length. */
+const MAX_MD_FILES = 500;
+const MD_HEAD_BYTES = 4096;
+const MAX_MD_DESCRIPTION = 140;
+
+/** The app's own notes/prompt cache inside the workspace. */
+const MD_DIR = ".atelier";
+
+/** Depth/width caps for the "did you mean" scan on a missing directory. */
+const NEARBY_DEPTH = 3;
+const NEARBY_BUDGET = 4000;
+const MAX_SUGGESTIONS = 6;
+const MAX_SIBLINGS = 24;
+
 export interface WriteOptions {
   taskId?: string;
+}
+
+/**
+ * A directory listing that survives a wrong path: when the requested
+ * directory does not exist, the nearest existing ancestor is listed
+ * instead and `note` says exactly what was missing. A hard error tells a
+ * model nothing it can act on; real sibling names let it self-correct in
+ * the same turn.
+ */
+export interface ModelListing {
+  /** The directory actually listed (workspace-relative, "" = root). */
+  path: string;
+  entries: FileEntry[];
+  /** Set only when it differs from `path`. */
+  requested?: string;
+  note?: string;
 }
 
 /** Callback so the watcher can label agent-originated changes. */
@@ -137,9 +170,74 @@ export class FileService {
     }
   }
 
+  /**
+   * Catalog of the .md files under the workspace's `.atelier` folder —
+   * the app's own notes/prompt cache — with a display title and one-line
+   * blurb, computed here so the client gets it in one call. The walk
+   * skips ignore rules on purpose: `.atelier` is typically gitignored,
+   * and gitignore must not hide the app's own data from the app.
+   */
+  async markdownFiles(limit = MAX_MD_FILES): Promise<MarkdownFile[]> {
+    const md: string[] = [];
+    await this.collectMarkdown(this.guard.toAbsolute(MD_DIR), md, limit);
+    const out: MarkdownFile[] = [];
+    for (const rel of md) {
+      // null = the file vanished between the walk and the read; skip it.
+      const file = await this.markdownFile(rel);
+      if (file) out.push(file);
+    }
+    return out;
+  }
+
+  /**
+   * One entry of that catalog, by path. Split out so a caller that already
+   * knows which file it wants — the note driving a task — gets its title
+   * without walking the folder, and gets it from the SAME parse the catalog
+   * uses, so the two can never disagree about what a note is called.
+   */
+  async markdownFile(relPath: string): Promise<MarkdownFile | null> {
+    try {
+      const abs = this.guard.toAbsolute(relPath);
+      const rel = this.guard.toRelative(abs);
+      const stat = await fs.stat(abs);
+      const head = await readHead(abs, MD_HEAD_BYTES);
+      return { path: rel, mtime: stat.mtimeMs, ...parseMarkdownHead(head, rel) };
+    } catch {
+      return null;
+    }
+  }
+
+  private async collectMarkdown(
+    absDir: string,
+    out: string[],
+    limit: number
+  ): Promise<void> {
+    if (out.length >= limit) return;
+    let entries;
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return; // no .atelier folder yet — the catalog is simply empty
+    }
+    for (const entry of entries) {
+      if (out.length >= limit) return;
+      const abs = path.join(absDir, entry.name);
+      if (entry.isDirectory()) {
+        await this.collectMarkdown(abs, out, limit);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+        out.push(this.guard.toRelative(abs));
+      }
+    }
+  }
+
   async list(relPath: string): Promise<FileEntry[]> {
     const absDir = this.guard.toAbsolute(relPath || ".");
-    const entries = await fs.readdir(absDir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch (error) {
+      throw workspaceFsError(error, relPath, "directory");
+    }
     const result: FileEntry[] = [];
     for (const entry of entries) {
       const abs = path.join(absDir, entry.name);
@@ -158,9 +256,165 @@ export class FileService {
     return result;
   }
 
+  /**
+   * list() for model-invoked calls: a missing directory degrades to the
+   * nearest existing ancestor plus a note, instead of a dead-end error.
+   * The path guard still applies — escapes throw as before.
+   */
+  async listForModel(relPath: string): Promise<ModelListing> {
+    const abs = this.guard.toAbsolute(relPath || ".");
+    const requested = this.guard.toRelative(abs);
+    try {
+      return { path: requested, entries: await this.list(requested) };
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+
+    const { path: ancestor, missing } = await this.nearestExisting(requested);
+    const entries = await this.list(ancestor);
+    // The last segment may exist as a FILE — saying "does not exist" there
+    // would be plainly wrong and would send the model looking elsewhere.
+    const asFile = entries.some(
+      (entry) => entry.name === missing && entry.type === "file"
+    );
+    const suggestions = asFile
+      ? []
+      : await this.nearbyMatches(ancestor, missing);
+    return {
+      path: ancestor,
+      requested,
+      entries,
+      note: this.listingNote(requested, ancestor, missing, asFile, suggestions),
+    };
+  }
+
+  private listingNote(
+    requested: string,
+    ancestor: string,
+    missing: string,
+    asFile: boolean,
+    suggestions: string[]
+  ): string {
+    const here = ancestor || "<workspace root>";
+    if (asFile) {
+      return (
+        `"${requested}" is a file, not a directory — open it with ` +
+        `read_file. Listed its parent "${here}" instead.`
+      );
+    }
+    const tail =
+      suggestions.length > 0
+        ? `Similar paths that DO exist: ${suggestions.join(", ")}.`
+        : "Use one of the entries above, or search_workspace to locate the " +
+          "code by what it does rather than by path.";
+    return (
+      `"${requested}" does not exist. Listed the nearest existing ` +
+      `directory instead: "${here}". Nothing named "${missing}" is in ` +
+      `it. ${tail}`
+    );
+  }
+
+  /**
+   * Real sibling names for a missing file, so read_file failures are
+   * recoverable too. When the parent directory is invented as well — the
+   * usual case for a hallucinated path — it walks up to the nearest
+   * directory that does exist rather than giving up.
+   */
+  async suggestFor(relPath: string): Promise<string> {
+    const parent = pathDirname(relPath);
+    let dir = parent;
+    let entries: FileEntry[];
+    try {
+      entries = await this.list(parent);
+    } catch (error) {
+      if (!isMissing(error)) return "";
+      const nearest = await this.nearestExisting(parent);
+      dir = nearest.path;
+      entries = await this.list(dir).catch(() => []);
+    }
+    if (entries.length === 0) return "";
+
+    const names = entries
+      .slice(0, MAX_SIBLINGS)
+      .map((e) => (e.type === "dir" ? `${e.name}/` : e.name));
+    const more = entries.length > MAX_SIBLINGS ? ", …" : "";
+    const where =
+      dir === parent
+        ? `In "${dir || "<workspace root>"}"`
+        : `"${parent}" does not exist either; the nearest real directory ` +
+          `is "${dir || "<workspace root>"}", which holds`;
+    return ` ${where}: ${names.join(", ")}${more}`;
+  }
+
+  /** Walks up until a real directory is found; also reports what broke. */
+  private async nearestExisting(
+    relPath: string
+  ): Promise<{ path: string; missing: string }> {
+    const segments = relPath.split("/").filter(Boolean);
+    let missing = segments[segments.length - 1] ?? relPath;
+    for (let cut = segments.length - 1; cut > 0; cut--) {
+      const candidate = segments.slice(0, cut).join("/");
+      try {
+        await fs.readdir(this.guard.toAbsolute(candidate));
+        return { path: candidate, missing: segments[cut] ?? missing };
+      } catch {
+        missing = segments[cut - 1] ?? missing;
+      }
+    }
+    return { path: "", missing: segments[0] ?? missing };
+  }
+
+  /**
+   * Bounded breadth-first hunt under `absStart` for directories whose name
+   * relates to the missing segment — this is what turns "no such
+   * directory: src/components/layout" into "but there is
+   * src/components/my-dashboard/layouts".
+   */
+  private async nearbyMatches(
+    relStart: string,
+    missing: string
+  ): Promise<string[]> {
+    const needle = missing.toLowerCase();
+    if (needle.length < 3) return [];
+    const found: string[] = [];
+    let frontier = [relStart];
+    let visited = 0;
+    for (let depth = 0; depth < NEARBY_DEPTH && frontier.length > 0; depth++) {
+      if (visited >= NEARBY_BUDGET || found.length >= MAX_SUGGESTIONS) break;
+      const next: string[] = [];
+      for (const dir of frontier) {
+        if (visited >= NEARBY_BUDGET || found.length >= MAX_SUGGESTIONS) break;
+        let entries;
+        try {
+          entries = await fs.readdir(this.guard.toAbsolute(dir), {
+            withFileTypes: true,
+          });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          visited += 1;
+          const rel = dir ? `${dir}/${entry.name}` : entry.name;
+          if (this.ig.ignores(rel, true)) continue;
+          // Both directions, so "layout" finds "layouts" and "auth" finds
+          // "authentication" — but only for names long enough that the
+          // containment means something.
+          const name = entry.name.toLowerCase();
+          if (name.includes(needle) || (name.length >= 3 && needle.includes(name))) {
+            if (found.length < MAX_SUGGESTIONS) found.push(rel);
+          }
+          next.push(rel);
+        }
+      }
+      frontier = next;
+    }
+    return found;
+  }
+
   async stat(relPath: string): Promise<FileEntry> {
     const abs = this.guard.toAbsolute(relPath);
-    const stat = await fs.stat(abs);
+    const stat = await statOrThrow(abs, relPath, "path");
     return {
       path: this.guard.toRelative(abs),
       name: path.basename(abs),
@@ -175,11 +429,16 @@ export class FileService {
     opts: { offset?: number; limit?: number } = {}
   ): Promise<{ content: string; mtime: number; totalLines?: number }> {
     const abs = this.guard.toAbsolute(relPath);
-    const stat = await fs.stat(abs);
+    const stat = await statOrThrow(abs, relPath, "file");
     if (stat.size > MAX_READ_BYTES) {
       throw new Error(`File too large (${stat.size} bytes): ${relPath}`);
     }
-    const buffer = await fs.readFile(abs);
+    let buffer: Buffer;
+    try {
+      buffer = await fs.readFile(abs);
+    } catch (error) {
+      throw workspaceFsError(error, relPath, "file");
+    }
     if (isBinary(buffer)) {
       throw new Error(`Binary file: ${relPath}`);
     }
@@ -187,14 +446,17 @@ export class FileService {
     if (opts.offset === undefined && opts.limit === undefined) {
       return { content: text, mtime: stat.mtimeMs };
     }
-    // 1-based line range, mirroring the SDK's built-in Read tool.
-    const lines = text.split(/\r?\n/);
+    // 1-based line range, mirroring the SDK's built-in Read tool. Lines
+    // keep their own terminators: rejoining a CRLF file with "\n" would
+    // hand the model text that no longer matches the bytes on disk, and
+    // every multi-line replace_code it derived from that read would miss.
+    const lines = text.split(/(?<=\n)/);
     const start = Math.max(0, (opts.offset ?? 1) - 1);
     const end = opts.limit === undefined ? lines.length : start + opts.limit;
     return {
-      content: lines.slice(start, end).join("\n"),
+      content: lines.slice(start, end).join(""),
       mtime: stat.mtimeMs,
-      totalLines: lines.length,
+      totalLines: text.split(/\r?\n/).length,
     };
   }
 
@@ -216,7 +478,9 @@ export class FileService {
         .catch(() => false);
       if (exists) throw new Error(`Refusing to overwrite non-text file: ${relPath}`);
     }
-    return this.applyEdit(abs, wirePath, before, content, opts);
+    // A whole-file rewrite must not silently re-line-end the file.
+    const after = preserveEol(before, content);
+    return this.applyEdit(abs, wirePath, before, after, opts);
   }
 
   async replaceCode(
@@ -229,19 +493,19 @@ export class FileService {
     const abs = this.guard.toAbsolute(relPath);
     const wirePath = this.guard.toRelative(abs);
     const { content: before } = await this.readFile(wirePath);
-    const count = countOccurrences(before, oldString);
-    if (count === 0) {
+    const edit = resolveEdit(before, oldString, newString);
+    if (edit.count === 0) {
       throw new Error(`oldString not found in ${relPath}`);
     }
-    if (count > 1 && !replaceAll) {
+    if (edit.count > 1 && !replaceAll) {
       throw new Error(
-        `oldString occurs ${count} times in ${relPath}; pass replaceAll or a ` +
-          "more specific string"
+        `oldString occurs ${edit.count} times in ${relPath}; pass replaceAll ` +
+          "or a more specific string"
       );
     }
     const after = replaceAll
-      ? before.split(oldString).join(newString)
-      : before.replace(oldString, newString);
+      ? before.split(edit.oldString).join(edit.newString)
+      : before.replace(edit.oldString, edit.newString);
     return this.applyEdit(abs, wirePath, before, after, opts);
   }
 
@@ -346,9 +610,165 @@ export class FileService {
   }
 }
 
+/** A path that simply is not there — the recoverable failure. */
+function isMissing(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+async function statOrThrow(
+  abs: string,
+  relPath: string,
+  what: "file" | "directory" | "path"
+) {
+  try {
+    return await fs.stat(abs);
+  } catch (error) {
+    throw workspaceFsError(error, relPath, what);
+  }
+}
+
 function isBinary(buffer: Buffer): boolean {
   const probe = buffer.subarray(0, 8192);
   return probe.includes(0);
+}
+
+/** Read at most `bytes` from the start of a file, decoded as UTF-8. */
+async function readHead(abs: string, bytes: number): Promise<string> {
+  const handle = await fs.open(abs, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    const { bytesRead } = await handle.read(buffer, 0, bytes, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/** "In Progress" / "in_progress" / "in-progress" all mean in-progress. */
+function normalizeStatus(raw: string): MarkdownStatus {
+  const v = raw.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (v === "in-progress" || v === "review" || v === "done") return v;
+  return "todo";
+}
+
+/**
+ * Title, blurb, and status from a markdown head: the first `#` heading,
+ * the first prose line (markers stripped), and the frontmatter's
+ * `status:` — the YAML block is otherwise skipped.
+ */
+function parseMarkdownHead(
+  head: string,
+  relPath: string
+): { title: string; description: string; status: MarkdownStatus } {
+  let lines = head.split(/\r?\n/);
+  let status: MarkdownStatus = "todo";
+  if (lines[0]?.trim() === "---") {
+    const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+    if (end !== -1) {
+      for (const raw of lines.slice(1, end)) {
+        const m = /^status\s*:\s*(.+)$/i.exec(raw.trim());
+        if (m) status = normalizeStatus(m[1]!);
+      }
+      lines = lines.slice(end + 1);
+    }
+  }
+  let title = "";
+  let description = "";
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    if (heading) {
+      if (!title) title = heading[1]!.trim();
+      continue;
+    }
+    description = line.replace(/^(?:[>*-]\s*)+/, "").trim();
+    if (description) break;
+  }
+  if (!title) title = path.basename(relPath).replace(/\.md$/i, "");
+  if (description.length > MAX_MD_DESCRIPTION) {
+    description = `${description.slice(0, MAX_MD_DESCRIPTION - 1)}…`;
+  }
+  return { title, description, status };
+}
+
+/**
+ * The file's line ending, when it uses exactly one. A mixed file returns
+ * null: picking a winner there would rewrite lines the edit never
+ * touched, which is worse than the inconsistency it would fix.
+ */
+function soleEol(text: string): "\r\n" | "\n" | null {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/(?<!\r)\n/g) ?? []).length;
+  if (crlf > 0 && lf === 0) return "\r\n";
+  if (lf > 0 && crlf === 0) return "\n";
+  return null;
+}
+
+/**
+ * Keeps a rewritten file in the line ending it already had. A model
+ * regenerating a whole file emits LF, so writing its output verbatim
+ * silently flips a CRLF file and turns a three-line change into a
+ * whole-file diff. Left alone: new files (nothing to preserve), files
+ * with no newlines, and mixed files.
+ *
+ * The trade-off: a deliberate "convert this file to LF" is undone. That
+ * is the rarer intent by far, and it stays reachable — delete the file
+ * and write it fresh, or convert it outside the write path.
+ */
+export function preserveEol(before: string, content: string): string {
+  const eol = soleEol(before);
+  if (!eol) return content;
+  const asLf = toLf(content);
+  return eol === "\r\n" ? toCrlf(asLf) : asLf;
+}
+
+/** An edit resolved against the bytes actually on disk. */
+export interface ResolvedEdit {
+  oldString: string;
+  newString: string;
+  count: number;
+}
+
+/**
+ * Matches an edit against the file's own line endings. A model works in
+ * LF — from memory, from a normalizing read, or from its own generated
+ * text — so a multi-line oldString copied against a CRLF file matches
+ * nothing, and the edit fails with "oldString not found" no matter how
+ * many times it retries. Falling back to the file's convention (and
+ * inserting newString in that same convention) makes the CRLF/LF split
+ * invisible to the model instead of a dead end.
+ */
+export function resolveEdit(
+  content: string,
+  oldString: string,
+  newString: string
+): ResolvedEdit {
+  const asIs = countOccurrences(content, oldString);
+  if (asIs > 0 || !oldString) return { oldString, newString, count: asIs };
+
+  const lf = oldString.replace(/\r\n/g, "\n");
+  const variants: Array<[string, (s: string) => string]> = [
+    [lf.replace(/\n/g, "\r\n"), toCrlf],
+    [lf, toLf],
+  ];
+  for (const [variant, align] of variants) {
+    if (variant === oldString) continue;
+    const count = countOccurrences(content, variant);
+    if (count > 0) {
+      return { oldString: variant, newString: align(newString), count };
+    }
+  }
+  return { oldString, newString, count: 0 };
+}
+
+function toLf(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
+function toCrlf(text: string): string {
+  return toLf(text).replace(/\n/g, "\r\n");
 }
 
 function countOccurrences(haystack: string, needle: string): number {

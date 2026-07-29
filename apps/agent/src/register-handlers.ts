@@ -9,6 +9,7 @@ import type { RetrieverLike } from "./context/cache/index.js";
 import type { ValidationRunners } from "./validation/runners.js";
 import type { EventBus } from "./events/event-bus.js";
 import type { SettingsRepo } from "./storage/repositories/settings.js";
+import { SYSTEM_RULES } from "./orchestrator/pipeline-executor.js";
 
 /**
  * Wires RPC handlers that are already real in Phase 1. Everything not
@@ -65,4 +66,5 @@ export function registerMiscHandlers(
   router.register("settings.save", (params) => ({
     settings: settings.save(params.settings),
   }));
+  router.register("settings.rules", () => ({ rules: SYSTEM_RULES }));
 }

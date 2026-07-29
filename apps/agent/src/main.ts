@@ -13,6 +13,10 @@ import { WebHost } from "./bridge/web-host.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { UsageMonitor } from "./orchestrator/usage-monitor.js";
 import { probeModels } from "./orchestrator/models-probe.js";
+import { probeOllamaModels } from "./providers/ollama/models.js";
+import { probeCodexModels } from "./providers/codex/models.js";
+import { CodexToolBridge } from "./providers/codex/tool-bridge.js";
+import { registerProviderHandlers } from "./providers/register-provider-handlers.js";
 import { probeAuth } from "./orchestrator/auth-status.js";
 import { registerSessionHandlers } from "./sessions/session-manager.js";
 import { registerMiscHandlers } from "./register-handlers.js";
@@ -26,7 +30,10 @@ import { TerminalManager } from "./terminal/terminal-manager.js";
 import { registerTerminalHandlers } from "./terminal/register-terminal-handlers.js";
 import { PathGuard } from "./workspace/path-guard.js";
 import { WorkspaceIgnore } from "./workspace/ignore.js";
+import { SessionScopeStore } from "./workspace/scope/index.js";
+import { ScopeGuard } from "./tools/scope-guard.js";
 import { FileService } from "./workspace/file-service.js";
+import { NoteJournal } from "./notes/note-journal.js";
 import { registerFsHandlers } from "./workspace/register-fs-handlers.js";
 import { WorkspaceWatcher } from "./workspace/watcher.js";
 import { HooksEngine } from "./hooks/hooks-engine.js";
@@ -40,6 +47,11 @@ import {
   IMPACT_HOOK_ID,
   IMPACT_HOOK_NAME,
 } from "./hooks/impact-guard.js";
+import {
+  TargetedEditGuard,
+  REWRITE_HOOK_ID,
+  REWRITE_HOOK_NAME,
+} from "./hooks/rewrite-guard.js";
 import {
   GitFlowGuard,
   GIT_FLOW_HOOK_ID,
@@ -77,6 +89,8 @@ import { PromptAssembler } from "./context/assemble/index.js";
 import { CachedRetriever, IndexGeneration } from "./context/cache/index.js";
 import { SentChunkStore } from "./context/dedup/index.js";
 import { TaskSummaryStore } from "./context/summaries/index.js";
+import { SharedSessionContextBuilder } from "./context/session/index.js";
+import { SkillLoader } from "./orchestrator/skill-loader.js";
 
 const log = createLogger();
 
@@ -108,6 +122,7 @@ function main(): void {
   const settings = new SettingsRepo(db, {
     workspaceRoot: config.workspaceRoot,
     ignoreGlobs: [],
+    disabledSkills: [],
     maxValidationRetries: 2,
     maxReviewRetries: 2,
   });
@@ -120,6 +135,7 @@ function main(): void {
   registerFsTools(tools, files);
   registerGitTools(tools, git);
   registerTerminalTools(tools, guard, config.workspaceRoot);
+  const codexTools = new CodexToolBridge(tools);
   const terminals = new TerminalManager(db, bus, config.workspaceRoot);
   const hooks = new HooksEngine(db, bus, config.workspaceRoot);
   // Built-in modularity hook: one file = one function/component/class.
@@ -129,14 +145,14 @@ function main(): void {
     name: MODULARITY_HOOK_NAME,
     enabled: true,
     event: "preTool",
-    matcher: "write_file|replace_code",
+    matcher: "write_file|replace_code|replace_many",
     action: "block",
     argument: "One file = one function/component/class",
   });
   const modularity = new ModularityGuard();
   // The structural check runs in the write guard below, which sees the
   // content. Without a hook guard the engine would apply the stored "block"
-  // action to every write_file/replace_code call, so pass here and let the
+  // action to every write_file/replace_code/replace_many call, so pass here and let the
   // write guard decide.
   hooks.registerGuard(MODULARITY_HOOK_ID, async () => undefined);
   files.setWriteGuard(async (relPath, nextContent, prevContent, taskId) => {
@@ -206,7 +222,7 @@ function main(): void {
     name: IMPACT_HOOK_NAME,
     enabled: true,
     event: "preTool",
-    matcher: "write_file|replace_code|impact_of_edit|analyze_impact",
+    matcher: "write_file|replace_code|replace_many|impact_of_edit|analyze_impact",
     action: "block",
     argument: "Check who uses this code before editing it",
   });
@@ -219,6 +235,27 @@ function main(): void {
     bus
   );
   hooks.registerGuard(IMPACT_HOOK_ID, (ctx) => impactGuard.check(ctx));
+  // Built-in targeted-edit hook: write_file may not restate a file that
+  // was mostly already correct. Refused once per file per task, so a
+  // genuine full rewrite costs one extra tool call and never the task.
+  hooks.ensureBuiltin({
+    id: REWRITE_HOOK_ID,
+    name: REWRITE_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file",
+    action: "block",
+    argument: "Patch with replace_code instead of rewriting the whole file",
+  });
+  const rewriteGuard = new TargetedEditGuard(
+    (relPath) =>
+      files
+        .readFile(relPath)
+        .then(({ content }) => content)
+        .catch(() => null),
+    bus
+  );
+  hooks.registerGuard(REWRITE_HOOK_ID, (ctx) => rewriteGuard.check(ctx));
   const knowledge = new KnowledgeQuery(db);
   const embedder = new Embedder(config.dataDir);
   const vectors = new VectorStore(db, EMBEDDING_DIMS);
@@ -283,18 +320,38 @@ function main(): void {
   // Token-budgeted context assembly through the compression ladder, with
   // cross-turn dedup and compressed conversation memory.
   const sentChunks = new SentChunkStore(db);
-  const taskSummaries = new TaskSummaryStore(db);
-  const assembler = new PromptAssembler({
-    db,
-    ledger,
-    sent: sentChunks,
+  // Saving a session memory changes what retrieval can return, so it has to
+  // invalidate the retrieval cache the same way re-indexing a file does.
+  const taskSummaries = new TaskSummaryStore(db, embedder, vectors, () =>
+    generation.bump()
+  );
+  const sharedSessions = new SharedSessionContextBuilder({
+    conversations,
     summaries: taskSummaries,
   });
+  const assembler = new PromptAssembler({ db, ledger, sent: sentChunks });
+  const skillLoader = new SkillLoader(config.workspaceRoot, settings);
+  // Keeps a markdown note picked in the composer in step with its task:
+  // in-progress on start, review plus an appended report on finish.
+  const notes = new NoteJournal({
+    files,
+    workspaceRoot: config.workspaceRoot,
+    log,
+  });
+  // The working-set lock: "@folder" in a prompt narrows retrieval, the
+  // prompt's directory map, and git routing for the whole conversation.
+  const scope = new SessionScopeStore(db, config.workspaceRoot);
+  const scopeGuard = new ScopeGuard();
+  tools.setScopeGuard(scopeGuard);
   const orchestrator = new Orchestrator({
     config,
     db,
     bus,
     tools,
+    scope,
+    scopeGuard,
+    ignore: ig,
+    git,
     retriever: cachedRetriever,
     graph,
     clones,
@@ -308,14 +365,30 @@ function main(): void {
     ledger,
     assembler,
     summaries: taskSummaries,
+    sharedSessions,
+    codexTools,
+    skillLoader,
     conversations,
+    notes,
     log,
   });
 
   const router = new Router();
-  registerSessionHandlers(router, config, conversations, orchestrator, timeline);
+  registerSessionHandlers(
+    router,
+    config,
+    conversations,
+    orchestrator,
+    timeline,
+    settings
+  );
   registerFsHandlers(router, files);
-  registerGitHandlers(router, git);
+  // The user's model choice, read fresh each time so background work picks
+  // up a switch without a restart. An "ollama/" id routes eligible model
+  // calls, including the main tool loop, through Ollama.
+  const selectedModel = () => settings.get().model;
+  registerGitHandlers(router, git, selectedModel);
+  registerProviderHandlers(router, settings);
   registerTerminalHandlers(router, terminals);
   registerHookHandlers(router, hooks, dbApprovalGuard);
   router.register("usage.get", async (params) => ({
@@ -324,11 +397,16 @@ function main(): void {
   router.register("context.stats", async (params) =>
     ledger.query(params?.conversationId, params?.limit ?? 50)
   );
-  // Live model roster from the SDK, probed once and cached.
+  // Live model roster: the SDK's Claude models plus whatever the local
+  // Ollama daemon has pulled. The SDK half is probed once and cached (it
+  // costs a process); the Ollama half is cheap and re-read every call, so
+  // an `ollama pull` shows up without restarting the agent.
   let modelsCache: import("@atelier/protocol").ModelOption[] | null = null;
   router.register("models.list", async () => {
     if (!modelsCache) modelsCache = await probeModels(config.workspaceRoot);
-    return { models: modelsCache };
+    const local = await probeOllamaModels();
+    const codex = await probeCodexModels();
+    return { models: [...modelsCache, ...local, ...codex] };
   });
   registerMiscHandlers(
     router,
@@ -362,6 +440,7 @@ function main(): void {
   // Feature models: background seeding + stale refresh, paused while any
   // interactive task runs so it never competes with the user's session.
   features.setBusyProbe(() => orchestrator.listRunningTaskIds().length > 0);
+  features.setModelSelector(selectedModel);
   features.start();
   usage.setBusyProbe(() => orchestrator.listRunningTaskIds().length > 0);
   usage.start();
@@ -378,6 +457,7 @@ function main(): void {
     usage.stop();
     features.stop();
     indexer.stop();
+    codexTools.stop();
     watcher.stop();
     git.stop();
     terminals.shutdown();

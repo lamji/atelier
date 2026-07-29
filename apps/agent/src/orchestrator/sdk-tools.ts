@@ -40,6 +40,7 @@ export function createAtelierMcpServer(
       const result = await registry.run(name, input, ctx.taskId, ctx.signal);
       return asText(name, result);
     } catch (error) {
+      if (ctx.signal.aborted) throw error;
       return {
         content: [
           { type: "text" as const, text: `Error: ${String(error)}` },
@@ -69,9 +70,38 @@ export function createAtelierMcpServer(
       { annotations: { readOnlyHint: true } }
     ),
     tool(
+      "read_many_files",
+      "Read up to 20 workspace files or line slices in one call. Prefer this " +
+        "when you need context from multiple known files; it is faster than " +
+        "several read_file calls and returns compact per-file sections.",
+      {
+        files: z
+          .array(
+            z.object({
+              path: z.string().describe("Workspace-relative file path"),
+              offset: z
+                .number()
+                .optional()
+                .describe("1-based line number to start reading from"),
+              limit: z
+                .number()
+                .optional()
+                .describe("Max number of lines to return"),
+            })
+          )
+          .describe("Files or line slices to read"),
+      },
+      (input) => run("read_many_files", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
       "write_file",
-      "Create or fully overwrite a text file in the workspace. Emits an " +
-        "observable diff before applying.",
+      "Create a NEW file, or fully replace one whose content is genuinely " +
+        "being thrown away. To change part of an existing file use " +
+        "replace_code instead — restating lines that already say the right " +
+        "thing is slower, buries the real change in the diff, and risks " +
+        "dropping the parts you meant to keep. A blocking hook enforces " +
+        "this. Emits an observable diff before applying.",
       {
         path: z.string().describe("Workspace-relative file path"),
         content: z.string().describe("Full new file content"),
@@ -80,8 +110,10 @@ export function createAtelierMcpServer(
     ),
     tool(
       "replace_code",
-      "Replace an exact string in a file. oldString must match exactly and " +
-        "be unique unless replaceAll is true.",
+      "Replace an exact string in a file. The default way to edit an " +
+        "existing file. oldString must match exactly and be unique unless " +
+        "replaceAll is true; include just enough surrounding lines to be " +
+        "unique, not the whole enclosing block.",
       {
         path: z.string(),
         oldString: z.string(),
@@ -89,6 +121,23 @@ export function createAtelierMcpServer(
         replaceAll: z.boolean().optional(),
       },
       (input) => run("replace_code", input)
+    ),
+    tool(
+      "replace_many",
+      "Apply up to 50 exact string replacements across one or more files in " +
+        "one call. Edits are grouped so each touched file is written once and " +
+        "still emits an observable diff.",
+      {
+        edits: z.array(
+          z.object({
+            path: z.string().describe("Workspace-relative file path"),
+            oldString: z.string().describe("Exact old string"),
+            newString: z.string().describe("Replacement string"),
+            replaceAll: z.boolean().optional(),
+          })
+        ),
+      },
+      (input) => run("replace_many", input)
     ),
     tool(
       "search_workspace",
@@ -105,17 +154,40 @@ export function createAtelierMcpServer(
       { annotations: { readOnlyHint: true } }
     ),
     tool(
+      "search_text",
+      "Fast literal or regex text search over non-ignored workspace files. " +
+        "Use this when you need exact text matches; use search_workspace or " +
+        "retrieve_knowledge for semantic/conceptual lookup.",
+      {
+        query: z.string(),
+        glob: z.string().optional(),
+        maxResults: z.number().optional(),
+        regex: z.boolean().optional(),
+      },
+      (input) => run("search_text", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
       "list_dir",
-      "List files and directories at a workspace-relative path.",
+      "List files and directories at a workspace-relative path (omit path " +
+        "for the workspace root). Paths are relative to the WORKSPACE ROOT, " +
+        "not to any project inside it — see WORKSPACE LAYOUT for the " +
+        "prefixes. Never assume a conventional folder exists: if the path " +
+        "is wrong this returns the nearest real directory plus a note " +
+        "saying what was missing, so read the note instead of retrying.",
       { path: z.string().optional() },
       (input) => run("list_dir", input),
       { annotations: { readOnlyHint: true } }
     ),
     tool(
       "git",
-      "Run a git operation in the workspace repository. Actions: status, " +
-        "log, diff, stage, unstage, commit, branches, checkout. Prefer this " +
-        "over run_terminal for git so changes stay observable.",
+      "Run a git operation. Actions: status, log, diff, stage, unstage, " +
+        "commit, branches, checkout. Prefer this over run_terminal for git " +
+        "so changes stay observable. The opened folder is often NOT the " +
+        "repository — it can hold several checkouts side by side — so a " +
+        "path you pass routes to the checkout that owns it, and `repo` " +
+        "picks one explicitly. Omit `repo` to act on the session's scoped " +
+        "checkout; all paths stay workspace-relative in both directions.",
       {
         action: z
           .enum([
@@ -142,6 +214,13 @@ export function createAtelierMcpServer(
         message: z.string().optional().describe("Commit message"),
         create: z.boolean().optional().describe("Create the branch on checkout"),
         maxCount: z.number().optional().describe("Max commits for log"),
+        repo: z
+          .string()
+          .optional()
+          .describe(
+            "Workspace-relative directory of the checkout to act on " +
+              '(e.g. "my-app"). Omit to use the session\'s scoped checkout.'
+          ),
       },
       (input) => run("git", input)
     ),

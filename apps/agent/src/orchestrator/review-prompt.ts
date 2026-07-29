@@ -4,7 +4,30 @@ export interface ReviewInputs {
   changedFiles: string[];
   similar: CloneHit[];
   companionFiles: string[];
+  /**
+   * The user's request. Without it the reviewer has no yardstick but its
+   * own idea of a perfect pull request, so it fails changes for work that
+   * was never asked for and the repair loop then goes and does that work —
+   * the reviewer becomes the source of the scope creep it exists to catch.
+   */
+  request: string;
+  /** Explicit scope limits from the user; exceeding them is the defect. */
+  constraints: string[];
+  /**
+   * The working-tree patch, fetched server-side. The reviewer used to spend
+   * its first turns calling the git tool and then reading each file back —
+   * round trips on a cold session, and the single biggest cost in a review
+   * that finds nothing. Empty when git could not produce one, in which case
+   * the prompt falls back to telling the reviewer to go and read it.
+   */
+  diff?: string;
 }
+
+/**
+ * How much patch text to inline. Past this the diff stops being cheaper
+ * than letting the reviewer read the files it actually cares about.
+ */
+const MAX_DIFF_CHARS = 24000;
 
 /**
  * The independent-review turn. Runs in a FRESH session with no memory of
@@ -90,9 +113,43 @@ export function buildReviewPrompt(inputs: ReviewInputs): string {
       "anything; only inspect (read_file, the git tool's diff action, " +
       "retrieve_knowledge, search_symbols) and report.",
     "",
+    "THE REQUEST THIS CHANGE ANSWERS — judge the change against this, and " +
+      "against nothing else:",
+    clip(inputs.request, 1200),
+  ];
+
+  if (inputs.constraints.length > 0) {
+    lines.push(
+      "",
+      "Scope limits the user set. A change that stays inside them is " +
+        "correct even if you would have done more:",
+      ...inputs.constraints.map((c) => `- ${c}`)
+    );
+  }
+
+  lines.push(
+    "",
     "Files changed by the author agent:",
     ...inputs.changedFiles.slice(0, 30).map((f) => `- ${f}`),
-  ];
+    "",
+    "WHAT COUNTS AS A FINDING — a defect INSIDE this change: it does not " +
+      "actually do what the request asked, it breaks or contradicts code " +
+      "that already exists, or it leaves the workspace inconsistent.",
+    "",
+    "WHAT IS NOT A FINDING — never report these, and never fail a review " +
+      "for them:",
+    "- work the request did not ask for: extra files, templates, examples, " +
+      "docs, tests, config, CI, .gitignore or other repo hygiene;",
+    "- a pre-existing problem the change did not introduce;",
+    "- that the change is small, or that a larger or cleaner solution " +
+      "exists;",
+    "- style, naming, or structural preference.",
+    "",
+    "A change that does exactly what was asked, correctly, and nothing " +
+      "more is a PASS. Every finding you raise is handed to an agent that " +
+      "will edit the codebase to satisfy it, so an out-of-scope finding " +
+      "does not improve the change — it damages it."
+  );
 
   if (inputs.similar.length > 0) {
     lines.push(
@@ -121,10 +178,35 @@ export function buildReviewPrompt(inputs: ReviewInputs): string {
     );
   }
 
+  // The patch itself, when it fits. Placed last so the instructions above
+  // stay byte-stable across attempts and keep their prompt-cache prefix.
+  const diff = inputs.diff ?? "";
+  const inlined = diff.length > 0 && diff.length <= MAX_DIFF_CHARS;
+  if (inlined) {
+    lines.push(
+      "",
+      "THE DIFF UNDER REVIEW (already fetched — do not call the git tool " +
+        "for it; read files only where the patch alone cannot settle a " +
+        "point):",
+      "```diff",
+      diff,
+      "```"
+    );
+  } else if (diff.length > MAX_DIFF_CHARS) {
+    lines.push(
+      "",
+      `The diff is large (${Math.round(diff.length / 1000)}k characters). ` +
+        "Read it in pieces with the git tool's diff action, one path at a " +
+        "time, starting with the files most likely to carry a defect."
+    );
+  }
+
   lines.push(
     "",
-    "Read the actual diff (git tool, action \"diff\") and the files above, " +
-      "then check every point:",
+    inlined
+      ? "Working from the patch above, check every point:"
+      : 'Read the actual diff (git tool, action "diff") and the files ' +
+        "above, then check every point:",
     "1. DUPLICATED PATTERN — for each similar file above, decide whether " +
       "it has the same defect the change fixed. If it does, that is a " +
       "finding.",
@@ -139,8 +221,12 @@ export function buildReviewPrompt(inputs: ReviewInputs): string {
     "5. LEFTOVERS — no unused imports, dead branches, stray syntax " +
       "(unbalanced braces/brackets/parens), or half-applied renames.",
     "",
-    "Fail the review if ANY point has a real defect — do not pass code " +
-      "with a known issue just because most points are clean.",
+    "A point that does not apply to this change is `OK` — say so and move " +
+      "on rather than manufacturing something to report.",
+    "",
+    "Fail the review if ANY point has a real, in-scope defect — do not " +
+      "pass code with a known issue just because most points are clean, " +
+      "and do not fail it for anything on the NOT-A-FINDING list above.",
     "",
     "Reply with up to 6 short lines of findings (one per point, `OK` or " +
       "`ISSUE: <what>`), THEN end with exactly one final line and nothing " +
@@ -149,4 +235,8 @@ export function buildReviewPrompt(inputs: ReviewInputs): string {
       'real defect, empty array if pass"]}'
   );
   return lines.join("\n");
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }

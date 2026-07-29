@@ -1,16 +1,19 @@
 import type { Logger } from "pino";
-import type { Diff, ImageAttachment } from "@atelier/protocol";
-import { newId } from "@atelier/shared";
+import type { Diff, ImageAttachment, ReasoningEffort } from "@atelier/protocol";
+import { conversationTitle, newId } from "@atelier/shared";
 import type { EventBus, PublishedEvent } from "../events/event-bus.js";
+import type { NoteJournal } from "../notes/note-journal.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
 import { isAuthError } from "./auth-status.js";
 import {
   HookBlockedError,
   PipelineExecutor,
+  newTaskRecord,
   type PipelineDeps,
   type TaskContext,
 } from "./pipeline-executor.js";
 import type { PlanTracker } from "./plan-tracker.js";
+import { EMPTY_SCOPE } from "../workspace/scope/index.js";
 
 interface RunningTask {
   taskId: string;
@@ -20,17 +23,20 @@ interface RunningTask {
 
 export interface TaskOptions {
   model?: string;
-  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  effort?: ReasoningEffort;
   planMode?: boolean;
   /** Vibe coding: autonomous product-builder mode for this task. */
   vibe?: boolean;
   /** Images the model should see on the first turn of this task. */
   images?: ImageAttachment[];
+  /** The `.atelier/*.md` note this prompt came from, if any. */
+  promptFile?: string;
 }
 
 export interface OrchestratorDeps extends PipelineDeps {
   conversations: ConversationRepo;
   planTracker: PlanTracker;
+  notes: NoteJournal;
   log: Logger;
 }
 
@@ -45,6 +51,7 @@ export class Orchestrator {
   private bus: EventBus;
   private conversations: ConversationRepo;
   private planTracker: PlanTracker;
+  private notes: NoteJournal;
   private log: Logger;
 
   constructor(deps: OrchestratorDeps) {
@@ -52,6 +59,7 @@ export class Orchestrator {
     this.bus = deps.bus;
     this.conversations = deps.conversations;
     this.planTracker = deps.planTracker;
+    this.notes = deps.notes;
     this.log = deps.log;
     // Pins diffs and knowledge/impact logs into chat history so they
     // survive a hydrate (session reload / reconnect), matching what the
@@ -118,11 +126,11 @@ export class Orchestrator {
         );
       }
     }
-    if (conversation.title === "New conversation") {
-      this.conversations.setTitle(
-        conversationId,
-        prompt.length > 60 ? `${prompt.slice(0, 57)}…` : prompt
-      );
+    // A note-driven prompt IS the note's whole text, so naming the
+    // conversation after it would drop the file's body into the history
+    // list. trackNote names it after the note's heading instead.
+    if (conversation.title === "New conversation" && !opts.promptFile) {
+      this.conversations.setTitle(conversationId, conversationTitle(prompt));
     }
     const taskId = newId("task");
     const abort = new AbortController();
@@ -145,12 +153,45 @@ export class Orchestrator {
       createdAt: Date.now(),
     });
 
+    // Fire and forget: the note is a side record, and startTask must stay
+    // synchronous so the caller gets its task id back immediately.
+    if (opts.promptFile) {
+      void this.trackNote(conversationId, opts.promptFile);
+    }
+
     void this.runTask(taskId, conversationId, prompt, abort, opts).catch(
       (error) => {
         this.log.error({ err: error, taskId }, "task crashed");
       }
     );
     return taskId;
+  }
+
+  /**
+   * Points a conversation at the note that drove it: the history list reads
+   * as the note's heading, and the note itself becomes work in progress.
+   *
+   * The title is re-applied on EVERY note-driven send, not only the first —
+   * a note is the unit of work, so whatever was typed alongside it must not
+   * name the session, and pointing a session at a different note renames it
+   * to that note. A send with no note leaves the title alone as before.
+   *
+   * The title is read before the status is written so it can never observe
+   * a half-written file.
+   */
+  private async trackNote(
+    conversationId: string,
+    notePath: string
+  ): Promise<void> {
+    try {
+      const title = await this.notes.title(notePath);
+      if (title) {
+        this.conversations.setTitle(conversationId, conversationTitle(title));
+      }
+    } catch (error) {
+      this.log.warn({ err: error, notePath }, "could not name a session after its note");
+    }
+    await this.notes.markInProgress(notePath);
   }
 
   cancelTask(taskId: string): boolean {
@@ -172,33 +213,46 @@ export class Orchestrator {
     opts: TaskOptions = {}
   ): Promise<void> {
     const startedAt = Date.now();
-    const conversation = this.conversations.get(conversationId);
     const messageId = newId("msg");
 
     this.bus.publish("task.started", { conversationId, prompt }, taskId);
     this.bus.publish("agent.status", { status: "working" }, taskId);
 
-    // The current user turn is already persisted (added on enqueue), so it is
-    // the last user message — drop it and keep a short recent tail as the
-    // retrieval anchor for follow-ups that omit the subject.
-    const userTurns = this.conversations
+    // The current user turn is already persisted (added on enqueue). Exclude
+    // it by task id and retain the prior exchange, including the assistant's
+    // answer: "fix the gap" often refers to a gap named only in that answer.
+    const priorTurns = this.conversations
       .getMessages(conversationId)
-      .filter((m) => m.role === "user")
-      .map((m) => m.text);
-    const priorPrompts = userTurns.slice(0, -1).slice(-3);
+      .filter(
+        (message) =>
+          message.taskId !== taskId &&
+          (message.role === "user" || message.role === "assistant")
+      )
+      .slice(-4)
+      .map((message) => ({
+        role: message.role as "user" | "assistant",
+        text: message.text,
+      }));
 
     const ctx: TaskContext = {
       taskId,
       conversationId,
       prompt,
-      priorPrompts,
+      priorTurns,
       messageId,
       opts,
       abort,
-      sdkSessionId: conversation?.sdkSessionId ?? null,
-      onSdkSessionId: (sid) =>
-        this.conversations.setSdkSessionId(conversationId, sid),
+      // Replaced by the real lock in the pipeline's first step; unlocked
+      // is the safe default if that step ever fails.
+      scope: EMPTY_SCOPE,
+      // Cross-task continuity is Atelier-owned context, not a provider-native
+      // session id. streamSession may still keep an in-memory id for the same
+      // Claude task so validation/review repair rounds can continue cleanly.
+      sdkSessionId: null,
+      onSdkSessionId: () => undefined,
       collectedText: "",
+      nudges: 0,
+      record: newTaskRecord(),
     };
 
     try {
@@ -207,15 +261,27 @@ export class Orchestrator {
         status: "completed",
         startedAt,
       });
+      await this.writeNoteReport(ctx, {
+        status: "completed",
+        assistantText: outcome.assistantText,
+        startedAt,
+      });
     } catch (error) {
       if (abort.signal.aborted) {
         this.planTracker.cancelPending(taskId);
+        await this.rememberInterrupted(ctx, "cancelled");
         this.finishTask(taskId, conversationId, messageId, ctx.collectedText, {
           status: "cancelled",
           startedAt,
         });
+        await this.writeNoteReport(ctx, {
+          status: "cancelled",
+          assistantText: ctx.collectedText,
+          startedAt,
+        });
         return;
       }
+      await this.rememberInterrupted(ctx, "error");
       if (isAuthError(error)) {
         this.bus.publish(
           "agent.status",
@@ -236,6 +302,83 @@ export class Orchestrator {
       this.running.delete(taskId);
       this.planTracker.clear(taskId);
       this.publishGlobalStatus();
+      await this.writeNoteReport(ctx, {
+        status: "error",
+        assistantText: ctx.collectedText,
+        startedAt,
+        errorMessage: message,
+      });
+    }
+  }
+
+  /**
+   * Appends this run's record to the note that drove it, and moves the note
+   * to `review` when the run finished. Runs AFTER the task has been reported
+   * as done: the narrative pass costs a model call, and no user should wait
+   * on a side record to learn their task is over.
+   *
+   * The plan steps come from ctx.record rather than the tracker — the
+   * tracker entry is cleared as the task finishes, and the record already
+   * carries the live statuses the summary stage copied into it.
+   */
+  private async writeNoteReport(
+    ctx: TaskContext,
+    outcome: {
+      status: "completed" | "cancelled" | "error";
+      assistantText: string;
+      startedAt: number;
+      errorMessage?: string;
+    }
+  ): Promise<void> {
+    const notePath = ctx.opts.promptFile;
+    if (!notePath) return;
+    const record = ctx.record;
+    try {
+      await this.notes.writeReport(
+        notePath,
+        {
+          taskId: ctx.taskId,
+          status: outcome.status,
+          request: ctx.prompt,
+          intentKind: record.intentKind || "task",
+          intentSummary: record.intentSummary,
+          planGoal: record.planGoal,
+          steps: record.steps,
+          changedFiles: [...record.changedFiles],
+          validation: record.validation,
+          reviewVerdict: record.reviewVerdict,
+          durationMs: Date.now() - outcome.startedAt,
+          at: Date.now(),
+          assistantText: outcome.assistantText,
+          errorMessage: outcome.errorMessage,
+        },
+        { model: ctx.opts.model, effort: ctx.opts.effort }
+      );
+    } catch (error) {
+      this.log.warn(
+        { err: error, taskId: ctx.taskId, notePath },
+        "could not write the task report to its note"
+      );
+    }
+  }
+
+  /**
+   * A cancelled or crashed task still did work, and the next turn is often
+   * "continue" on a different model. Writing its memory here is what keeps
+   * that continuation possible — but it must never mask the original failure,
+   * so a storage problem is logged and swallowed.
+   */
+  private async rememberInterrupted(
+    ctx: TaskContext,
+    status: "cancelled" | "error"
+  ): Promise<void> {
+    try {
+      await this.pipeline.saveInterruptedSummary(ctx, status);
+    } catch (error) {
+      this.log.warn(
+        { err: error, taskId: ctx.taskId },
+        "could not save interrupted task summary"
+      );
     }
   }
 
@@ -288,6 +431,8 @@ export class Orchestrator {
 const PINNED_TOPICS = new Set([
   "diff.created",
   "knowledge.retrieved",
+  "session.recalled",
+  "skills.selected",
   "impact.radius",
   "edit.impact",
 ]);
@@ -307,6 +452,21 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
       const chunks = Array.isArray(payload.chunks) ? payload.chunks.length : 0;
       return `Retrieved ${chunks} chunk(s) · ${String(payload.strategy ?? "")}`;
     }
+    case "session.recalled":
+      return sessionRecalledSummary(payload);
+    case "skills.selected": {
+      const skills = Array.isArray(payload.skills) ? payload.skills : [];
+      const names = skills
+        .map((skill) =>
+          typeof skill === "object" && skill && "name" in skill
+            ? String((skill as { name?: unknown }).name ?? "")
+            : ""
+        )
+        .filter(Boolean);
+      return names.length > 0
+        ? `Using skills: ${names.map((name) => `/${name}`).join(", ")}`
+        : "No task skills selected";
+    }
     case "impact.radius":
       return String(payload.summary ?? "Impact radius computed");
     case "edit.impact": {
@@ -318,4 +478,26 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
     default:
       return "";
   }
+}
+
+/**
+ * What the turn remembered, in one line. Mirrors the same function in
+ * apps/web/src/services/event-dispatcher.ts so the pinned history text
+ * matches what the console showed live.
+ */
+function sessionRecalledSummary(payload: Record<string, unknown>): string {
+  const chunks = Number(payload.chunks ?? 0);
+  const summaries = Number(payload.summaries ?? 0);
+  const turns = Number(payload.turns ?? 0);
+  const tokens = Number(payload.tokens ?? 0);
+  const labels = Array.isArray(payload.labels)
+    ? payload.labels.map(String).filter(Boolean)
+    : [];
+  const parts: string[] = [];
+  if (chunks > 0) parts.push(`${chunks} memory chunk(s)`);
+  if (summaries > 0) parts.push(`${summaries} task summary(ies)`);
+  if (turns > 0) parts.push(`${turns} prior turn(s)`);
+  const head = parts.length > 0 ? parts.join(" · ") : "nothing to recall";
+  const tail = labels.length > 0 ? ` — ${labels.join("; ")}` : "";
+  return `Recalled session: ${head} · ~${tokens} tok${tail}`;
 }

@@ -205,6 +205,9 @@ body {
 .chat-md code {
   @apply rounded bg-muted px-1 py-0.5 text-[0.85em];
   font-family: var(--font-mono);
+  /* Long URLs and paths in inline code have no spaces to wrap at, so they
+     would otherwise stretch the transcript wider than its column. */
+  overflow-wrap: anywhere;
 }
 .chat-md pre code {
   @apply bg-transparent p-0;

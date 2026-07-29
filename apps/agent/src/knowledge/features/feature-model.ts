@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Feature } from "@atelier/protocol";
+import { runOneShot } from "../../providers/one-shot.js";
 import type { Db } from "../../storage/db.js";
 import type { EventBus } from "../../events/event-bus.js";
 import type { Embedder } from "../embeddings/embedder.js";
@@ -31,6 +31,7 @@ export class FeatureModelService {
   private embedder: Embedder | null = null;
   private vectors: VectorStore | null = null;
   private isBusy: () => boolean = () => false;
+  private selectedModel: () => string | undefined = () => undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
   private working = false;
   private stopped = false;
@@ -47,6 +48,11 @@ export class FeatureModelService {
 
   setBusyProbe(isBusy: () => boolean): void {
     this.isBusy = isBusy;
+  }
+
+  /** Follows the user's model choice for the tool-less summary calls. */
+  setModelSelector(selectedModel: () => string | undefined): void {
+    this.selectedModel = selectedModel;
   }
 
   /** Kick background seeding (when empty) + the stale-refresh loop. */
@@ -377,26 +383,21 @@ export class FeatureModelService {
     }
   }
 
+  /**
+   * Tool-less summary turn, routed by provider. json:true lets the Ollama
+   * daemon constrain the output — local models are far likelier to wrap
+   * JSON in prose than Claude is, and this stage parses what comes back.
+   */
   private async shortSdkCall(prompt: string): Promise<string> {
-    const stream = query({
+    return runOneShot({
+      model: this.selectedModel(),
+      claudeFallback: MODEL,
+      system:
+        "You summarize code modules as product features. Reply with " +
+        "ONLY valid JSON, no prose.",
       prompt,
-      options: {
-        systemPrompt:
-          "You summarize code modules as product features. Reply with " +
-          "ONLY valid JSON, no prose.",
-        model: MODEL,
-        maxTurns: 1,
-        disallowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-        strictMcpConfig: true,
-        settingSources: [],
-      },
+      json: true,
     });
-    let text = "";
-    for await (const message of stream) {
-      const m = message as Record<string, unknown>;
-      if (m.type === "result" && typeof m.result === "string") text = m.result;
-    }
-    return text;
   }
 
   private async waitWhileBusy(): Promise<void> {

@@ -14,6 +14,14 @@ export class IndexGeneration {
     });
   }
 
+  /**
+   * Invalidate explicitly, for writers that change what retrieval can return
+   * without touching a file — session memory is the one that matters.
+   */
+  bump(): void {
+    this.generation += 1;
+  }
+
   get current(): number {
     return this.generation;
   }

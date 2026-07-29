@@ -11,6 +11,7 @@ import {
   Loader2,
   ShieldAlert,
   Sparkles,
+  Square,
   Wand2,
   X,
 } from "lucide-react";
@@ -409,8 +410,13 @@ function PrConflictsStage({ vm }: { vm: GitFlowViewModel }) {
         <span className="font-mono">{flow.prBase}</span>:
       </p>
       <ul className="max-h-32 space-y-0.5 overflow-y-auto">
+        {/* break-all for the same reason as the plan card: a repo-relative
+            path has no space to wrap at, so it runs past the modal. */}
         {flow.conflicts.map((f) => (
-          <li key={f} className="font-mono text-[11px] text-muted-foreground">
+          <li
+            key={f}
+            className="break-all font-mono text-[11px] text-muted-foreground"
+          >
             {f}
           </li>
         ))}
@@ -547,6 +553,7 @@ function FixChat({
 }) {
   const [prompt, setPrompt] = useState("");
   const working = session?.status === "working";
+  const cancelling = session?.cancelling ?? false;
   const hasRun = (session?.items.length ?? 0) > 0;
   const reRunLabel = RERUN_LABELS[vm.flow.stage] ?? "Re-run";
   const { ref: listRef, onScroll } = useStickToBottom<HTMLDivElement>([
@@ -617,19 +624,44 @@ function FixChat({
         disabled={working}
       />
       <div className="flex gap-2">
-        <Button size="sm" disabled={working} onClick={doFix}>
-          {working ? (
-            <>
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              Fixing…
-            </>
-          ) : (
-            <>
-              <Wand2 className="mr-1.5 h-3.5 w-3.5" />
-              {hasRun ? "Fix again" : "Fix with AI"}
-            </>
-          )}
-        </Button>
+        {working ? (
+          // A running fix is stoppable, not just observable: the button
+          // that showed a dead spinner now IS the stop control, so a fix
+          // heading the wrong way can be killed without closing the wizard.
+          // Same idiom as the composer — destructive square, then a
+          // "Stopping…" spinner until the task really ends.
+          <Tooltip
+            content={
+              cancelling
+                ? "Stopping — finishing the current step"
+                : "Stop the fix"
+            }
+          >
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={cancelling}
+              onClick={() => vm.cancelFix()}
+            >
+              {cancelling ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  Stopping…
+                </>
+              ) : (
+                <>
+                  <Square className="mr-1.5 h-3 w-3 fill-current" />
+                  Stop
+                </>
+              )}
+            </Button>
+          </Tooltip>
+        ) : (
+          <Button size="sm" onClick={doFix}>
+            <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+            {hasRun ? "Fix again" : "Fix with AI"}
+          </Button>
+        )}
         {hasRun && !working && (
           <Button size="sm" variant="secondary" onClick={() => void vm.reRunAfterFix()}>
             {reRunLabel}

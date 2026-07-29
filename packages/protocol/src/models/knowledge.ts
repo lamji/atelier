@@ -91,7 +91,7 @@ export type Lesson = z.infer<typeof Lesson>;
 export const RetrievedChunk = z.object({
   id: z.number(),
   path: z.string(),
-  kind: z.enum(["code", "doc", "feature-summary", "lesson"]),
+  kind: z.enum(["code", "doc", "feature-summary", "lesson", "session-memory"]),
   score: z.number(),
   preview: z.string(),
   startRow: z.number().optional(),

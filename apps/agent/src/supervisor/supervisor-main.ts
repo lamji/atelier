@@ -113,9 +113,13 @@ function main(): void {
   const supervisor = new AgentSupervisor(registry, bus, makeLauncher(log), log);
 
   // Optionally auto-register + start a first project (the launching cwd).
+  // Its id is reported by projects.list so the UI opens the project this
+  // instance was launched for, rather than whichever was used last time.
   const initial = process.env.ATELIER_INITIAL_PROJECT;
+  let initialId: string | undefined;
   if (initial) {
     const record = registry.add(initial);
+    initialId = record.id;
     void supervisor.start(record.id).catch((error) => {
       log.error({ err: error }, "failed to start initial project");
     });
@@ -146,7 +150,10 @@ function main(): void {
       authStatus: "idle" as const,
     };
   });
-  router.register("projects.list", () => ({ projects: supervisor.list() }));
+  router.register("projects.list", () => ({
+    projects: supervisor.list(),
+    initialId,
+  }));
   router.register("projects.add", (params) => {
     const record = registry.add(params.path);
     const project = supervisor.info(record.id);

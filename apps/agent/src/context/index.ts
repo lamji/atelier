@@ -5,6 +5,7 @@ export * from "./budget/index.js";
 export * from "./cache/index.js";
 export * from "./dedup/index.js";
 export * from "./summaries/index.js";
+export * from "./session/index.js";
 export * from "./rank/index.js";
 export * from "./render/index.js";
 export * from "./assemble/index.js";

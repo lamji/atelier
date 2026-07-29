@@ -1,4 +1,5 @@
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { execa } from "execa";
 import type { PathGuard } from "../workspace/path-guard.js";
 import type { ToolRegistry } from "./registry.js";
@@ -87,10 +88,23 @@ export function registerTerminalTools(
         cwd,
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         cancelSignal: ctx.signal,
+        forceKillAfterDelay: 1000,
         reject: false,
         all: true,
         env: { ...process.env, FORCE_COLOR: "0" },
       });
+      const killTree = () => {
+        if (process.platform === "win32" && child.pid) {
+          spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            windowsHide: true,
+            stdio: "ignore",
+          }).unref();
+        } else {
+          child.kill("SIGTERM");
+        }
+      };
+      if (ctx.signal.aborted) killTree();
+      else ctx.signal.addEventListener("abort", killTree, { once: true });
 
       let output = "";
       child.all?.on("data", (chunk: Buffer) => {
@@ -99,14 +113,18 @@ export function registerTerminalTools(
         ctx.emitOutput(text);
       });
 
-      const result = await child;
-      const truncated = output.length > MAX_OUTPUT;
-      return {
-        exitCode: result.exitCode ?? null,
-        output: truncated ? output.slice(-MAX_OUTPUT) : output,
-        truncated,
-        timedOut: result.timedOut ?? false,
-      };
+      try {
+        const result = await child;
+        const truncated = output.length > MAX_OUTPUT;
+        return {
+          exitCode: result.exitCode ?? null,
+          output: truncated ? output.slice(-MAX_OUTPUT) : output,
+          truncated,
+          timedOut: result.timedOut ?? false,
+        };
+      } finally {
+        ctx.signal.removeEventListener("abort", killTree);
+      }
     }
   );
 }

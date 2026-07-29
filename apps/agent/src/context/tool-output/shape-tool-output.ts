@@ -1,6 +1,7 @@
 import { shapeDefault } from "./shapers/shape-default.js";
 import { shapeGraph } from "./shapers/shape-graph.js";
 import { shapeImpact } from "./shapers/shape-impact.js";
+import { shapeListDir } from "./shapers/shape-list-dir.js";
 import { shapeReadFile } from "./shapers/shape-read-file.js";
 import { shapeRetrieval } from "./shapers/shape-retrieval.js";
 import { shapeTerminal } from "./shapers/shape-terminal.js";
@@ -33,9 +34,12 @@ function shaperFor(tool: string): Shaper | undefined {
     case "impact_of_edit":
     case "analyze_impact":
       return shapeImpact;
+    case "list_dir":
+      return shapeListDir;
     case "run_terminal":
       return shapeTerminal;
     case "read_file":
+    case "read_many_files":
       return shapeReadFile;
     default:
       return undefined;

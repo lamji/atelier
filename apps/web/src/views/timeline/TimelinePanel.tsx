@@ -7,6 +7,8 @@ import {
   FileDiff,
   FileText,
   GitBranch,
+  FolderLock,
+  History,
   ListChecks,
   Network,
   Play,
@@ -86,6 +88,8 @@ function styleFor(topic: string): TopicStyle {
   if (topic === "intent.resolved" || topic === "impact.analyzed") {
     return { icon: Network, tone: "primary" };
   }
+  if (topic === "session.recalled") return { icon: History, tone: "primary" };
+  if (topic === "scope.locked") return { icon: FolderLock, tone: "primary" };
   if (topic === "task.completed") return { icon: CheckCircle2, tone: "success" };
   if (topic === "task.started") return { icon: Play, tone: "primary" };
   if (topic.startsWith("tool.")) return { icon: Wrench, tone: "primary" };
@@ -177,6 +181,20 @@ function summarize(entry: TimelineEntryVm): string {
     case "knowledge.retrieved": {
       const chunks = Array.isArray(p.chunks) ? p.chunks.length : 0;
       return `${String(p.strategy)} · ${chunks} chunks`;
+    }
+    case "scope.locked": {
+      const roots = Array.isArray(p.roots) ? p.roots.map(String) : [];
+      if (roots.length === 0) return "no scope lock";
+      const repo = typeof p.repo === "string" && p.repo ? ` · git: ${p.repo}` : "";
+      return `${roots.map((r) => `${r}/`).join(", ")}${repo}`;
+    }
+    case "session.recalled": {
+      const labels = Array.isArray(p.labels) ? p.labels.map(String) : [];
+      const head =
+        `${Number(p.chunks ?? 0)} memory chunk(s) · ` +
+        `${Number(p.summaries ?? 0)} summary(ies) · ` +
+        `${Number(p.turns ?? 0)} turn(s) · ~${Number(p.tokens ?? 0)} tok`;
+      return labels.length > 0 ? `${head} — ${labels.join("; ")}` : head;
     }
     case "impact.analyzed": {
       const files = Array.isArray(p.affectedFiles) ? p.affectedFiles.length : 0;

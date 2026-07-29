@@ -27,12 +27,14 @@ import { CloneScanner } from "../src/knowledge/impact/clone-scan.js";
 import { companionFilesFor } from "../src/knowledge/impact/companion-files.js";
 import {
   extractVerdict,
+  retryBudget,
   withoutVerdictLine,
 } from "../src/orchestrator/pipeline-executor.js";
 import {
   buildReviewFixPrompt,
   buildReviewPrompt,
 } from "../src/orchestrator/review-prompt.js";
+import { touchesCode } from "../src/orchestrator/change-scale/index.js";
 import pino from "pino";
 
 /** The file the task "fixed" — expiry reshuffle with the separator stripped. */
@@ -223,15 +225,53 @@ async function main(): Promise<void> {
     );
   }
 
-  // The prompt must keep asking for the exact line the parser reads.
+  // The prompt must keep asking for the exact line the parser reads, and
+  // must carry the yardstick the reviewer judges against. Without the
+  // request in the prompt the reviewer grades an imaginary ideal PR and
+  // fails changes for work nobody asked for.
+  const reviewPrompt = buildReviewPrompt({
+    changedFiles: [changed],
+    similar: [],
+    companionFiles: [],
+    request: "add the allow-origin value to the backend env file",
+    constraints: ["direct fix"],
+  });
   check(
     "prompt still requests the VERDICT_JSON line",
-    buildReviewPrompt({
-      changedFiles: [changed],
-      similar: [],
-      companionFiles: [],
-    }).includes("VERDICT_JSON")
+    reviewPrompt.includes("VERDICT_JSON")
   );
+  check(
+    "prompt carries the user's request as the yardstick",
+    reviewPrompt.includes("add the allow-origin value to the backend env file")
+  );
+  check(
+    "prompt carries the user's scope limits",
+    reviewPrompt.includes("direct fix")
+  );
+  check(
+    "prompt rules out-of-scope work off the finding list",
+    /NOT A FINDING/i.test(reviewPrompt) &&
+      /repo hygiene/i.test(reviewPrompt)
+  );
+
+  // --- review depth follows the change ------------------------------------
+  const inertCases: Array<{ paths: string[]; code: boolean }> = [
+    { paths: ["apps/backend/.env"], code: false },
+    { paths: ["apps/backend/.env", "apps/backend/.env.example"], code: false },
+    { paths: ["README.md", "docs/setup.md", "public/logo.svg"], code: false },
+    { paths: ["pnpm-lock.yaml", ".gitignore"], code: false },
+    { paths: ["apps/backend/.env", "apps/backend/main.go"], code: true },
+    { paths: ["src/app.component.ts"], code: true },
+    { paths: ["tsconfig.json"], code: true },
+    { paths: ["Dockerfile"], code: true },
+    { paths: [], code: false },
+  ];
+  for (const c of inertCases) {
+    check(
+      `touchesCode(${c.paths.join(", ") || "nothing"}) === ${c.code}`,
+      touchesCode(c.paths) === c.code
+    );
+  }
 
   // --- the machine line never reaches the transcript --------------------
   const report =
@@ -281,6 +321,39 @@ async function main(): Promise<void> {
 
   await embedder.shutdown().catch(() => undefined);
   db.close();
+  // --- review speed: inlined diff and a size-scaled retry budget ---
+  const base = {
+    changedFiles: ["src/a.ts"],
+    similar: [],
+    companionFiles: [],
+    request: "fix the parser",
+    constraints: [],
+  };
+  const patch = "--- a/src/a.ts\n+++ b/src/a.ts\n@@\n-const x = 1;\n+const x = 2;";
+  const withDiff = buildReviewPrompt({ ...base, diff: patch });
+  check("inlined diff carries the patch", withDiff.includes("+const x = 2;"));
+  check(
+    "inlined diff tells the reviewer not to re-fetch it",
+    withDiff.includes("do not call the git tool")
+  );
+  const noDiff = buildReviewPrompt(base);
+  check(
+    "no diff falls back to fetching it",
+    noDiff.includes('git tool, action "diff"') && !noDiff.includes("```diff")
+  );
+  const huge = buildReviewPrompt({ ...base, diff: "x".repeat(40000) });
+  check(
+    "oversized diff is not inlined",
+    !huge.includes("```diff") && huge.includes("Read it in pieces")
+  );
+  // The checklist has to survive every branch — it is what the verdict parses.
+  for (const [name, text] of [["inlined", withDiff], ["fallback", noDiff], ["large", huge]] as const) {
+    check(`${name} prompt keeps the verdict contract`, text.includes("VERDICT_JSON"));
+  }
+  check("2-file change gets one repair round", retryBudget(2) === 1);
+  check("5-file change gets two", retryBudget(5) === 2);
+  check("wide change keeps the full budget", retryBudget(20) === 3);
+
   // The ONNX runtime can still hold handles on Windows; cleanup is
   // best-effort and must never fail the run.
   for (const dir of [root, dataDir]) {
