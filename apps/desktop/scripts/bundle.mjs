@@ -1,11 +1,13 @@
 // Bundles the Electron main and preload entrypoints with esbuild.
 // Usage: node scripts/bundle.mjs [--watch]
 import * as esbuild from "esbuild";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const watch = process.argv.includes("--watch");
+const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
 /** @type {import("esbuild").BuildOptions} */
 const common = {
@@ -15,6 +17,9 @@ const common = {
   target: "node20",
   sourcemap: true,
   external: ["electron"],
+  define: {
+    "process.env.ATELIER_APP_VERSION": JSON.stringify(pkg.version),
+  },
   logLevel: "info",
   outdir: path.join(root, "dist"),
   outExtension: { ".js": ".cjs" },
