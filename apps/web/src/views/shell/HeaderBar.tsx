@@ -2,13 +2,12 @@ import { motion } from "framer-motion";
 import {
   Activity,
   FileCode2,
-  FolderGit2,
   MessageSquare,
   TerminalSquare,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { RightTab } from "@/state/workspace.store";
-import { useProjectsStore } from "@/state/projects.store";
+import { ProjectSwitcher } from "./ProjectSwitcher";
 
 export interface HeaderBarProps {
   workingCount: number;
@@ -29,9 +28,6 @@ interface TabDef {
  * Terminal / Activity) on the right, controlling the right dock.
  */
 export function HeaderBar(props: HeaderBarProps) {
-  const active = useProjectsStore((s) =>
-    s.projects.find((p) => p.id === s.activeId)
-  );
   const tabs: TabDef[] = [
     { id: "chat", label: "Chat", icon: MessageSquare },
     { id: "editor", label: "Editor", icon: FileCode2 },
@@ -64,12 +60,9 @@ export function HeaderBar(props: HeaderBarProps) {
         )}
       </div>
 
-      {active && (
-        <div className="ml-2 flex h-8 items-center gap-2 rounded-lg bg-accent/60 px-2.5 text-xs font-medium">
-          <FolderGit2 className="h-4 w-4 text-muted-foreground" />
-          <span className="max-w-[160px] truncate">{active.name}</span>
-        </div>
-      )}
+      <div className="ml-2">
+        <ProjectSwitcher />
+      </div>
 
       <nav className="ml-auto flex items-center gap-1">
         {tabs.map((tab) => (
