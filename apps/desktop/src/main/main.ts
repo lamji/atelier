@@ -1,8 +1,9 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import { createMainWindow } from "./window";
-import { resolveStartUrl } from "./resolve-url";
+import { devUrl, hubUrl, workspaceFromArgv } from "./resolve-url";
 import { registerIpcHandlers } from "./ipc";
 import { installAppMenu } from "./menu";
+import { ensureBackend, hasPackagedBackend, stopBackend } from "./backend";
 
 const MISSING_URL_PAGE =
   "data:text/html;charset=utf-8," +
@@ -41,12 +42,35 @@ if (!hasLock) {
   });
 }
 
+async function resolveStartUrl(): Promise<string | null> {
+  const dev = devUrl();
+  if (dev) return dev;
+  if (!hasPackagedBackend()) return null;
+  const workspace = workspaceFromArgv(process.argv);
+  const backend = await ensureBackend(workspace);
+  return hubUrl(backend.hubPort, workspace);
+}
+
 async function start(): Promise<void> {
   const win = createMainWindow();
-  const url = resolveStartUrl();
-  await win.loadURL(url ?? MISSING_URL_PAGE);
+  try {
+    const url = await resolveStartUrl();
+    await win.loadURL(url ?? MISSING_URL_PAGE);
+  } catch (error) {
+    dialog.showErrorBox(
+      "Atelier failed to start",
+      error instanceof Error ? error.message : String(error),
+    );
+    await win.loadURL(MISSING_URL_PAGE);
+  }
 }
 
 app.on("window-all-closed", () => {
   app.quit();
+});
+
+// Only stops a supervisor this process spawned; a CLI-owned one is left
+// running, matching `atelier run` semantics.
+app.on("will-quit", () => {
+  stopBackend();
 });
