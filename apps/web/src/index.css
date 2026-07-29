@@ -85,6 +85,14 @@ body,
   height: 100%;
 }
 
+/* Frameless desktop window drag regions (no-ops in the browser). */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
 body {
   @apply text-foreground antialiased;
   font-family: var(--font-sans);

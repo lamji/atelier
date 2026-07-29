@@ -1,7 +1,8 @@
 import { useEffect, useMemo } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence } from "framer-motion";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { HeaderBar } from "./HeaderBar";
+import { TitleBar } from "./TitleBar";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
 import { StatusBar } from "./StatusBar";
 import { ConnectionGate } from "./ConnectionGate";
@@ -38,28 +39,7 @@ import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import { cn } from "@/lib/cn";
-
-function Island(props: {
-  children: React.ReactNode;
-  className?: string;
-  delay?: number;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 14, scale: 0.985 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{
-        type: "spring",
-        stiffness: 260,
-        damping: 26,
-        delay: props.delay ?? 0,
-      }}
-      className={cn("island h-full", props.className)}
-    >
-      {props.children}
-    </motion.div>
-  );
-}
+import { isDesktop } from "@/lib/desktop";
 
 /**
  * Single-console layout: header tabs (Chat / Editor / Terminal / Activity)
@@ -160,35 +140,42 @@ export function AppShell() {
     [sessions.error]
   );
 
+  const headerBar = (
+    <HeaderBar
+      workingCount={sessions.workingCount}
+      rightTab={editor.rightTab}
+      terminalCount={terminal.sessions.length}
+      onSelectTab={editor.setRightTab}
+    />
+  );
+
   return (
-    <div className="flex h-full flex-col gap-2 p-2">
-      <Island className="h-12 shrink-0" delay={0}>
-        <HeaderBar
-          workingCount={sessions.workingCount}
-          rightTab={editor.rightTab}
-          terminalCount={terminal.sessions.length}
-          onSelectTab={editor.setRightTab}
-        />
-      </Island>
-      <div className="flex min-h-0 flex-1 gap-2">
-        <Island className="w-[56px] shrink-0" delay={0.03}>
+    <div className="flex h-full flex-col bg-background">
+      {isDesktop() ? (
+        <TitleBar>{headerBar}</TitleBar>
+      ) : (
+        <div className="h-[var(--titlebar-h)] shrink-0 border-b border-border bg-card">
+          {headerBar}
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1">
+        <div className="w-[var(--activitybar-w)] shrink-0 border-r border-border bg-card">
           <ActivityBar
             active={activeView}
             theme={theme}
             onSelect={setActiveView}
             onToggleTheme={toggle}
           />
-        </Island>
+        </div>
         <PanelGroup direction="horizontal" className="min-w-0 flex-1">
           <Panel defaultSize={22} minSize={15}>
-            <Island delay={0.06}>{leftPanel}</Island>
+            <div className="h-full border-r border-border bg-card">
+              {leftPanel}
+            </div>
           </Panel>
-          <PanelResizeHandle className="w-2" />
+          <PanelResizeHandle className="w-[3px] bg-transparent transition-colors hover:bg-primary/40 data-[resize-handle-active]:bg-primary/60" />
           <Panel defaultSize={78} minSize={40}>
-            <Island
-              delay={0.12}
-              className={cn("relative", busy && "glow-working")}
-            >
+            <div className={cn("relative h-full", busy && "glow-working")}>
               <AnimatePresence>
                 {showIndexingWelcome && (
                   <IndexingWelcome
@@ -220,7 +207,7 @@ export function AppShell() {
                 ragVm={rag}
                 appTheme={theme}
               />
-            </Island>
+            </div>
           </Panel>
         </PanelGroup>
       </div>
@@ -230,7 +217,7 @@ export function AppShell() {
       <DbApprovalModal vm={dbApproval} />
       {/* Blocks the whole viewport while there is no live agent behind it. */}
       <ConnectionGate vm={gate} />
-      <Island className="h-8 shrink-0" delay={0.2}>
+      <div className="h-[var(--statusbar-h)] shrink-0 border-t border-border bg-card">
         <StatusBar
           connection={connection.state}
           agentStatus={connection.agentStatus}
@@ -243,7 +230,7 @@ export function AppShell() {
           indexing={knowledge.indexing}
           lastIndexedAt={knowledge.stats?.lastIndexedAt ?? null}
         />
-      </Island>
+      </div>
     </div>
   );
 }

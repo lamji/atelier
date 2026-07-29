@@ -6,10 +6,18 @@ import { wireMaximizedEvents } from "./ipc";
 
 const DARK_BACKGROUND = "#09090b";
 
+// Frameless with a renderer-drawn title bar on Windows/Linux; macOS keeps
+// native traffic lights over the drag region.
+const frameOptions: Electron.BrowserWindowConstructorOptions =
+  process.platform === "darwin"
+    ? { titleBarStyle: "hiddenInset" }
+    : { frame: false };
+
 export function createMainWindow(): BrowserWindow {
   const state = loadWindowState();
 
   const win = new BrowserWindow({
+    ...frameOptions,
     width: state.bounds?.width ?? 1440,
     height: state.bounds?.height ?? 900,
     x: state.bounds?.x,
