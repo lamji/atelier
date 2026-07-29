@@ -6,6 +6,7 @@ import { workspaceActivity } from "./workspace-activity.js";
 import { useProjectsStore } from "@/state/projects.store";
 import { usePreferencesStore } from "@/state/preferences.store";
 import { resetWorkspaceStores } from "@/state/reset";
+import { isDesktop } from "@/lib/desktop";
 
 let hubStarted = false;
 
@@ -62,6 +63,11 @@ async function loadAndAutoSelect(): Promise<void> {
         // fall through to the normal auto-select below
       }
     }
+
+    // Desktop: never auto-open a workspace. The welcome screen appears
+    // immediately and the user opens or imports a project themselves —
+    // no spinner, no "connecting" limbo on boot.
+    if (isDesktop()) return;
 
     const target = pickInitial(projects, initialId);
     if (target) await switchProject(target.id);

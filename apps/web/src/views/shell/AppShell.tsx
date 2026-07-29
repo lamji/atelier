@@ -12,6 +12,7 @@ import { BottomPanel } from "./BottomPanel";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
 import { StatusBar } from "./StatusBar";
 import { ConnectionGate } from "./ConnectionGate";
+import { WelcomeScreen } from "./WelcomeScreen";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
@@ -285,6 +286,9 @@ export function AppShell() {
       <GitFlowHost />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />
+      {/* Desktop-only: instant open/import screen while no workspace is
+          selected. Sits under the gate so real failures still win. */}
+      <WelcomeScreen />
       {/* Blocks the whole viewport while there is no live agent behind it. */}
       <ConnectionGate vm={gate} />
       <div className="h-[var(--statusbar-h)] shrink-0 border-t border-border bg-card">

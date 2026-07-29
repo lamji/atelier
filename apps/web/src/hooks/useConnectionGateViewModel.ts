@@ -3,6 +3,7 @@ import { retryConnection } from "@/services/project-switch";
 import { useConnectionStore } from "@/state/connection.store";
 import { useProjectsStore } from "@/state/projects.store";
 import type { ConnectionState } from "@/types";
+import { isDesktop } from "@/lib/desktop";
 
 /** Why the workspace is unusable right now, outermost failure first. */
 export type GateReason =
@@ -59,7 +60,9 @@ function deriveTrouble(s: Signals): Trouble | null {
   if (s.hub === "disconnected") return "supervisor-down";
   if (isDialling(s.hub)) return "dialling";
   if (s.bootstrapping || s.switching) return "dialling";
-  if (!s.hasProject) return "no-project";
+  // Desktop has its own full-screen welcome (open / import a project);
+  // the terminal-instruction gate is for the browser build only.
+  if (!s.hasProject) return isDesktop() ? null : "no-project";
   if (s.projectStatus === "error") return "agent-error";
   if (s.projectStatus === "starting") return "dialling";
   if (isDialling(s.bridge)) return "dialling";

@@ -8,6 +8,7 @@
 // semantics — INIT_CWD is forwarded exactly like the root runner expects.
 import { spawn, execSync } from "node:child_process";
 import { createRequire } from "node:module";
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,14 @@ const DEFAULT_HUB_PORT = 43100;
 const DEFAULT_WEB_PORT = 5173;
 const PORT_SCAN_SPAN = 100;
 const WEB_READY_TIMEOUT_MS = 60_000;
+// esbuild writes main/preload (and their maps) in a burst; coalesce them into
+// one restart. The second delay lets the OS release the window first.
+const REBUILD_DEBOUNCE_MS = 200;
+// Long enough for the dying process to release the single-instance lock;
+// the replacement would otherwise quit on startup instead of taking over.
+const RESPAWN_DELAY_MS = 400;
+// A window that dies this fast never really opened.
+const INSTANT_EXIT_MS = 3000;
 const isWindows = process.platform === "win32";
 
 /** @type {import("node:child_process").ChildProcess[]} */
@@ -134,23 +143,85 @@ await waitFor(stack, "vite", webPort, WEB_READY_TIMEOUT_MS);
 const require = createRequire(import.meta.url);
 const electronBinary = require("electron");
 
-console.log(`[desktop] launching Electron -> http://localhost:${webPort}`);
-const electron = spawn(
-  String(electronBinary),
-  [path.join(desktopRoot, "dist", "main.cjs")],
-  {
-    cwd: desktopRoot,
-    stdio: ["ignore", "inherit", "inherit"],
-    env: {
-      ...process.env,
-      ATELIER_DEV_URL: `http://localhost:${webPort}`,
+/** @type {import("node:child_process").ChildProcess | null} */
+let electron = null;
+// True only across an intentional kill, so the exit handler can tell a
+// rebuild restart from the user closing the window.
+let restarting = false;
+
+function startElectron() {
+  console.log(`[desktop] launching Electron -> http://localhost:${webPort}`);
+  const child = spawn(
+    String(electronBinary),
+    [path.join(desktopRoot, "dist", "main.cjs")],
+    {
+      cwd: desktopRoot,
+      stdio: ["ignore", "inherit", "inherit"],
+      env: {
+        ...process.env,
+        ATELIER_DEV_URL: `http://localhost:${webPort}`,
+      },
     },
-  },
-);
-children.push(electron);
-electron.on("exit", (code) => {
-  if (!shuttingDown) {
+  );
+  children.push(child);
+  electron = child;
+  const spawnedAt = Date.now();
+  child.on("exit", (code) => {
+    const index = children.indexOf(child);
+    if (index !== -1) children.splice(index, 1);
+    if (shuttingDown || restarting) return;
+    // Electron holds a single-instance lock: a leftover window from a dev
+    // run whose parent was killed makes every new one quit on startup. That
+    // looks identical to "the user closed the window", so name it.
+    if (Date.now() - spawnedAt < INSTANT_EXIT_MS) {
+      console.error(
+        "[desktop] Electron quit immediately — another Atelier window is\n" +
+          "          probably still running and holding the single-instance\n" +
+          "          lock. Close it (or kill the leftover electron process)\n" +
+          "          and run pnpm dev:desktop again.",
+      );
+      shutdown(1);
+    }
     console.log(`[desktop] window closed, stopping dev stack`);
     shutdown(code ?? 0);
+  });
+}
+
+function restartElectron() {
+  if (shuttingDown || electron === null) return;
+  restarting = true;
+  killTree(electron);
+  electron = null;
+  setTimeout(() => {
+    restarting = false;
+    if (!shuttingDown) startElectron();
+  }, RESPAWN_DELAY_MS);
+}
+
+/**
+ * Renderer edits are covered by Vite HMR, but main/preload run in Node and
+ * are only read at process start — the esbuild watcher rebuilds them and the
+ * live window would keep running the old code. Watch the built output rather
+ * than the sources so the restart lands after the bundle is actually on disk.
+ */
+function watchForRebuilds() {
+  const distDir = path.join(desktopRoot, "dist");
+  let timer = null;
+  try {
+    fs.watch(distDir, (_event, filename) => {
+      const name = filename ? String(filename) : "";
+      if (name !== "main.cjs" && name !== "preload.cjs") return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        console.log(`[desktop] ${name} rebuilt — restarting window`);
+        restartElectron();
+      }, REBUILD_DEBOUNCE_MS);
+    });
+  } catch (error) {
+    console.warn(`[desktop] auto-restart disabled: ${error.message}`);
   }
-});
+}
+
+startElectron();
+watchForRebuilds();

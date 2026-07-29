@@ -101,6 +101,43 @@ body {
 }
 
 /*
+ * Hand cursor on anything clickable. Tailwind's preflight resets buttons to
+ * `cursor: default`, which in a desktop shell reads as "not interactive" —
+ * the app has no browser chrome to hint otherwise, so the cursor is the only
+ * affordance a control gets before you click it.
+ */
+button,
+summary,
+label[for],
+[role="button"],
+[role="menuitem"],
+[role="tab"],
+[role="option"],
+[role="switch"],
+[role="checkbox"],
+[role="radio"],
+a[href],
+select,
+input[type="checkbox"],
+input[type="radio"],
+input[type="file"],
+input[type="color"],
+input[type="range"],
+input[type="submit"],
+input[type="reset"] {
+  cursor: pointer;
+}
+
+/* A control you cannot use must not claim to be clickable. */
+button:disabled,
+select:disabled,
+input:disabled,
+[aria-disabled="true"],
+[data-disabled] {
+  cursor: not-allowed;
+}
+
+/*
  * Former floating "islands", now flat IDE panels. The class stays so the
  * shell and views keep working; separation comes from hairline borders
  * instead of rounded elevation.

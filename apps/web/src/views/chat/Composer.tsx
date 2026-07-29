@@ -31,6 +31,7 @@ import {
 } from "@/lib/mention-tree";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMarkdownStore } from "@/state/markdown.store";
+import { createMarkdownFile } from "@/hooks/useMarkdownViewModel";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import {
   NO_PROMPT_FILE,
@@ -1033,9 +1034,10 @@ function ComposerMenu(props: {
 
 /**
  * Prompt-file picker: workspace .md files (the .atelier catalog) offered
- * as ready-made prompts. Always visible; the menu has a search box, and
- * an empty catalog (or search) offers "Create markdown file", which jumps
- * to the Markdown panel with its create form open.
+ * as ready-made prompts. Always visible; the menu has a search box and a
+ * permanent "Create prompt" footer that writes a new `.atelier/*.md` file
+ * inline and selects it — creating a prompt is the reason the menu is open
+ * often enough that it should not be hidden behind an empty catalog.
  */
 function PromptFileMenu(props: {
   value: string;
@@ -1044,13 +1046,16 @@ function PromptFileMenu(props: {
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selected = props.files.find((f) => f.path === props.value);
 
-  // Click-outside / Escape close; the search resets on every open.
+  // Click-outside / Escape close; the search and draft reset on every open.
   useEffect(() => {
     if (!open) return;
     setQuery("");
+    setDraft(null);
     const onPointerDown = (e: MouseEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
@@ -1078,7 +1083,29 @@ function PromptFileMenu(props: {
     setOpen(false);
   };
 
-  const startCreate = () => {
+  // Seed the name box from whatever was typed in the search: a search that
+  // found nothing is usually the name of the prompt you meant to write.
+  const startCreate = () => setDraft(query.trim());
+
+  const submitCreate = async () => {
+    const name = (draft ?? "").trim();
+    if (!name || saving) return;
+    setSaving(true);
+    try {
+      const path = await createMarkdownFile(name);
+      if (!path) return;
+      // Created prompts are almost always meant for the message you are
+      // about to send, so select it rather than just listing it.
+      props.onChange(path);
+      setDraft(null);
+      setOpen(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Full editing lives in the Markdown panel, not this dropdown. */
+  const openMarkdownPanel = () => {
     setOpen(false);
     useMarkdownStore.getState().setCreating(true);
     useWorkspaceStore.getState().setActivityView("markdown");
@@ -1133,21 +1160,11 @@ function PromptFileMenu(props: {
               )}
             />
             {matches.length === 0 ? (
-              <div className="px-2 py-1.5">
-                <p className="text-[10px] text-muted-foreground/60">
-                  {props.files.length === 0
-                    ? "No markdown files yet."
-                    : "No matches."}
-                </p>
-                <button
-                  type="button"
-                  onClick={startCreate}
-                  className="mt-1 flex items-center gap-1 text-[11px] text-primary hover:underline"
-                >
-                  <Plus className="h-3 w-3" />
-                  Create markdown file
-                </button>
-              </div>
+              <p className="px-2 py-1.5 text-[10px] text-muted-foreground/60">
+                {props.files.length === 0
+                  ? "No markdown files yet."
+                  : "No matches."}
+              </p>
             ) : (
               <ul className="max-h-56 overflow-y-auto">
                 {props.value !== NO_PROMPT_FILE && (
@@ -1187,6 +1204,72 @@ function PromptFileMenu(props: {
                 ))}
               </ul>
             )}
+
+            <div className="mt-1 border-t border-border pt-1">
+              {draft === null ? (
+                <button
+                  type="button"
+                  onClick={startCreate}
+                  className={cn(
+                    "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
+                    "text-left text-[11px] text-primary",
+                    "outline-none transition-colors hover:bg-accent/60"
+                  )}
+                >
+                  <Plus className="h-3 w-3 shrink-0" />
+                  Create prompt
+                </button>
+              ) : (
+                <div className="flex items-center gap-1 px-1 pb-0.5">
+                  <input
+                    autoFocus
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void submitCreate();
+                      }
+                      // Cancel the name box without closing the whole menu.
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        setDraft(null);
+                      }
+                    }}
+                    placeholder="prompt-name"
+                    className={cn(
+                      "min-w-0 flex-1 rounded-md bg-muted/60 px-2 py-1",
+                      "font-mono text-[11px] outline-none",
+                      "placeholder:text-muted-foreground/50"
+                    )}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void submitCreate()}
+                    disabled={saving || draft.trim() === ""}
+                    className={cn(
+                      "shrink-0 rounded-md px-2 py-1 text-[11px] font-medium",
+                      "text-primary outline-none transition-colors",
+                      "hover:bg-accent/60 disabled:opacity-40"
+                    )}
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={openMarkdownPanel}
+                className={cn(
+                  "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
+                  "text-left text-[10px] text-muted-foreground/70",
+                  "outline-none transition-colors hover:bg-accent/60"
+                )}
+              >
+                <FileText className="h-3 w-3 shrink-0" />
+                Manage in Markdown panel
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
