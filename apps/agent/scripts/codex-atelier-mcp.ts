@@ -8,6 +8,19 @@ if (!url || !token) {
   throw new Error("Missing ATELIER_CODEX_TOOL_URL or ATELIER_CODEX_TOOL_TOKEN");
 }
 
+/**
+ * The tools this proxy is allowed to register, comma-separated. Unset means
+ * all of them; direct mode (system knowledge off) passes the subset without
+ * retrieval, the knowledge graph, or impact analysis.
+ */
+const allowed = process.env.ATELIER_CODEX_TOOLS
+  ? new Set(
+      process.env.ATELIER_CODEX_TOOLS.split(",")
+        .map((name) => name.trim())
+        .filter(Boolean)
+    )
+  : null;
+
 const server = new McpServer({
   name: "atelier",
   version: "0.1.0",
@@ -144,6 +157,7 @@ tool("run_terminal", "Run a shell command only when no semantic Atelier tool fit
 await server.connect(new StdioServerTransport());
 
 function tool(name: string, description: string, inputSchema: Record<string, z.ZodTypeAny>): void {
+  if (allowed && !allowed.has(name)) return;
   server.registerTool(
     name,
     { description, inputSchema },

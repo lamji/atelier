@@ -106,6 +106,9 @@ export interface ComposerViewModel {
   changeEffort: (value: EffortChoice) => void;
   planMode: boolean;
   setPlanMode: (value: boolean) => void;
+  /** Ticked: the full pipeline. Unticked: a plain Claude/Codex turn. */
+  systemKnowledge: boolean;
+  setSystemKnowledge: (value: boolean) => void;
   vibe: boolean;
   changeVibe: (value: boolean) => void;
   attachments: string[];
@@ -274,6 +277,9 @@ export function useComposerViewModel(): ComposerViewModel {
           model: pick.model === "default" ? undefined : pick.model,
           effort: pick.effort === "default" ? undefined : pick.effort,
           planMode: pick.planMode || undefined,
+          // Only ever sent when OFF: absent means the normal pipeline, so
+          // an older agent that ignores the flag still behaves correctly.
+          systemKnowledge: pick.systemKnowledge === false ? false : undefined,
           vibe: prefs.vibe || undefined,
           images:
             sent.length > 0
@@ -356,6 +362,13 @@ export function useComposerViewModel(): ComposerViewModel {
     [setComposer, selectedId]
   );
 
+  // Belongs to the CHAT like model and effort do: a thread opened for a
+  // quick plain-Claude question stays that way when you switch back to it.
+  const setSystemKnowledge = useCallback(
+    (value: boolean) => setComposer(selectedId, { systemKnowledge: value }),
+    [setComposer, selectedId]
+  );
+
   const addAttachment = useCallback((path: string) => {
     setAttachments((prev) => (prev.includes(path) ? prev : [...prev, path]));
   }, []);
@@ -380,6 +393,8 @@ export function useComposerViewModel(): ComposerViewModel {
     changeEffort,
     planMode: own?.planMode ?? false,
     setPlanMode,
+    systemKnowledge: own?.systemKnowledge ?? defaults.systemKnowledge,
+    setSystemKnowledge,
     vibe,
     changeVibe,
     attachments,

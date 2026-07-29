@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowUp,
+  Brain,
   Check,
   ChevronDown,
   ChevronRight,
@@ -65,6 +66,7 @@ function modelOptions(models: ModelOption[]): PickerOption[] {
   const order: Array<NonNullable<ModelOption["provider"]>> = [
     "claude",
     "ollama",
+    "ollama-local",
     "codex",
   ];
   for (const provider of order) {
@@ -83,7 +85,9 @@ function modelOptions(models: ModelOption[]): PickerOption[] {
 function providerLabel(provider: NonNullable<ModelOption["provider"]>): string {
   switch (provider) {
     case "ollama":
-      return "Ollama";
+      return "Ollama Cloud";
+    case "ollama-local":
+      return "Ollama (local)";
     case "codex":
       return "Codex";
     default:
@@ -595,6 +599,24 @@ export const Composer = memo(function Composer() {
                 <ClipboardList className="h-3.5 w-3.5" />
                 Plan mode
               </label>
+              <Tooltip
+                content={
+                  vm.systemKnowledge
+                    ? "System knowledge ON: retrieval, impact, plan, review and session memory"
+                    : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
+                }
+              >
+                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={vm.systemKnowledge}
+                    onChange={(e) => vm.setSystemKnowledge(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-[var(--primary)]"
+                  />
+                  <Brain className="h-3.5 w-3.5" />
+                  Knowledge
+                </label>
+              </Tooltip>
               <Tooltip content="Vibe coding: the agent owns the feature end to end — UX, edge cases, polish">
                 <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
                   <input

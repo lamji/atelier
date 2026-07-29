@@ -65,6 +65,11 @@ export interface GitFlowStore {
   prDrafting: boolean;
   conflicts: string[];
   prUrl: string | null;
+  /**
+   * Set when `gh pr create` failed: the github.com compare page for this
+   * branch. A gh auth problem is not a reason the user cannot open the PR.
+   */
+  prCompareUrl: string | null;
 
   openFlow: (commitMessage: string, stageAllFirst: boolean) => void;
   requestFlow: (request: GitFlowRequest) => void;
@@ -96,6 +101,7 @@ const initial = {
   prDrafting: false,
   conflicts: [],
   prUrl: null,
+  prCompareUrl: null,
 };
 
 export const useGitFlowStore = create<GitFlowStore>((set) => ({

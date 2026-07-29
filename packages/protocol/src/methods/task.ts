@@ -22,6 +22,17 @@ export const taskMethods = {
       planMode: z.boolean().optional(),
       /** Vibe coding: autonomous product-builder mode for this task. */
       vibe: z.boolean().optional(),
+      /**
+       * Run this task through Atelier's knowledge engine — retrieval,
+       * impact, plan, review, session memory. Omitted means yes; `false`
+       * bypasses the pipeline for a plain Claude/Codex turn.
+       */
+      systemKnowledge: z.boolean().optional(),
+      /**
+       * Confine the task to these project directories (workspace-relative)
+       * instead of inferring the lock from "@mentions" in the prompt.
+       */
+      scopeRoots: z.array(z.string()).optional(),
       /** Pasted/dropped/picked images the model should see this turn. */
       images: z.array(ImageAttachment).optional(),
       /** The `.atelier/*.md` note this prompt came from. Its status follows

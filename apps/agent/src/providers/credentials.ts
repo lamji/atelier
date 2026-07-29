@@ -22,13 +22,56 @@ export type { ProviderConfig };
 const LEGACY_KEY = "providerCredentials";
 
 export const OLLAMA_CLOUD = "ollama-cloud";
+/**
+ * The daemon running on this machine. Separate from the cloud entry, not a
+ * mode of it: they have different hosts, different rosters, and a user with
+ * both wants both in the picker at once.
+ */
+export const OLLAMA_LOCAL = "ollama-local";
+/** The Claude Agent SDK, on the user's signed-in Claude Code session. */
+export const CLAUDE = "claude";
+/** The Codex CLI, on the user's signed-in ChatGPT/Codex session. */
+export const CODEX = "codex";
+
+/** Panel order — the two signed-in CLIs first, then the Ollama endpoints. */
 const LABELS: Record<string, string> = {
+  [CLAUDE]: "Claude",
+  [CODEX]: "Codex",
   [OLLAMA_CLOUD]: "Ollama Cloud",
+  [OLLAMA_LOCAL]: "Ollama (local)",
 };
 
-/** Reads what the Ollama client should use right now. */
-export function ollamaConfig(): ProviderConfig {
-  return readCredentialStore()[OLLAMA_CLOUD] ?? {};
+/** Providers that are a program on this machine, so no key can apply. */
+const KEYLESS = new Set([OLLAMA_LOCAL, CLAUDE, CODEX]);
+
+/**
+ * Providers reached through a CLI the user is already signed in to, so
+ * there is no endpoint to point elsewhere and no host to ask for.
+ */
+const HOSTLESS = new Set([CLAUDE, CODEX]);
+
+/**
+ * Providers whose untouched allowlist means "everything they offer".
+ *
+ * Only the hosted Ollama account is opt-in: it lists far more models than
+ * anyone wants in a picker. The rest already reflect a deliberate act —
+ * pulling a model, signing in to a CLI — so making the user re-declare that
+ * in Settings would just look like the provider was broken.
+ */
+const ALLOWLIST_IMPLIES_ALL = new Set([OLLAMA_LOCAL, CLAUDE, CODEX]);
+
+export function allowlistImpliesAll(id: string): boolean {
+  return ALLOWLIST_IMPLIES_ALL.has(id);
+}
+
+/** Whether a provider's models reach the composer's picker at all. */
+export function providerEnabled(id: string): boolean {
+  return readCredentialStore()[id]?.enabled !== false;
+}
+
+/** Reads what the Ollama client should use for one endpoint. */
+export function ollamaConfig(id: string = OLLAMA_CLOUD): ProviderConfig {
+  return readCredentialStore()[id] ?? {};
 }
 
 /**
@@ -95,10 +138,16 @@ export function listProviders(): ProviderCredential[] {
   return Object.keys(LABELS).map((id) => {
     const config = store[id];
     const key = config?.apiKey;
+    const keyless = KEYLESS.has(id);
     return {
       id: id as ProviderCredential["id"],
       label: LABELS[id] ?? id,
-      configured: Boolean(key),
+      // A keyless provider is a daemon, not an account: there is nothing to
+      // configure before it can be used, so it is always on the panel.
+      configured: keyless || Boolean(key),
+      enabled: config?.enabled !== false,
+      keyless,
+      hostless: HOSTLESS.has(id),
       ...(key ? { keyHint: `…${key.slice(-4)}` } : {}),
       ...(config?.host ? { host: config.host } : {}),
     };
@@ -119,13 +168,31 @@ export function saveProvider(
   const next: ProviderConfig = {
     apiKey: update.apiKey === undefined ? current.apiKey : update.apiKey.trim(),
     host: update.host === undefined ? current.host : update.host.trim(),
+    enabled: current.enabled,
     enabledModels: current.enabledModels,
   };
   if (!next.apiKey) delete next.apiKey;
   if (!next.host) delete next.host;
+  if (next.enabled === undefined) delete next.enabled;
   if (!next.enabledModels?.length) delete next.enabledModels;
 
   store[id] = next;
+  writeCredentialStore(store);
+  return listProviders();
+}
+
+/**
+ * Switches a whole provider in or out of the picker. Written even when it
+ * is `true`, so the value the user chose survives a later edit that rebuilds
+ * the entry — the "absent means on" default only covers stores that predate
+ * the flag.
+ */
+export function setProviderEnabled(
+  id: string,
+  enabled: boolean
+): ProviderCredential[] {
+  const store = { ...readCredentialStore() };
+  store[id] = { ...(store[id] ?? {}), enabled };
   writeCredentialStore(store);
   return listProviders();
 }

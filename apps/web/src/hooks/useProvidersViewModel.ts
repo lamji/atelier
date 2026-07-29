@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   ProviderCheck,
   ProviderCredential,
+  ProviderId,
   ProviderModel,
   ProviderUsage,
 } from "@atelier/protocol";
@@ -35,6 +36,8 @@ export interface ProvidersVm {
   check: (id: string) => void;
   loadCatalog: (id: string) => void;
   setModelEnabled: (id: string, name: string, enabled: boolean) => void;
+  /** Switches a whole provider in or out of the composer's picker. */
+  setProviderEnabled: (id: string, enabled: boolean) => void;
   /** Atelier's own measured spend per provider. */
   usage: Record<string, ProviderUsage | undefined>;
   loadUsage: (id: string) => void;
@@ -72,7 +75,7 @@ export function useProvidersViewModel(): ProvidersVm {
       setSaving(true);
       setError(null);
       void bridge
-        .rpc("providers.save", { id: id as "ollama-cloud", ...update })
+        .rpc("providers.save", { id: id as ProviderId, ...update })
         .then(({ providers }) => {
           setProviders(providers);
           // New credentials mean a different model roster — tell the picker.
@@ -87,7 +90,7 @@ export function useProvidersViewModel(): ProvidersVm {
   const remove = useCallback((id: string) => {
     setSaving(true);
     void bridge
-      .rpc("providers.remove", { id: id as "ollama-cloud" })
+      .rpc("providers.remove", { id: id as ProviderId })
       .then(({ providers }) => {
         setProviders(providers);
         useProvidersStore.getState().bump();
@@ -105,7 +108,7 @@ export function useProvidersViewModel(): ProvidersVm {
     setChecking(id);
     setError(null);
     void bridge
-      .rpc("providers.check", { id: id as "ollama-cloud" })
+      .rpc("providers.check", { id: id as ProviderId })
       .then(({ check }) => setChecks((prev) => ({ ...prev, [id]: check })))
       .catch((e) => setError(errText(e)))
       .finally(() => setChecking(null));
@@ -115,7 +118,7 @@ export function useProvidersViewModel(): ProvidersVm {
     setLoadingCatalog(id);
     setError(null);
     void bridge
-      .rpc("providers.models", { id: id as "ollama-cloud" })
+      .rpc("providers.models", { id: id as ProviderId })
       .then(({ models }) => setCatalog((prev) => ({ ...prev, [id]: models })))
       .catch((e) => setError(errText(e)))
       .finally(() => setLoadingCatalog(null));
@@ -132,7 +135,7 @@ export function useProvidersViewModel(): ProvidersVm {
       }));
       void bridge
         .rpc("providers.setModelEnabled", {
-          id: id as "ollama-cloud",
+          id: id as ProviderId,
           name,
           enabled,
         })
@@ -146,9 +149,25 @@ export function useProvidersViewModel(): ProvidersVm {
     []
   );
 
+  const setProviderEnabled = useCallback((id: string, enabled: boolean) => {
+    // Optimistic, like the per-model toggles: the switch has to move under
+    // the finger rather than after the round trip.
+    setProviders((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, enabled } : p))
+    );
+    void bridge
+      .rpc("providers.setEnabled", { id: id as ProviderId, enabled })
+      .then(({ providers }) => {
+        setProviders(providers);
+        // The picker shows exactly the enabled providers' enabled models.
+        useProvidersStore.getState().bump();
+      })
+      .catch((e) => setError(errText(e)));
+  }, []);
+
   const loadUsage = useCallback((id: string) => {
     void bridge
-      .rpc("providers.usage", { id: id as "ollama-cloud" })
+      .rpc("providers.usage", { id: id as ProviderId })
       .then(({ usage }) => setUsage((prev) => ({ ...prev, [id]: usage })))
       // Surfaced, not swallowed: a stale agent answers "Unknown method"
       // here, and silently rendering nothing looks like zero usage.
@@ -170,6 +189,7 @@ export function useProvidersViewModel(): ProvidersVm {
     check,
     loadCatalog,
     setModelEnabled,
+    setProviderEnabled,
     usage,
     loadUsage,
   };

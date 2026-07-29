@@ -139,6 +139,38 @@ async function main(): Promise<void> {
   );
   check("lock renders a prompt block", renderScope(anchored).includes("LOCKED"));
 
+  // ── explicit lock (the git wizard's fix agent) ───────────────────────
+  // Its prompt is command output: no folder to mention, so the caller
+  // hands over the checkout it already knows.
+  const explicit = store.lock("conv3", [project]);
+  check(
+    "an explicit lock confines the conversation",
+    explicit.roots.length === 1 && explicit.roots[0] === project,
+    JSON.stringify(explicit.roots)
+  );
+  check("explicit lock is labelled", explicit.source === "explicit");
+  check(
+    "the explicit lock sticks for follow-ups",
+    store.resolve("conv3", "still failing, try again", profile).roots[0] ===
+      project
+  );
+  check(
+    "a sibling checkout is out of scope",
+    !inScope(explicit, `${pickSecondProject(CONTAINER, project) ?? "other"}/.git/config`)
+  );
+  check(
+    "the locked repo's own files stay in scope",
+    inScope(explicit, `${project}/.git/config`)
+  );
+  check(
+    "a repo AT the workspace root does not lock",
+    store.lock("conv4", ["."]).roots.length === 0
+  );
+  check(
+    "a root that does not exist is dropped",
+    store.lock("conv5", ["no-such-project"]).roots.length === 0
+  );
+
   // ── tool boundary ────────────────────────────────────────────────────
   console.log("\ntool guard");
   const guard = new ScopeGuard();

@@ -1,27 +1,77 @@
 import type { ModelOption, ProviderModel } from "@atelier/protocol";
-import { isCloudHost, listOllamaModels } from "./client.js";
-import { OLLAMA_PREFIX } from "../model-routing.js";
-import { enabledModelsFor, OLLAMA_CLOUD } from "../credentials.js";
+import { isCloudHost, listOllamaModels, type OllamaModel } from "./client.js";
+import {
+  OLLAMA_LOCAL_PREFIX,
+  OLLAMA_PREFIX,
+  type OllamaTarget,
+} from "../model-routing.js";
+import {
+  allowlistImpliesAll,
+  enabledModelsFor,
+  OLLAMA_CLOUD,
+  OLLAMA_LOCAL,
+  providerEnabled,
+} from "../credentials.js";
+
+/** Both Ollama endpoints, in picker order: hosted first, then this machine. */
+const TARGETS: OllamaTarget[] = ["ollama-cloud", "ollama-local"];
+
+/** Model-id namespace per endpoint, so a tag routes back to its host. */
+const PREFIX: Record<OllamaTarget, string> = {
+  "ollama-cloud": OLLAMA_PREFIX,
+  "ollama-local": OLLAMA_LOCAL_PREFIX,
+};
 
 /**
  * The Ollama models the user switched on, shaped for the same picker the
  * SDK roster feeds. Empty when nothing is enabled or nothing answers, so
  * the composer simply shows the Claude rows.
+ *
+ * BOTH endpoints are probed. A machine can have a daemon and a cloud
+ * account at the same time, and making one setting choose between them is
+ * what left a locally pulled model invisible.
  */
 export async function probeOllamaModels(): Promise<ModelOption[]> {
-  const enabled = new Set(enabledModelsFor(OLLAMA_CLOUD));
-  if (enabled.size === 0) return [];
+  const rosters = await Promise.all(TARGETS.map((target) => probe(target)));
+  return rosters.flat();
+}
 
-  const models = await listOllamaModels();
+async function probe(target: OllamaTarget): Promise<ModelOption[]> {
+  // Switched off in Settings: nothing of this endpoint's belongs in the
+  // picker, and there is no point paying for the round trip to find out.
+  if (!providerEnabled(target)) return [];
+  // The hosted endpoint costs a network round trip, so an account with
+  // nothing switched on is not worth asking. The local daemon is on this
+  // machine and either answers at once or refuses the connection.
+  if (target === OLLAMA_CLOUD && enabledModelsFor(target).length === 0) return [];
+
+  const models = await listOllamaModels(target);
+  const enabled = enabledSet(target, models);
   return models
     .filter((m) => enabled.has(m.name))
     .map((m) => ({
-      value: `${OLLAMA_PREFIX}${m.name}`,
+      value: `${PREFIX[target]}${m.name}`,
       label: m.name,
-      description: describe(m.name, m.parameterSize, m.quantization),
-      provider: "ollama" as const,
+      description: describe(target, m.name, m.parameterSize, m.quantization),
+      provider: target === OLLAMA_LOCAL ? ("ollama-local" as const) : ("ollama" as const),
       supportsEffort: false,
     }));
+}
+
+/**
+ * Which tags reach the picker.
+ *
+ * An untouched LOCAL allowlist means every model the daemon has pulled:
+ * running `ollama pull` is already an explicit choice, and having to
+ * re-declare it in Settings is exactly what made the pull look like it did
+ * nothing. The hosted account stays opt-in — it offers far more models than
+ * anyone wants in a picker.
+ */
+function enabledSet(target: OllamaTarget, models: OllamaModel[]): Set<string> {
+  const stored = enabledModelsFor(target);
+  if (stored.length > 0) return new Set(stored);
+  if (allowlistImpliesAll(target)) return new Set(models.map((m) => m.name));
+  return new Set();
 }
 
 /**
@@ -29,12 +79,14 @@ export async function probeOllamaModels(): Promise<ModelOption[]> {
  * whether it is switched on. Unlike the picker roster this is never
  * filtered — the toggles are what the user is here to change.
  */
-export async function listOllamaCatalog(): Promise<ProviderModel[]> {
-  const enabled = new Set(enabledModelsFor(OLLAMA_CLOUD));
-  const models = await listOllamaModels();
+export async function listOllamaCatalog(
+  target: OllamaTarget = "ollama-cloud"
+): Promise<ProviderModel[]> {
+  const models = await listOllamaModels(target);
+  const enabled = enabledSet(target, models);
   return models
     .map((m) => ({
-      value: `${OLLAMA_PREFIX}${m.name}`,
+      value: `${PREFIX[target]}${m.name}`,
       name: m.name,
       enabled: enabled.has(m.name),
       ...(sizeOf(m.parameterSize, m.quantization)
@@ -53,6 +105,7 @@ function sizeOf(parameterSize?: string, quantization?: string): string {
  * text before the first "·", so this is what the row reads as.
  */
 function describe(
+  target: OllamaTarget,
   name: string,
   parameterSize?: string,
   quantization?: string
@@ -60,7 +113,9 @@ function describe(
   // A "-cloud" tag is served upstream even through a local daemon, so the
   // tag decides the wording when the host itself isn't the cloud one.
   const where =
-    isCloudHost() || name.includes("-cloud") ? "Ollama Cloud" : "local via Ollama";
+    isCloudHost(target) || name.includes("-cloud")
+      ? "Ollama Cloud"
+      : "local via Ollama";
   return [name, where, sizeOf(parameterSize, quantization)]
     .filter(Boolean)
     .join(" · ");

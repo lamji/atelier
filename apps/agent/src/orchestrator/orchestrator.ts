@@ -27,6 +27,19 @@ export interface TaskOptions {
   planMode?: boolean;
   /** Vibe coding: autonomous product-builder mode for this task. */
   vibe?: boolean;
+  /**
+   * System knowledge — the full 10-stage pipeline (retrieval, impact,
+   * plan, review, session memory). Absent means ON: only an explicit
+   * `false` drops the task to a plain Claude/Codex agent loop.
+   */
+  systemKnowledge?: boolean;
+  /**
+   * Project directories this task is confined to, workspace-relative.
+   * For callers that already know the answer (the git wizard's fix agent
+   * knows its checkout) instead of leaving it to be parsed out of the
+   * prompt.
+   */
+  scopeRoots?: string[];
   /** Images the model should see on the first turn of this task. */
   images?: ImageAttachment[];
   /** The `.atelier/*.md` note this prompt came from, if any. */

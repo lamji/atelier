@@ -26,6 +26,7 @@ import type { ImpactAnalyzer } from "../knowledge/impact/impact-analyzer.js";
 import { companionFilesFor } from "../knowledge/impact/companion-files.js";
 import type { IncrementalIndexer } from "../knowledge/indexer/incremental-indexer.js";
 import type { HooksEngine } from "../hooks/hooks-engine.js";
+import type { DirectTaskRegistry } from "../hooks/direct-tasks.js";
 import type { ValidationRunners } from "../validation/runners.js";
 import type { SettingsRepo } from "../storage/repositories/settings.js";
 import { runOneShot } from "../providers/one-shot.js";
@@ -34,6 +35,7 @@ import {
   isCodexModel,
   isOllamaModel,
   ollamaModelName,
+  ollamaTargetOf,
   sdkModel,
 } from "../providers/model-routing.js";
 import { runOllamaAgentLoop } from "../providers/ollama/agent-loop.js";
@@ -47,6 +49,12 @@ import {
   type SdkToolContext,
 } from "./sdk-tools.js";
 import { buildReviewFixPrompt, buildReviewPrompt } from "./review-prompt.js";
+import {
+  DIRECT_RULES,
+  DIRECT_TOOLS,
+  isDirectMode,
+  renderPriorTurns,
+} from "./direct-mode.js";
 import { VIBE_RULES } from "./vibe-rules.js";
 import type { UsageMonitor } from "./usage-monitor.js";
 import type { SdkUsage, TokenLedger } from "../context/ledger/index.js";
@@ -189,6 +197,8 @@ export interface PipelineDeps {
   impact: ImpactAnalyzer;
   indexer: IncrementalIndexer;
   hooks: HooksEngine;
+  /** Tasks running with system knowledge off, for the code guards to skip. */
+  directTasks: DirectTaskRegistry;
   validators: ValidationRunners;
   planTracker: PlanTracker;
   settings: SettingsRepo;
@@ -339,8 +349,16 @@ export class PipelineExecutor {
   private async applyScope(ctx: TaskContext): Promise<void> {
     let scope: SessionScope;
     try {
-      const profile = await this.workspaceProfile();
-      scope = this.deps.scope.resolve(ctx.conversationId, ctx.prompt, profile);
+      const explicit = ctx.opts.scopeRoots;
+      if (explicit && explicit.length > 0) {
+        // The caller already knows the project — the git wizard dispatches
+        // its fix agent about one checkout, and a prompt made of command
+        // output names no folder for `resolve` to find.
+        scope = this.deps.scope.lock(ctx.conversationId, explicit);
+      } else {
+        const profile = await this.workspaceProfile();
+        scope = this.deps.scope.resolve(ctx.conversationId, ctx.prompt, profile);
+      }
     } catch (error) {
       // A scope we cannot compute must not take the task down with it —
       // an unlocked turn is the old behavior, not a broken one.
@@ -407,6 +425,8 @@ export class PipelineExecutor {
   }
 
   async run(ctx: TaskContext): Promise<PipelineOutcome> {
+    // The user unticked "System knowledge": nothing below this line runs.
+    if (isDirectMode(ctx.opts)) return this.runDirect(ctx);
     // Lives on the context, not this frame: the orchestrator needs it to
     // write a summary if the task is cancelled or crashes before stage 9.
     const changedFiles = ctx.record.changedFiles;
@@ -727,6 +747,73 @@ export class PipelineExecutor {
       // The lock is stored per conversation; this only drops the per-task
       // binding so a finished taskId cannot leak into a later run.
       this.deps.scopeGuard.release(ctx.taskId);
+    }
+  }
+
+  /**
+   * The bypass path: a plain provider turn, the way Claude Code or Codex
+   * behaves on its own.
+   *
+   * Two stages run and no more. `hooks` stays because a preTask hook is the
+   * USER's rule, not Atelier's knowledge; `execute` is the turn itself.
+   * Everything the other seven stages produce — intent classification,
+   * retrieval, blast radius, the plan, validators, the independent review,
+   * the session-memory record — is skipped, so this costs one model call
+   * plus whatever the model itself decides to do.
+   *
+   * Edits are still tracked into the task record: the diffs, the file
+   * events and the chat history are how the UI shows work at all, and none
+   * of that is knowledge. What is deliberately NOT tracked is the
+   * conversation's scope anchors and the plan checklist, which only exist
+   * to feed later pipeline runs.
+   */
+  private async runDirect(ctx: TaskContext): Promise<PipelineOutcome> {
+    const changedFiles = ctx.record.changedFiles;
+    // Tells the impact / modularity / rewrite guards to stand down for the
+    // life of this task — their preconditions cannot be met without the
+    // tools this mode withholds.
+    this.deps.directTasks.mark(ctx.taskId);
+    const unsubscribe = this.deps.bus.subscribe((event) => {
+      if (event.topic === "edit.applied" && event.taskId === ctx.taskId) {
+        changedFiles.add((event.payload as { path: string }).path);
+      }
+    });
+
+    try {
+      await this.stage(ctx, "hooks", async () => {
+        const decision = await this.deps.hooks.evaluatePreTask(
+          ctx.prompt,
+          ctx.taskId
+        );
+        if (!decision.allowed) {
+          throw new HookBlockedError(decision.reason ?? "blocked by hook");
+        }
+        return { value: undefined, detail: "passed" };
+      });
+
+      const exec = await this.stage(ctx, "execute", async () => {
+        const result = await this.streamSession(
+          ctx,
+          ctx.prompt,
+          // The only context this turn gets: the chat transcript itself.
+          renderPriorTurns(ctx.priorTurns),
+          ctx.opts.images,
+          "execute"
+        );
+        return {
+          value: result,
+          detail: `direct mode · ${changedFiles.size} file(s) changed`,
+        };
+      });
+
+      // Enough of a record for the note report and the history list; no
+      // session memory is written, which is the point of the mode.
+      ctx.record.intentKind = "direct";
+      ctx.record.intentSummary = clip(ctx.prompt, 120);
+      return { assistantText: exec.text, sdkSessionId: ctx.sdkSessionId };
+    } finally {
+      unsubscribe();
+      this.deps.directTasks.release(ctx.taskId);
     }
   }
 
@@ -1272,7 +1359,10 @@ export class PipelineExecutor {
     ctx: TaskContext,
     status: "cancelled" | "error"
   ): Promise<void> {
-    if (ctx.record.summarized) return;
+    // A direct turn writes no memory when it succeeds, so it must not write
+    // any when it is cancelled either — that record would come back as a
+    // retrievable chunk in the next pipeline run.
+    if (isDirectMode(ctx.opts) || ctx.record.summarized) return;
     const record = ctx.record;
     // Live statuses while the tracker entry still exists — the task finishes
     // right after this and clears it. Without the refresh, a step that
@@ -1399,26 +1489,38 @@ export class PipelineExecutor {
 
     const hasImages = images !== undefined && images.length > 0;
     // Provider-neutral: the same layout block precedes the rules on every
-    // backend, so a Codex or Ollama run knows the folder shape too.
+    // backend, so a Codex or Ollama run knows the folder shape too. It
+    // survives direct mode — knowing the real folder names is not knowledge
+    // retrieval, and without it the model invents paths.
     const layout = await this.workspaceLayout();
+    // Direct mode swaps the whole rule block: SYSTEM_RULES describes a
+    // knowledge engine this turn does not have, down to tools it cannot
+    // call and hooks that will not fire.
+    const direct = isDirectMode(ctx.opts);
+    const rules = direct ? DIRECT_RULES : SYSTEM_RULES;
     // Rides AFTER the static rules, never between them: the lock changes
     // per conversation, and splitting the static prefix would invalidate
-    // the provider prompt cache on every turn.
-    const scoped = await this.scopeContext(ctx);
+    // the provider prompt cache on every turn. A direct turn has no lock —
+    // the scope store is part of the pipeline, not of a plain agent loop.
+    const scoped = direct ? "" : await this.scopeContext(ctx);
 
     if (isOllamaModel(ctx.opts.model)) {
       return {
         text: await runOllamaAgentLoop({
           model: ollamaModelName(ctx.opts.model as string),
+          // Routes the turn at the endpoint the picked row came from: the
+          // daemon on this machine, or the hosted account.
+          target: ollamaTargetOf(ctx.opts.model) ?? "ollama-cloud",
           system:
             layout +
-            SYSTEM_RULES +
+            rules +
             (ctx.opts.vibe ? VIBE_RULES : "") +
             scoped +
             appendContext,
           prompt,
           images,
           tools: this.deps.tools,
+          toolNames: direct ? DIRECT_TOOLS : undefined,
           taskId: ctx.taskId,
           signal: ctx.abort.signal,
           emitText: (delta) => {
@@ -1449,6 +1551,7 @@ export class PipelineExecutor {
         effort: ctx.opts.effort,
         signal: ctx.abort.signal,
         toolBridge,
+        toolNames: direct ? DIRECT_TOOLS : undefined,
         images,
         telemetry: {
           bus: this.deps.bus,
@@ -1458,7 +1561,7 @@ export class PipelineExecutor {
         },
         prompt:
           layout +
-          SYSTEM_RULES +
+          rules +
           CODEX_MCP_RULES +
           (ctx.opts.vibe ? VIBE_RULES : "") +
           scoped +
@@ -1507,7 +1610,7 @@ export class PipelineExecutor {
           // precede the per-task context, and each block is byte-stable.
           append:
             layout +
-            SYSTEM_RULES +
+            rules +
             (ctx.opts.vibe ? VIBE_RULES : "") +
             scoped +
             appendContext,
@@ -1552,7 +1655,11 @@ export class PipelineExecutor {
         disallowedTools: DISABLED_BUILTINS,
         mcpServers: { [MCP_SERVER_NAME]: mcpServer },
         strictMcpConfig: true,
-        allowedTools: opts.allowedTools ?? [`mcp__${MCP_SERVER_NAME}__*`],
+        allowedTools:
+          opts.allowedTools ??
+          (direct
+            ? DIRECT_TOOLS.map((name) => `mcp__${MCP_SERVER_NAME}__${name}`)
+            : [`mcp__${MCP_SERVER_NAME}__*`]),
         includePartialMessages: true,
         // Atelier injects selected skills itself so disabled skills cannot
         // leak through Claude's native user/project settings.

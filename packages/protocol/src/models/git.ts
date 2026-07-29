@@ -60,6 +60,12 @@ export const GitOpResult = z.object({
   output: z.string(),
   /** Set by git.createPr: the created pull-request URL. */
   url: z.string().optional(),
+  /**
+   * Set by git.createPr when it FAILED: the github.com compare page for
+   * the same branch, so a `gh` problem (wrong account, missing scope, SSO)
+   * still leaves the user one click from opening the PR by hand.
+   */
+  fallbackUrl: z.string().optional(),
 });
 export type GitOpResult = z.infer<typeof GitOpResult>;
 
@@ -83,6 +89,12 @@ export type GitFlowRequest = z.infer<typeof GitFlowRequest>;
 
 /** Everything the commit→push→PR wizard needs to pick its starting stage. */
 export const GitFlowInfo = z.object({
+  /**
+   * The checkout this flow acts on, workspace-relative ("." when the
+   * workspace root is itself the repo). Every command in the wizard runs
+   * there, and the AI fix agent is confined to it.
+   */
+  repo: z.string(),
   branch: z.string(),
   defaultBranch: z.string(),
   hasCommits: z.boolean(),

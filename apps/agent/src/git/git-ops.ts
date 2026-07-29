@@ -177,7 +177,119 @@ export async function createPr(
     io
   );
   const url = result.output.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0];
-  return url ? { ...result, url } : result;
+  if (url) return { ...result, url };
+  if (result.ok) return result;
+  return withPrDiagnosis(root, base, head, result, io);
+}
+
+/**
+ * Explains a failed `gh pr create` and hands back a way through.
+ *
+ * `gh` reports the repository it resolved but never says where that name
+ * came from or which account it asked as, so its most common failure —
+ * "Could not resolve to a Repository", which GitHub returns for a private
+ * repo the token cannot SEE as readily as for one that does not exist —
+ * reads as "your repo is gone" when the truth is usually the wrong
+ * account, a token without `repo` scope, or org SSO not authorized.
+ *
+ * Diagnosis is best-effort and never fails the step: it appends facts to
+ * the output the user is already looking at, plus the compare URL, so the
+ * PR can still be opened in the browser where their session already works.
+ */
+async function withPrDiagnosis(
+  root: string,
+  base: string,
+  head: string,
+  result: GitOpResult,
+  io: OpIo
+): Promise<GitOpResult> {
+  let remote: RemoteRepo | null = null;
+  let account = "";
+  try {
+    remote = await originRepo(root);
+    account = await ghAccount(root);
+  } catch {
+    // A probe that cannot run just leaves its line out.
+  }
+  const compareUrl = remote
+    ? `https://${remote.host}/${remote.owner}/${remote.name}/compare/` +
+      `${encodeURIComponent(base)}...${encodeURIComponent(head)}?expand=1`
+    : undefined;
+
+  const unresolved = /could not resolve to a repository|HTTP 404|not found/i.test(
+    result.output
+  );
+  const lines = ["", "── Atelier: what gh was pointed at ──"];
+  if (remote) {
+    lines.push(`origin → ${remote.host}/${remote.owner}/${remote.name}`);
+  } else {
+    lines.push("origin → could not read the remote URL");
+  }
+  lines.push(`gh account → ${account || "not signed in (gh auth status)"}`);
+  lines.push(`branch → ${head} into ${base}`);
+  if (unresolved) {
+    lines.push(
+      "",
+      "GitHub says it cannot resolve that repository. It answers the same " +
+        "way for a repo that does not exist and for a private one your " +
+        "token cannot see, so check, in this order:",
+      "  gh auth status                          — signed in as the right account?",
+      "  gh auth refresh -h github.com -s repo   — token missing `repo` scope?",
+      "  (then approve SSO for the org if it asks)",
+      "  git remote -v                           — repo renamed or transferred?"
+    );
+  }
+  if (compareUrl) {
+    lines.push("", "Or open the pull request in the browser:", `  ${compareUrl}`);
+  }
+  const text = `${lines.join("\n")}\n`;
+  io.onChunk(text);
+  return {
+    ...result,
+    output: result.output + text,
+    ...(compareUrl ? { fallbackUrl: compareUrl } : {}),
+  };
+}
+
+interface RemoteRepo {
+  host: string;
+  owner: string;
+  name: string;
+}
+
+/**
+ * owner/name for the `origin` remote. Handles the three URL shapes git
+ * writes — scp-style ssh, ssh://, and https — because which one a repo
+ * uses is exactly what nobody remembers when a PR fails.
+ */
+async function originRepo(root: string): Promise<RemoteRepo | null> {
+  const { code, out } = await capture(
+    "git",
+    ["remote", "get-url", "origin"],
+    root
+  );
+  if (code !== 0 || !out) return null;
+  const url = out.trim();
+  const scp = url.match(/^[^@]+@([^:]+):(.+?)(?:\.git)?$/);
+  const full = url.match(/^[a-z+]+:\/\/(?:[^@/]+@)?([^/]+)\/(.+?)(?:\.git)?$/i);
+  const match = scp ?? full;
+  if (!match) return null;
+  const host = match[1] ?? "";
+  const parts = (match[2] ?? "").split("/").filter(Boolean);
+  const name = parts.pop();
+  const owner = parts.join("/");
+  if (!host || !owner || !name) return null;
+  return { host, owner, name };
+}
+
+/** The account gh would act as, or "" when it cannot say. */
+async function ghAccount(root: string): Promise<string> {
+  const { code, out } = await capture("gh", ["auth", "status"], root);
+  if (code !== 0 && !out) return "";
+  // gh has phrased this as "Logged in to github.com as NAME" and
+  // "Logged in to github.com account NAME" across versions.
+  const match = out.match(/Logged in to (\S+) (?:as|account) (\S+)/);
+  return match ? `${match[2]} on ${match[1]}` : "";
 }
 
 /** Branch names on origin (no fetch of contents — refs only). */
@@ -224,6 +336,7 @@ export async function flowInfo(git: GitService): Promise<GitFlowInfo> {
   const root = git.root;
   const status = await git.status();
   return {
+    repo: git.activeRepo ?? ".",
     branch: status.branch,
     defaultBranch: await defaultBranch(root),
     hasCommits: await git.hasCommits(),

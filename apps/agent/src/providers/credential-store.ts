@@ -21,6 +21,15 @@ export interface ProviderConfig {
   apiKey?: string;
   host?: string;
   /**
+   * Whether the provider reaches the composer's picker at all. Absent means
+   * on: this flag arrived after the store did, and a missing value must not
+   * read as "the user switched this off".
+   *
+   * Kept separate from enabledModels so switching a provider off and back on
+   * returns the exact model selection it had, rather than clearing it.
+   */
+  enabled?: boolean;
+  /**
    * Model tags the user switched on. Absent/empty means none — a provider
    * can offer dozens of models and dumping them all into the composer's
    * picker would bury the handful anyone actually uses.

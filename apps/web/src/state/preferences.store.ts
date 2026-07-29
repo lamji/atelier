@@ -19,6 +19,11 @@ export interface ComposerPrefs {
   model: ModelChoice;
   effort: EffortChoice;
   planMode: boolean;
+  /**
+   * Run the task through Atelier's knowledge engine. Off means a plain
+   * Claude/Codex turn: no retrieval, impact, plan, review or memory.
+   */
+  systemKnowledge: boolean;
 }
 
 function parse<T>(key: string): T | null {
@@ -45,6 +50,8 @@ function readDefaults(): ComposerPrefs {
         "default"),
     // Plan mode is a per-task decision; a new chat never inherits it.
     planMode: false,
+    // The pipeline is what Atelier is; bypassing it is the deliberate act.
+    systemKnowledge: stored.systemKnowledge ?? true,
   };
 }
 

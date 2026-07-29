@@ -23,6 +23,8 @@ export const ModelOption = z.object({
   /** Exact reasoning effort values this row supports, when the provider reports them. */
   reasoningLevels: z.array(ReasoningEffort).optional(),
   /** Which backend serves this row. */
-  provider: z.enum(["claude", "ollama", "codex"]).default("claude"),
+  provider: z
+    .enum(["claude", "ollama", "ollama-local", "codex"])
+    .default("claude"),
 });
 export type ModelOption = z.infer<typeof ModelOption>;

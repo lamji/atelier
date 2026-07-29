@@ -6,10 +6,29 @@
  */
 
 export const OLLAMA_PREFIX = "ollama/";
+/**
+ * The daemon on this machine, namespaced apart from the hosted service so
+ * the two rosters can both be in the picker at once. The cloud prefix is
+ * left exactly as it was: model ids are persisted in per-chat preferences,
+ * and renaming them would repoint every chat that already picked one.
+ */
+export const OLLAMA_LOCAL_PREFIX = "ollama-local/";
 export const CODEX_PREFIX = "codex/";
 
+/** Which Ollama endpoint a model id belongs to; matches the provider ids. */
+export type OllamaTarget = "ollama-cloud" | "ollama-local";
+
+export function ollamaTargetOf(
+  value: string | undefined | null
+): OllamaTarget | null {
+  if (typeof value !== "string") return null;
+  if (value.startsWith(OLLAMA_LOCAL_PREFIX)) return "ollama-local";
+  if (value.startsWith(OLLAMA_PREFIX)) return "ollama-cloud";
+  return null;
+}
+
 export function isOllamaModel(value: string | undefined | null): boolean {
-  return typeof value === "string" && value.startsWith(OLLAMA_PREFIX);
+  return ollamaTargetOf(value) !== null;
 }
 
 export function isCodexModel(value: string | undefined | null): boolean {
@@ -18,7 +37,9 @@ export function isCodexModel(value: string | undefined | null): boolean {
 
 /** "ollama/qwen2.5-coder:7b" -> "qwen2.5-coder:7b" (the tag Ollama knows). */
 export function ollamaModelName(value: string): string {
-  return value.slice(OLLAMA_PREFIX.length);
+  return value.startsWith(OLLAMA_LOCAL_PREFIX)
+    ? value.slice(OLLAMA_LOCAL_PREFIX.length)
+    : value.slice(OLLAMA_PREFIX.length);
 }
 
 /** "codex/default" means let Codex CLI use the signed-in user's configured model. */

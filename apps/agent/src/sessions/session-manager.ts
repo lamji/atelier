@@ -115,6 +115,8 @@ export function registerSessionHandlers(
       effort: params.effort,
       planMode: params.planMode,
       vibe: params.vibe,
+      systemKnowledge: params.systemKnowledge,
+      scopeRoots: params.scopeRoots,
       images: params.images,
       promptFile: params.promptFile,
     });

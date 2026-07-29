@@ -4,8 +4,8 @@ import { ollamaChat } from "./ollama/client.js";
 import {
   codexModelName,
   isCodexModel,
-  isOllamaModel,
   ollamaModelName,
+  ollamaTargetOf,
 } from "./model-routing.js";
 import { runCodexExec } from "./codex/client.js";
 
@@ -47,9 +47,11 @@ export interface OneShotOptions {
 }
 
 export async function runOneShot(opts: OneShotOptions): Promise<string> {
-  if (isOllamaModel(opts.model)) {
+  const ollama = ollamaTargetOf(opts.model);
+  if (ollama) {
     return ollamaChat({
       model: ollamaModelName(opts.model as string),
+      target: ollama,
       system: opts.system,
       prompt: opts.prompt,
       signal: opts.signal,

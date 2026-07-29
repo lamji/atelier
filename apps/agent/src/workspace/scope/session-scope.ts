@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { toPosix } from "@atelier/shared";
 import type { Db } from "../../storage/db.js";
@@ -14,7 +15,7 @@ export interface SessionScope {
   /** Files this conversation has already read or edited, newest first. */
   anchors: string[];
   /** How the current roots were decided. */
-  source: "mention" | "inherited" | "none";
+  source: "mention" | "explicit" | "inherited" | "none";
   /** True when this turn's mentions changed the lock. */
   changed: boolean;
 }
@@ -102,6 +103,43 @@ export class SessionScopeStore {
     };
   }
 
+  /**
+   * Locks a conversation to roots the CALLER already knows, without a
+   * mention to parse.
+   *
+   * Some tasks are born inside one project and nowhere else: the git
+   * wizard's fix agent is dispatched about a specific checkout, and asking
+   * it to infer that from a prompt full of command output is how it ended
+   * up reading every repo's .git/config in the workspace. The lock is
+   * persisted like any other, so the follow-up turns of that fix
+   * conversation inherit it.
+   *
+   * Roots that are not real directories in the workspace are dropped — a
+   * lock on a path that does not exist would filter retrieval down to
+   * nothing.
+   */
+  lock(conversationId: string, requested: string[]): SessionScope {
+    const stored = this.read(conversationId);
+    const roots = [
+      ...new Set(
+        requested
+          .map((root) => toPosix(root).replace(/^\.\/|\/+$/g, ""))
+          .filter((root) => root !== "" && root !== "." && this.isDir(root))
+      ),
+    ].sort();
+    if (roots.length === 0) {
+      // Nothing to narrow to — a repo AT the workspace root is already the
+      // whole world, and that is the correct unlocked answer.
+      return stored
+        ? { ...EMPTY_SCOPE, anchors: stored.anchors }
+        : EMPTY_SCOPE;
+    }
+    const anchors = capAnchors(stored?.anchors ?? []);
+    const changed = !sameRoots(roots, stored?.roots ?? []);
+    this.write(conversationId, roots, anchors);
+    return { roots, anchors, source: "explicit", changed };
+  }
+
   /** Records a file the agent actually touched, so follow-ups anchor to it. */
   noteTouched(conversationId: string, relPath: string): void {
     const rel = toPosix(relPath);
@@ -126,6 +164,15 @@ export class SessionScopeStore {
     this.db
       .prepare("DELETE FROM conversation_scope WHERE conversation_id = ?")
       .run(conversationId);
+  }
+
+  /** Guards `lock` against roots that do not exist on disk. */
+  private isDir(root: string): boolean {
+    try {
+      return fs.statSync(path.resolve(this.workspaceRoot, root)).isDirectory();
+    } catch {
+      return false;
+    }
   }
 
   private read(

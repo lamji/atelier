@@ -15,6 +15,7 @@
     "smoke:modularity": "tsx scripts/modularity-smoke.ts",
     "smoke:pipeline": "tsx scripts/pipeline-smoke.ts",
     "smoke:context": "tsx scripts/context-smoke.ts",
+    "smoke:direct": "tsx scripts/direct-mode-smoke.ts",
     "smoke:workspace": "tsx scripts/workspace-shape-smoke.ts",
     "smoke:scope": "tsx scripts/scope-smoke.ts",
     "smoke:plan": "tsx scripts/plan-smoke.ts",

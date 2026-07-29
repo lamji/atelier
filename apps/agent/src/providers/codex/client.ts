@@ -17,6 +17,12 @@ export interface CodexExecOptions {
   effort?: ReasoningEffort;
   telemetry?: CodexTelemetry;
   toolBridge?: CodexToolBridgeSession;
+  /**
+   * Atelier tools the MCP proxy should register. Undefined registers all
+   * of them; direct mode (system knowledge off) passes the subset that
+   * excludes retrieval, the graph, and impact analysis.
+   */
+  toolNames?: string[];
   /** Attachments for this turn. Codex reads images from disk, not stdin. */
   images?: ImageAttachment[];
 }
@@ -92,6 +98,15 @@ export async function runCodexExec(opts: CodexExecOptions): Promise<string> {
       "-c",
       `mcp_servers.atelier.env.ATELIER_CODEX_TOOL_TOKEN="${escapeToml(opts.toolBridge.token)}"`
     );
+    // The proxy registers only these when set — an absent tool is the one
+    // way to make "no retrieval" true for a model we do not otherwise gate.
+    if (opts.toolNames) {
+      args.push(
+        "-c",
+        "mcp_servers.atelier.env.ATELIER_CODEX_TOOLS=" +
+          `"${escapeToml(opts.toolNames.join(","))}"`
+      );
+    }
   }
 
   try {

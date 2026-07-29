@@ -12,9 +12,7 @@ import { BridgeServer } from "./bridge/server.js";
 import { WebHost } from "./bridge/web-host.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { UsageMonitor } from "./orchestrator/usage-monitor.js";
-import { probeModels } from "./orchestrator/models-probe.js";
-import { probeOllamaModels } from "./providers/ollama/models.js";
-import { probeCodexModels } from "./providers/codex/models.js";
+import { pickerRoster } from "./providers/roster.js";
 import { CodexToolBridge } from "./providers/codex/tool-bridge.js";
 import { registerProviderHandlers } from "./providers/register-provider-handlers.js";
 import { probeAuth } from "./orchestrator/auth-status.js";
@@ -37,6 +35,7 @@ import { NoteJournal } from "./notes/note-journal.js";
 import { registerFsHandlers } from "./workspace/register-fs-handlers.js";
 import { WorkspaceWatcher } from "./workspace/watcher.js";
 import { HooksEngine } from "./hooks/hooks-engine.js";
+import { DirectTaskRegistry } from "./hooks/direct-tasks.js";
 import {
   ModularityGuard,
   MODULARITY_HOOK_ID,
@@ -138,6 +137,10 @@ function main(): void {
   const codexTools = new CodexToolBridge(tools);
   const terminals = new TerminalManager(db, bus, config.workspaceRoot);
   const hooks = new HooksEngine(db, bus, config.workspaceRoot);
+  // Tasks the user asked to run without system knowledge. The code guards
+  // below enforce the knowledge engine, so they step aside for those runs;
+  // the consent guards (git flow, DB, dev server) never do.
+  const directTasks = new DirectTaskRegistry();
   // Built-in modularity hook: one file = one function/component/class.
   // Visible in hooks.list, can be disabled there; enforced on every write.
   hooks.ensureBuiltin({
@@ -157,6 +160,7 @@ function main(): void {
   hooks.registerGuard(MODULARITY_HOOK_ID, async () => undefined);
   files.setWriteGuard(async (relPath, nextContent, prevContent, taskId) => {
     if (!hooks.isEnabled(MODULARITY_HOOK_ID)) return;
+    if (directTasks.has(taskId)) return;
     const verdict = await modularity.check(relPath, nextContent, prevContent);
     if (!verdict.ok) {
       bus.publish(
@@ -234,7 +238,13 @@ function main(): void {
         .catch(() => false),
     bus
   );
-  hooks.registerGuard(IMPACT_HOOK_ID, (ctx) => impactGuard.check(ctx));
+  // Direct tasks are not offered impact_of_edit at all, so gating their
+  // edits on it would be a wall with no door.
+  hooks.registerGuard(IMPACT_HOOK_ID, (ctx) =>
+    directTasks.has(ctx.taskId)
+      ? Promise.resolve(undefined)
+      : impactGuard.check(ctx)
+  );
   // Built-in targeted-edit hook: write_file may not restate a file that
   // was mostly already correct. Refused once per file per task, so a
   // genuine full rewrite costs one extra tool call and never the task.
@@ -255,7 +265,11 @@ function main(): void {
         .catch(() => null),
     bus
   );
-  hooks.registerGuard(REWRITE_HOOK_ID, (ctx) => rewriteGuard.check(ctx));
+  hooks.registerGuard(REWRITE_HOOK_ID, (ctx) =>
+    directTasks.has(ctx.taskId)
+      ? Promise.resolve(undefined)
+      : rewriteGuard.check(ctx)
+  );
   const knowledge = new KnowledgeQuery(db);
   const embedder = new Embedder(config.dataDir);
   const vectors = new VectorStore(db, EMBEDDING_DIMS);
@@ -358,6 +372,7 @@ function main(): void {
     impact: impactAnalyzer,
     indexer,
     hooks,
+    directTasks,
     validators,
     planTracker,
     settings,
@@ -388,7 +403,7 @@ function main(): void {
   // calls, including the main tool loop, through Ollama.
   const selectedModel = () => settings.get().model;
   registerGitHandlers(router, git, selectedModel);
-  registerProviderHandlers(router, settings);
+  registerProviderHandlers(router, settings, config.workspaceRoot);
   registerTerminalHandlers(router, terminals);
   registerHookHandlers(router, hooks, dbApprovalGuard);
   router.register("usage.get", async (params) => ({
@@ -397,17 +412,13 @@ function main(): void {
   router.register("context.stats", async (params) =>
     ledger.query(params?.conversationId, params?.limit ?? 50)
   );
-  // Live model roster: the SDK's Claude models plus whatever the local
-  // Ollama daemon has pulled. The SDK half is probed once and cached (it
-  // costs a process); the Ollama half is cheap and re-read every call, so
-  // an `ollama pull` shows up without restarting the agent.
-  let modelsCache: import("@atelier/protocol").ModelOption[] | null = null;
-  router.register("models.list", async () => {
-    if (!modelsCache) modelsCache = await probeModels(config.workspaceRoot);
-    const local = await probeOllamaModels();
-    const codex = await probeCodexModels();
-    return { models: [...modelsCache, ...local, ...codex] };
-  });
+  // Live model roster for the composer's picker: whatever the providers
+  // switched on in Settings currently offer. Assembled in one place so the
+  // toggles there and the picker here can never disagree — see roster.ts
+  // for the caching and filtering rules.
+  router.register("models.list", async () => ({
+    models: await pickerRoster(config.workspaceRoot),
+  }));
   registerMiscHandlers(
     router,
     knowledge,

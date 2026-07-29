@@ -98,8 +98,11 @@ export const eventPayloads = {
     roots: z.array(z.string()),
     /** Files this conversation is already working on, newest first. */
     anchors: z.array(z.string()).default([]),
-    /** Whether this turn set the lock or inherited an earlier one. */
-    source: z.enum(["mention", "inherited", "none"]),
+    /**
+     * Whether this turn set the lock (a mention, or a caller that already
+     * knew the project) or inherited an earlier one.
+     */
+    source: z.enum(["mention", "explicit", "inherited", "none"]),
     /** True when this turn's mentions moved the lock somewhere new. */
     changed: z.boolean().default(false),
     /** Checkout git was pointed at, when the lock resolved to one. */

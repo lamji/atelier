@@ -3,6 +3,7 @@ import {
   Check,
   ChevronRight,
   Cloud,
+  Cpu,
   Gauge,
   Loader2,
   Plug,
@@ -10,6 +11,7 @@ import {
   RefreshCw,
   Scale,
   Settings as SettingsIcon,
+  Terminal,
   Trash2,
   Wand2,
   X,
@@ -25,6 +27,9 @@ import {
   type ProvidersVm,
 } from "@/hooks/useProvidersViewModel";
 import type { ProviderCredential, ProviderUsage } from "@atelier/protocol";
+
+/** Where the Ollama daemon listens unless the user says otherwise. */
+const LOCAL_OLLAMA_HOST = "http://127.0.0.1:11434";
 
 /**
  * Settings: model providers the user supplies credentials for. Everything
@@ -175,13 +180,14 @@ function ProvidersTab() {
           </div>
         )}
 
-        {vm.providers.filter((p) => p.configured).length === 0 && !adding && (
-          <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] leading-relaxed text-muted-foreground/70">
-            No providers configured. Claude runs on your signed-in Claude Code
-            session. Add a provider to run the tool-less calls — planning,
-            commit messages, feature summaries — somewhere else.
-          </p>
-        )}
+        {vm.providers.filter((p) => p.configured && !p.keyless).length === 0 &&
+          !adding && (
+            <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] leading-relaxed text-muted-foreground/70">
+              No API-key providers configured. The signed-in CLIs and the local
+              daemon below need no key. Add a provider to run calls against a
+              hosted account as well.
+            </p>
+          )}
 
         {vm.providers
           .filter((p) => p.configured)
@@ -223,16 +229,30 @@ function ProviderCard({
   }, [vm.connected, showModels, loadUsage, provider.id]);
 
   const enabledCount = models?.filter((m) => m.enabled).length ?? 0;
+  const Icon = provider.hostless ? Terminal : provider.keyless ? Cpu : Cloud;
 
   return (
     <div className="overflow-hidden rounded-xl bg-muted/40">
       <div className="flex items-start gap-2.5 p-2.5">
-        <Cloud className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary/80" />
+        <Icon
+          className={cn(
+            "mt-0.5 h-3.5 w-3.5 shrink-0",
+            provider.enabled ? "text-primary/80" : "text-muted-foreground/50"
+          )}
+        />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-medium">{provider.label}</p>
           <p className="mt-0.5 break-all font-mono text-[10px] text-muted-foreground/70">
-            key {provider.keyHint ?? "stored"}
-            {provider.host ? ` · ${provider.host}` : ""}
+            {provider.hostless ? (
+              <>signed-in session · no key needed</>
+            ) : provider.keyless ? (
+              <>{provider.host ?? LOCAL_OLLAMA_HOST} · no key needed</>
+            ) : (
+              <>
+                key {provider.keyHint ?? "stored"}
+                {provider.host ? ` · ${provider.host}` : ""}
+              </>
+            )}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -249,13 +269,31 @@ function ProviderCard({
           </button>
           <button
             type="button"
-            title="Remove"
+            // A keyless provider cannot be removed, only reset: it is a
+            // program on this machine, and it comes back on the next list.
+            title={
+              provider.hostless
+                ? "Reset model choices"
+                : provider.keyless
+                  ? "Reset host and model choices"
+                  : "Remove"
+            }
             disabled={vm.saving}
             onClick={() => vm.remove(provider.id)}
             className="rounded-md p-1 text-muted-foreground hover:text-destructive disabled:opacity-40"
           >
             <Trash2 className="h-3 w-3" />
           </button>
+          {/* The whole provider, in one move. Kept beside the label rather
+              than inside the model list: it decides whether that list means
+              anything at all. Model choices survive being switched off. */}
+          <Switch
+            checked={provider.enabled}
+            disabled={!vm.connected}
+            onChange={(next) => vm.setProviderEnabled(provider.id, next)}
+            label={`${provider.label} models in chat`}
+            className="ml-0.5"
+          />
         </div>
       </div>
 
@@ -275,7 +313,15 @@ function ProviderCard({
         </p>
       )}
 
-      <div className="border-t border-border/60">
+      {/* Dimmed rather than hidden while the provider is off: the model
+          choices still stand and are worth being able to set up before
+          switching the provider back on. */}
+      <div
+        className={cn(
+          "border-t border-border/60 transition-opacity",
+          !provider.enabled && "opacity-50"
+        )}
+      >
         {/* Collapsed by default: a provider can offer dozens of models and
             the list would otherwise own the whole panel. The enabled count
             stays visible while closed, which is the part worth glancing at. */}
@@ -295,7 +341,7 @@ function ProviderCard({
               Models
             </span>
             <span className="text-[10px] text-muted-foreground/50">
-              {enabledCount} in chat
+              {provider.enabled ? `${enabledCount} in chat` : "none in chat"}
             </span>
           </button>
           <button
@@ -320,7 +366,9 @@ function ProviderCard({
         ) : models && models.length > 0 ? (
           <>
             <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-muted-foreground/60">
-              Switched-on models appear in the chat model picker.
+              {provider.enabled
+                ? "Switched-on models appear in the chat model picker."
+                : "This provider is switched off, so none of these reach the chat model picker. These choices are kept for when you switch it back on."}
             </p>
             <ul className="max-h-64 overflow-y-auto px-1 pb-1">
               {models.map((model) => (
@@ -358,18 +406,28 @@ function ProviderCard({
           </>
         ) : (
           <p className="px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/60">
-            No models returned. Run Test to check the key and host.
+            {provider.hostless
+              ? "No models returned. Run Test to check you are signed in to this CLI."
+              : provider.keyless
+                ? "Nothing pulled yet. Run `ollama pull <model>` in a terminal, then refresh — anything you pull shows up here and in the chat picker."
+                : "No models returned. Run Test to check the key and host."}
           </p>
         )}
       </div>
 
-      {editing ? (
+      {/* Nothing to edit on a signed-in CLI: no key of ours, no endpoint. */}
+      {provider.hostless ? null : editing ? (
         <div className="space-y-1.5 border-t border-border/60 p-2">
           <ProviderForm
             id={provider.id}
             label={provider.label}
-            hint="Leave the key blank to keep the stored one"
+            hint={
+              provider.keyless
+                ? `Where the daemon listens — blank means ${LOCAL_OLLAMA_HOST}`
+                : "Leave the key blank to keep the stored one"
+            }
             vm={vm}
+            keyless={provider.keyless}
             initialHost={provider.host ?? ""}
             onDone={() => setEditing(false)}
           />
@@ -380,7 +438,7 @@ function ProviderCard({
           onClick={() => setEditing(true)}
           className="w-full border-t border-border/60 px-2.5 py-1.5 text-left text-[10px] text-muted-foreground hover:text-foreground"
         >
-          Edit key or host
+          {provider.keyless ? "Edit host" : "Edit key or host"}
         </button>
       )}
     </div>
@@ -458,6 +516,7 @@ function ProviderForm({
   label,
   hint,
   vm,
+  keyless = false,
   initialHost = "",
   onDone,
 }: {
@@ -465,6 +524,8 @@ function ProviderForm({
   label: string;
   hint: string;
   vm: ProvidersVm;
+  /** A daemon on this machine: host only, no secret to ask for. */
+  keyless?: boolean;
   initialHost?: string;
   onDone: () => void;
 }) {
@@ -490,26 +551,32 @@ function ProviderForm({
           {hint}
         </p>
       </div>
-      <input
-        type="password"
-        value={apiKey}
-        autoComplete="off"
-        spellCheck={false}
-        placeholder="API key"
-        onChange={(e) => setApiKey(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        className={cn(
-          "w-full rounded-md bg-muted px-2 py-1 font-mono text-[11px]",
-          "outline-none placeholder:text-muted-foreground/50",
-          "focus:ring-1 focus:ring-primary/40"
-        )}
-      />
+      {!keyless && (
+        <input
+          type="password"
+          value={apiKey}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="API key"
+          onChange={(e) => setApiKey(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          className={cn(
+            "w-full rounded-md bg-muted px-2 py-1 font-mono text-[11px]",
+            "outline-none placeholder:text-muted-foreground/50",
+            "focus:ring-1 focus:ring-primary/40"
+          )}
+        />
+      )}
       <input
         type="text"
         value={host}
         autoComplete="off"
         spellCheck={false}
-        placeholder="Host (optional) — defaults to https://ollama.com"
+        placeholder={
+          keyless
+            ? `Host (optional) — defaults to ${LOCAL_OLLAMA_HOST}`
+            : "Host (optional) — defaults to https://ollama.com"
+        }
         onChange={(e) => setHost(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
         className={cn(

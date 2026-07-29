@@ -1,7 +1,21 @@
 import { z } from "zod";
 
-/** Backends the user can supply their own credentials for. */
-export const ProviderId = z.enum(["ollama-cloud"]);
+/**
+ * Backends the user can point Atelier at. Ollama appears twice on purpose:
+ * the daemon on this machine and the hosted service are different
+ * endpoints with different model rosters, and a user who has both wants
+ * both — not one setting they have to keep switching.
+ *
+ * Claude and Codex are here for the same reason the Ollama entries are:
+ * they put rows in the composer's picker, so they need somewhere to be
+ * switched off.
+ */
+export const ProviderId = z.enum([
+  "claude",
+  "codex",
+  "ollama-cloud",
+  "ollama-local",
+]);
 export type ProviderId = z.infer<typeof ProviderId>;
 
 /**
@@ -13,6 +27,26 @@ export const ProviderCredential = z.object({
   id: ProviderId,
   label: z.string(),
   configured: z.boolean(),
+  /**
+   * Whether this provider reaches the composer's picker at all. Off hides
+   * its whole roster in one move, without disturbing which of its models
+   * are individually switched on — turning it back on restores exactly the
+   * selection the user last made.
+   *
+   * Defaults on, so a provider that predates this flag keeps working.
+   */
+  enabled: z.boolean().default(true),
+  /**
+   * Needs no API key — a daemon on this machine, or a CLI the user is
+   * already signed in to. Such a provider is always present rather than
+   * "added", and its card asks for a host, not a secret.
+   */
+  keyless: z.boolean().default(false),
+  /**
+   * Has no endpoint to point elsewhere: the backend is a signed-in CLI
+   * session rather than an HTTP API, so there is no host to ask for.
+   */
+  hostless: z.boolean().default(false),
   /** Last 4 characters of the stored key, e.g. "…9f2c". */
   keyHint: z.string().optional(),
   /** Custom endpoint; empty means the provider's default. */

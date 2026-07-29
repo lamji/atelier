@@ -40,6 +40,14 @@ export const providersMethods = {
     params: z.object({ id: ProviderId }),
     result: z.object({ usage: ProviderUsage }),
   },
+  /**
+   * Switches a whole provider in or out of the composer's picker. Its
+   * per-model choices are kept, so switching back on restores them.
+   */
+  "providers.setEnabled": {
+    params: z.object({ id: ProviderId, enabled: z.boolean() }),
+    result: z.object({ providers: z.array(ProviderCredential) }),
+  },
   /** Switches one model in or out of the composer's picker. */
   "providers.setModelEnabled": {
     params: z.object({

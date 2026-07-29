@@ -142,7 +142,7 @@ function scopeLockedSummary(payload: Record<string, unknown>): string {
       ? `Anchored to ${anchors.length} file(s) from earlier turns`
       : "No scope lock";
   }
-  const verb = payload.source === "mention" ? "Locked to" : "Still locked to";
+  const verb = payload.source === "inherited" ? "Still locked to" : "Locked to";
   const where = roots.map((root) => `${root}/`).join(", ");
   const git = repo && repo !== "." ? ` · git: ${repo}` : "";
   const anchored =

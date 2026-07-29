@@ -1,11 +1,11 @@
 import type { ImageAttachment } from "@atelier/protocol";
 import type { ToolRegistry } from "../../tools/registry.js";
 import { shapeToolOutput } from "../../context/tool-output/index.js";
-import { ollamaApiKey, ollamaHost } from "./client.js";
+import type { OllamaTarget } from "../model-routing.js";
+import { ollamaApiKey, ollamaHost, resolveNumCtx } from "./client.js";
 import { recordUsage } from "./usage.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-const DEFAULT_NUM_CTX = 8192;
 const MAX_TURNS = 30;
 
 type JsonSchema = Record<string, unknown>;
@@ -35,10 +35,18 @@ interface OllamaChatResponse {
 
 export interface OllamaAgentLoopOptions {
   model: string;
+  /** Which endpoint serves this model — the daemon here, or the cloud. */
+  target?: OllamaTarget;
   system: string;
   prompt: string;
   images?: ImageAttachment[];
   tools: ToolRegistry;
+  /**
+   * Narrows the tool surface offered to the model. Undefined offers every
+   * Atelier tool; a list is how direct mode (system knowledge off) keeps
+   * the knowledge tools out of the loop entirely.
+   */
+  toolNames?: string[];
   taskId: string;
   signal: AbortSignal;
   emitText: (delta: string) => void;
@@ -59,8 +67,22 @@ export async function runOllamaAgentLoop(
   ];
   let text = "";
 
+  const offered = toolsFor(opts.toolNames);
+  const target = opts.target ?? "ollama-cloud";
+  // Sized from the model, once per run. The tool loop replays every result
+  // on every turn, so this is the number that decides whether the rules and
+  // the assembled context survive to the end of the task.
+  const numCtx = await resolveNumCtx(opts.model, target);
+
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const response = await ollamaChatWithTools(opts.model, messages, opts.signal);
+    const response = await ollamaChatWithTools(
+      opts.model,
+      target,
+      messages,
+      offered,
+      numCtx,
+      opts.signal
+    );
     const message = response.message ?? { role: "assistant", content: "" };
     recordResponseUsage(response);
     messages.push(message);
@@ -125,20 +147,35 @@ function normalizeToolArguments(args: unknown): unknown {
   }
 }
 
+/** The offered schemas, in declaration order, filtered by name if asked. */
+function toolsFor(names: string[] | undefined): JsonSchema[] {
+  if (!names) return ATELIER_TOOLS;
+  const wanted = new Set(names);
+  return ATELIER_TOOLS.filter((schema) => wanted.has(toolNameOf(schema)));
+}
+
+function toolNameOf(schema: JsonSchema): string {
+  const fn = schema.function as { name?: string } | undefined;
+  return fn?.name ?? "";
+}
+
 async function ollamaChatWithTools(
   model: string,
+  target: OllamaTarget,
   messages: OllamaMessage[],
+  tools: JsonSchema[],
+  numCtx: number,
   signal: AbortSignal
 ): Promise<OllamaChatResponse> {
-  const response = await fetchWithTimeout(`${ollamaHost()}/api/chat`, {
+  const response = await fetchWithTimeout(`${ollamaHost(target)}/api/chat`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders() },
+    headers: { "content-type": "application/json", ...authHeaders(target) },
     body: JSON.stringify({
       model,
       messages,
-      tools: ATELIER_TOOLS,
+      tools,
       stream: false,
-      options: { num_ctx: DEFAULT_NUM_CTX },
+      options: { num_ctx: numCtx },
     }),
     signal,
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -156,8 +193,8 @@ async function ollamaChatWithTools(
   return body;
 }
 
-function authHeaders(): Record<string, string> {
-  const key = ollamaApiKey();
+function authHeaders(target: OllamaTarget): Record<string, string> {
+  const key = ollamaApiKey(target);
   return key ? { authorization: `Bearer ${key}` } : {};
 }
 

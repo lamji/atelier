@@ -217,11 +217,23 @@ export function useGitFlowViewModel() {
         newId("local"),
         extraPrompt || `Fix the failed ${kind} step`
       );
+      // The failure belongs to ONE checkout. Without this the fix agent
+      // treats a multi-repo workspace as its search space and reads every
+      // sibling repo's .git/config looking for the one that failed.
+      const repo = s.info?.repo;
       const { taskId } = await bridge.rpc("task.start", {
         conversationId,
-        prompt: buildFixPrompt(kind, s.output, s.conflicts, s.prBase, extraPrompt),
+        prompt: buildFixPrompt(
+          kind,
+          s.output,
+          s.conflicts,
+          s.prBase,
+          extraPrompt,
+          repo
+        ),
         model: FIX_MODEL,
         effort: "high",
+        scopeRoots: repo && repo !== "." ? [repo] : undefined,
       });
       sessions.taskStarted(conversationId, taskId);
     } catch (e) {
@@ -284,6 +296,10 @@ export function useGitFlowViewModel() {
           running: false,
           stage: "pr-fix",
           error: `PR creation failed (exit ${result.exitCode})`,
+          // gh may have failed for a reason no code edit can fix (wrong
+          // account, missing scope, org SSO). The compare page is the same
+          // PR, opened by hand.
+          prCompareUrl: result.fallbackUrl ?? null,
         });
       }
     } catch (e) {
@@ -401,7 +417,9 @@ function buildFixPrompt(
   output: string,
   conflicts: string[],
   base: string,
-  extra: string
+  extra: string,
+  /** The checkout that failed, workspace-relative ("." at the root). */
+  repo?: string
 ): string {
   const intro: Record<FixKind, string> = {
     commit:
@@ -416,8 +434,14 @@ function buildFixPrompt(
       "keep both sides' intent, remove all <<<<<<</=======/>>>>>>> markers.",
     pr: "A `gh pr create` for this workspace just failed.",
   };
+  const where =
+    repo && repo !== "."
+      ? ` The repository is \`${repo}/\` — the workspace holds other ` +
+        "checkouts, and none of them are involved. Read, search and edit " +
+        `ONLY inside \`${repo}/\`.`
+      : "";
   const parts = [
-    intro[kind],
+    intro[kind] + where,
     "",
     "Command output:",
     "```",

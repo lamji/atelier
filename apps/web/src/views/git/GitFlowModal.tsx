@@ -186,6 +186,7 @@ function StageBody({
       return (
         <>
           <OutputPane output={flow.output} compact />
+          {flow.prCompareUrl && <CompareFallback url={flow.prCompareUrl} />}
           <FixChat vm={vm} session={fixSession} />
         </>
       );
@@ -200,6 +201,33 @@ function StageBody({
     default:
       return null;
   }
+}
+
+/**
+ * The way out of a `gh` failure the AI cannot fix. When gh cannot resolve
+ * the repository — wrong account, token without `repo` scope, org SSO not
+ * authorized — nothing in the workspace is broken and no edit will help,
+ * but the branch is already pushed, so the PR is one click away in the
+ * browser session that does work.
+ */
+function CompareFallback({ url }: { url: string }) {
+  return (
+    <div className="rounded-lg bg-secondary/40 px-2.5 py-2">
+      <p className="text-[11px] text-muted-foreground">
+        The branch is pushed — if this is a `gh` sign-in or permission
+        problem, open the pull request on github.com instead:
+      </p>
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-1 flex items-center gap-1.5 break-all text-[11px] text-primary hover:underline"
+      >
+        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+        {url}
+      </a>
+    </div>
+  );
 }
 
 const OPERATION_LABELS: Record<GitFlowRequest["operation"], string> = {
