@@ -56,7 +56,7 @@ export function ActivityBar({
           <button
             onClick={() => onSelect(id)}
             className={cn(
-              "relative flex h-10 w-10 items-center justify-center rounded-xl",
+              "relative flex h-9 w-9 items-center justify-center rounded-lg",
               "text-muted-foreground transition-colors hover:text-foreground",
               active === id && "text-primary"
             )}
@@ -65,7 +65,7 @@ export function ActivityBar({
               <motion.span
                 layoutId="activity-active"
                 transition={{ type: "spring", stiffness: 400, damping: 32 }}
-                className="absolute inset-0 rounded-xl bg-primary/12"
+                className="absolute inset-0 rounded-lg bg-primary/12"
               />
             )}
             <Icon className="relative h-[18px] w-[18px]" />

@@ -5,18 +5,14 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import { TerminalPanel } from "@/views/terminal/TerminalPanel";
-import { TimelinePanel } from "@/views/timeline/TimelinePanel";
 import { GraphPane } from "@/views/knowledge/GraphPane";
 import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { languageForPath } from "@/lib/diff-view";
 import { registerMarkdownMentions } from "@/lib/monaco-mentions";
 import { bridge } from "@/services/bridge-client";
-import type { TerminalSession } from "@atelier/protocol";
 import type { SlashCommand } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
-import type { TimelineEntryVm } from "@/types";
 import type { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
 import type { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 
@@ -35,16 +31,6 @@ export interface RightDockProps {
   // git file diff (takes over the editor pane while open)
   gitDiff: GitDiffView | null;
   onCloseGitDiff: () => void;
-  // terminal
-  terminalSessions: TerminalSession[];
-  activeTermId: string | null;
-  onSelectTerm: (termId: string) => void;
-  onCreateTerm: () => void;
-  onKillTerm: (termId: string) => void;
-  onMountTerm: (termId: string, container: HTMLElement) => void;
-  onRefitTerm: (termId: string) => void;
-  // activity
-  timelineEntries: TimelineEntryVm[];
   // knowledge
   knowledgeVm: ReturnType<typeof useKnowledgeViewModel>;
   ragVm: ReturnType<typeof useRagInspectorViewModel>;
@@ -100,13 +86,7 @@ const GIT_DIFF_EDITOR_OPTIONS = {
  * only while visible, so their lists cost nothing when they aren't on screen.
  */
 export function RightDock(props: RightDockProps) {
-  const { rightTab, activeTermId, onRefitTerm } = props;
-
-  useEffect(() => {
-    if (rightTab === "terminal" && activeTermId) {
-      requestAnimationFrame(() => onRefitTerm(activeTermId));
-    }
-  }, [rightTab, activeTermId, onRefitTerm]);
+  const { rightTab } = props;
 
   return (
     <div className="flex h-full flex-col">
@@ -139,18 +119,6 @@ export function RightDock(props: RightDockProps) {
           )}
         </Pane>
 
-        <Pane active={rightTab === "terminal"}>
-          <TerminalPanel
-            sessions={props.terminalSessions}
-            activeTermId={props.activeTermId}
-            onSelect={props.onSelectTerm}
-            onCreate={props.onCreateTerm}
-            onKill={props.onKillTerm}
-            onMount={props.onMountTerm}
-            onRefit={props.onRefitTerm}
-          />
-        </Pane>
-
         <Pane active={rightTab === "graph"}>
           <GraphPane
             vm={props.knowledgeVm}
@@ -161,10 +129,6 @@ export function RightDock(props: RightDockProps) {
 
         <Pane active={rightTab === "rag"} mountWhenHidden={false}>
           <RagInspectorPane vm={props.ragVm} />
-        </Pane>
-
-        <Pane active={rightTab === "activity"} mountWhenHidden={false}>
-          <TimelinePanel entries={props.timelineEntries} />
         </Pane>
       </div>
     </div>

@@ -1,8 +1,14 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { AnimatePresence } from "framer-motion";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import {
+  Panel,
+  PanelGroup,
+  PanelResizeHandle,
+  type ImperativePanelHandle,
+} from "react-resizable-panels";
 import { HeaderBar } from "./HeaderBar";
 import { TitleBar } from "./TitleBar";
+import { BottomPanel } from "./BottomPanel";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
 import { StatusBar } from "./StatusBar";
 import { ConnectionGate } from "./ConnectionGate";
@@ -69,6 +75,49 @@ export function AppShell() {
   const skillDetail = useWorkspaceStore((s) => s.skillDetail);
   const closeSkillDetail = useWorkspaceStore((s) => s.closeSkillDetail);
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
+  const bottomOpen = useWorkspaceStore((s) => s.bottomPanel);
+  const bottomTab = useWorkspaceStore((s) => s.bottomTab);
+  const setBottomPanel = useWorkspaceStore((s) => s.setBottomPanel);
+  const openBottom = useWorkspaceStore((s) => s.openBottom);
+  const bottomRef = useRef<ImperativePanelHandle>(null);
+
+  // The panel is the source of truth for its size; the store drives
+  // expand/collapse so anything (header tab, Ctrl+`) can toggle it.
+  useEffect(() => {
+    const panel = bottomRef.current;
+    if (!panel) return;
+    if (bottomOpen && panel.isCollapsed()) {
+      panel.expand();
+      // First open starts from defaultSize 0, so give it a real height.
+      if (panel.getSize() < 15) panel.resize(30);
+    }
+    if (!bottomOpen && !panel.isCollapsed()) panel.collapse();
+  }, [bottomOpen]);
+
+  // Ctrl+` toggles the bottom dock, VS Code style.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key === "`") {
+        event.preventDefault();
+        useWorkspaceStore.setState((s) => ({ bottomPanel: !s.bottomPanel }));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // Header Terminal/Activity tabs drive the bottom dock; clicking the
+  // already-active one collapses it. Other tabs switch the main view as
+  // before.
+  const selectHeaderTab = (tab: Parameters<typeof editor.setRightTab>[0]) => {
+    if (tab === "terminal" || tab === "activity") {
+      const target = tab === "terminal" ? "terminal" : "timeline";
+      if (bottomOpen && bottomTab === target) setBottomPanel(false);
+      else openBottom(target);
+      return;
+    }
+    editor.setRightTab(tab);
+  };
 
   // Wildcard subscriptions do not replay, so seed the branch once on
   // connect; git.state.changed keeps it live afterward.
@@ -145,7 +194,7 @@ export function AppShell() {
       workingCount={sessions.workingCount}
       rightTab={editor.rightTab}
       terminalCount={terminal.sessions.length}
-      onSelectTab={editor.setRightTab}
+      onSelectTab={selectHeaderTab}
     />
   );
 
@@ -175,39 +224,60 @@ export function AppShell() {
           </Panel>
           <PanelResizeHandle className="w-[3px] bg-transparent transition-colors hover:bg-primary/40 data-[resize-handle-active]:bg-primary/60" />
           <Panel defaultSize={78} minSize={40}>
-            <div className={cn("relative h-full", busy && "glow-working")}>
-              <AnimatePresence>
-                {showIndexingWelcome && (
-                  <IndexingWelcome
-                    vm={knowledge}
-                    workspaceRoot={connection.workspaceRoot}
+            <PanelGroup direction="vertical">
+              <Panel defaultSize={72} minSize={30}>
+                <div className={cn("relative h-full", busy && "glow-working")}>
+                  <AnimatePresence>
+                    {showIndexingWelcome && (
+                      <IndexingWelcome
+                        vm={knowledge}
+                        workspaceRoot={connection.workspaceRoot}
+                      />
+                    )}
+                  </AnimatePresence>
+                  <RightDock
+                    rightTab={editor.rightTab}
+                    chatPane={chatPane}
+                    skillDetail={skillDetail}
+                    onCloseSkillDetail={closeSkillDetail}
+                    selectedPath={editor.selectedPath}
+                    fileContent={editor.fileContent}
+                    language={editor.language}
+                    monacoTheme={editor.monacoTheme}
+                    gitDiff={git.gitDiff}
+                    onCloseGitDiff={git.closeDiff}
+                    knowledgeVm={knowledge}
+                    ragVm={rag}
+                    appTheme={theme}
                   />
-                )}
-              </AnimatePresence>
-              <RightDock
-                rightTab={editor.rightTab}
-                chatPane={chatPane}
-                skillDetail={skillDetail}
-                onCloseSkillDetail={closeSkillDetail}
-                selectedPath={editor.selectedPath}
-                fileContent={editor.fileContent}
-                language={editor.language}
-                monacoTheme={editor.monacoTheme}
-                gitDiff={git.gitDiff}
-                onCloseGitDiff={git.closeDiff}
-                terminalSessions={terminal.sessions}
-                activeTermId={terminal.activeTermId}
-                onSelectTerm={terminal.setActive}
-                onCreateTerm={() => void terminal.create()}
-                onKillTerm={(id) => void terminal.kill(id)}
-                onMountTerm={terminal.mount}
-                onRefitTerm={terminal.refit}
-                timelineEntries={timeline.entries}
-                knowledgeVm={knowledge}
-                ragVm={rag}
-                appTheme={theme}
-              />
-            </div>
+                </div>
+              </Panel>
+              <PanelResizeHandle className="h-[3px] bg-transparent transition-colors hover:bg-primary/40 data-[resize-handle-active]:bg-primary/60" />
+              <Panel
+                ref={bottomRef}
+                defaultSize={0}
+                minSize={12}
+                collapsible
+                collapsedSize={0}
+                onCollapse={() => setBottomPanel(false)}
+                onExpand={() => setBottomPanel(true)}
+              >
+                <BottomPanel
+                  open={bottomOpen}
+                  tab={bottomTab}
+                  onSelectTab={(tab) => openBottom(tab)}
+                  onClose={() => setBottomPanel(false)}
+                  terminalSessions={terminal.sessions}
+                  activeTermId={terminal.activeTermId}
+                  onSelectTerm={terminal.setActive}
+                  onCreateTerm={() => void terminal.create()}
+                  onKillTerm={(id) => void terminal.kill(id)}
+                  onMountTerm={terminal.mount}
+                  onRefitTerm={terminal.refit}
+                  timelineEntries={timeline.entries}
+                />
+              </Panel>
+            </PanelGroup>
           </Panel>
         </PanelGroup>
       </div>

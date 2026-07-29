@@ -68,7 +68,12 @@ export function StatusBar(props: StatusBarProps) {
         )}
         {CONNECTION_LABEL[props.connection]}
       </span>
-      <span className={cn("flex items-center gap-1.5 font-medium", agentTone)}>
+      <span
+        className={cn(
+          "flex items-center gap-1.5 whitespace-nowrap font-medium",
+          agentTone
+        )}
+      >
         <span
           className={cn(
             "h-1.5 w-1.5 rounded-full bg-current",

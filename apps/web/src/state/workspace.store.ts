@@ -10,6 +10,9 @@ export type RightTab =
   | "graph"
   | "rag";
 
+/** Tabs of the collapsible bottom dock (terminal + execution timeline). */
+export type BottomTab = "terminal" | "timeline";
+
 interface WorkspaceStore {
   /** Which left panel the activity rail shows. Lives here (not in
    *  AppShell state) so other views can navigate the rail. */
@@ -21,8 +24,13 @@ interface WorkspaceStore {
   fileContent: string | null;
   fileMtime: number | null;
   rightTab: RightTab;
+  /** Whether the bottom dock (terminal / timeline) is expanded. */
+  bottomPanel: boolean;
+  bottomTab: BottomTab;
   skillDetail: { command: SlashCommand; content: string } | null;
   setActivityView: (view: ActivityView) => void;
+  setBottomPanel: (open: boolean) => void;
+  openBottom: (tab: BottomTab) => void;
   setTree: (tree: FileTreeNode) => void;
   bumpTreeVersion: () => void;
   toggleExpanded: (path: string) => void;
@@ -43,9 +51,13 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   fileContent: null,
   fileMtime: null,
   rightTab: "chat",
+  bottomPanel: false,
+  bottomTab: "terminal",
   skillDetail: null,
 
   setActivityView: (activityView) => set({ activityView }),
+  setBottomPanel: (bottomPanel) => set({ bottomPanel }),
+  openBottom: (bottomTab) => set({ bottomPanel: true, bottomTab }),
   setTree: (tree) => set({ tree }),
   bumpTreeVersion: () => set((s) => ({ treeVersion: s.treeVersion + 1 })),
   toggleExpanded: (path) =>

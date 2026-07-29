@@ -42,16 +42,11 @@ export function HeaderBar(props: HeaderBarProps) {
 
   return (
     <div className="flex h-full items-center gap-3 px-3">
-      <div className="flex items-center gap-2.5">
-        <div className="orb flex h-8 w-8 items-center justify-center rounded-xl text-sm font-bold text-white">
+      <div className="flex items-center gap-2">
+        <div className="orb flex h-6 w-6 items-center justify-center rounded-md text-xs font-bold text-white">
           A
         </div>
-        <div className="leading-tight">
-          <p className="text-sm font-bold tracking-tight">Atelier</p>
-          <p className="text-[10px] text-muted-foreground">
-            agentic engineering
-          </p>
-        </div>
+        <p className="text-[13px] font-semibold tracking-tight">Atelier</p>
         {props.workingCount > 0 && (
           <span className="ml-1 flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-[11px] font-semibold text-primary">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
@@ -70,7 +65,7 @@ export function HeaderBar(props: HeaderBarProps) {
             key={tab.id}
             onClick={() => props.onSelectTab(tab.id)}
             className={cn(
-              "relative flex h-8 items-center gap-1.5 rounded-lg px-3",
+              "relative flex h-7 items-center gap-1.5 rounded-md px-2.5",
               "text-xs font-medium transition-colors",
               props.rightTab === tab.id
                 ? "text-foreground"
