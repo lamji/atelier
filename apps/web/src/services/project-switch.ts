@@ -2,7 +2,9 @@ import type { EventFrame, ProjectInfo } from "@atelier/protocol";
 import { bridge } from "./bridge-client.js";
 import { hub } from "./hub-client.js";
 import { terminalRegistry } from "./terminal-registry.js";
+import { workspaceActivity } from "./workspace-activity.js";
 import { useProjectsStore } from "@/state/projects.store";
+import { usePreferencesStore } from "@/state/preferences.store";
 import { resetWorkspaceStores } from "@/state/reset";
 
 let hubStarted = false;
@@ -34,6 +36,9 @@ export function startHub(): void {
   });
 
   hub.connect();
+  // Follows every warm background agent so the switcher can say which
+  // workspaces are actually working, not merely loaded.
+  workspaceActivity.start();
 }
 
 async function loadAndAutoSelect(): Promise<void> {
@@ -104,6 +109,9 @@ export async function switchProject(id: string): Promise<void> {
     bridge.disconnect();
     resetWorkspaceStores();
     terminalRegistry.disposeAll();
+    // Each workspace keeps its own composer picks (model, effort, knowledge,
+    // vibe); load this project's before anything can read them.
+    usePreferencesStore.getState().setProjectScope(id);
     bridge.setEndpoint({ port: endpoint.port, token: endpoint.token });
     store.setActive(id);
     bridge.connect();

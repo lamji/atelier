@@ -26,6 +26,18 @@ export interface ComposerPrefs {
   systemKnowledge: boolean;
 }
 
+/**
+ * Each project is an isolated workspace, so the picks that describe "how I
+ * work HERE" (model, effort, knowledge, vibe) are stored per project. The
+ * unscoped key remains the fallback, so an existing install keeps its
+ * choices the first time it opens each project.
+ */
+let projectScope = "";
+
+function scoped(key: string): string {
+  return projectScope ? `${key}::${projectScope}` : key;
+}
+
 function parse<T>(key: string): T | null {
   try {
     const raw = localStorage.getItem(key);
@@ -36,12 +48,16 @@ function parse<T>(key: string): T | null {
 }
 
 function readVibe(): boolean {
-  return localStorage.getItem(VIBE_KEY) === "1";
+  const own = localStorage.getItem(scoped(VIBE_KEY));
+  return (own ?? localStorage.getItem(VIBE_KEY)) === "1";
 }
 
-/** What a chat with no pick of its own gets — your last choice. */
+/** What a chat with no pick of its own gets — your last choice here. */
 function readDefaults(): ComposerPrefs {
-  const stored = parse<Partial<ComposerPrefs>>(DEFAULTS_KEY) ?? {};
+  const stored =
+    parse<Partial<ComposerPrefs>>(scoped(DEFAULTS_KEY)) ??
+    parse<Partial<ComposerPrefs>>(DEFAULTS_KEY) ??
+    {};
   return {
     model: stored.model ?? localStorage.getItem(LEGACY_MODEL_KEY) ?? "default",
     effort:
@@ -53,6 +69,19 @@ function readDefaults(): ComposerPrefs {
     // The pipeline is what Atelier is; bypassing it is the deliberate act.
     systemKnowledge: stored.systemKnowledge ?? true,
   };
+}
+
+/**
+ * Per-chat picks, scoped per project so a busy workspace's conversations
+ * cannot evict another workspace's picks out of the capped map.
+ */
+function readByChat(): Record<string, Partial<ComposerPrefs>> {
+  return (
+    parse<Record<string, Partial<ComposerPrefs>>>(scoped(PER_CHAT_KEY)) ??
+    (projectScope
+      ? {}
+      : (parse<Record<string, Partial<ComposerPrefs>>>(PER_CHAT_KEY) ?? {}))
+  );
 }
 
 function prune(
@@ -86,17 +115,30 @@ interface PreferencesStore {
     conversationId: string | null,
     patch: Partial<ComposerPrefs>
   ) => void;
+  /**
+   * Re-point the store at a project's own picks. Called on every project
+   * switch so each workspace keeps its own model/effort/knowledge/vibe
+   * rather than inheriting whatever the last project was set to.
+   */
+  setProjectScope: (projectId: string | null) => void;
 }
 
 export const usePreferencesStore = create<PreferencesStore>((set) => ({
   vibe: readVibe(),
   setVibe: (value) => {
-    localStorage.setItem(VIBE_KEY, value ? "1" : "0");
+    localStorage.setItem(scoped(VIBE_KEY), value ? "1" : "0");
     set({ vibe: value });
   },
 
   defaults: readDefaults(),
-  byChat: parse<Record<string, Partial<ComposerPrefs>>>(PER_CHAT_KEY) ?? {},
+  byChat: readByChat(),
+
+  setProjectScope: (projectId) => {
+    const next = projectId ?? "";
+    if (next === projectScope) return;
+    projectScope = next;
+    set({ vibe: readVibe(), defaults: readDefaults(), byChat: readByChat() });
+  },
 
   setComposer: (conversationId, patch) =>
     set((s) => {
@@ -104,13 +146,13 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
       // choosing a model still feels sticky — it just stops leaking sideways
       // into chats you already set.
       const defaults: ComposerPrefs = { ...s.defaults, ...patch, planMode: false };
-      localStorage.setItem(DEFAULTS_KEY, JSON.stringify(defaults));
+      localStorage.setItem(scoped(DEFAULTS_KEY), JSON.stringify(defaults));
       if (!conversationId) return { defaults };
       const byChat = prune({
         ...s.byChat,
         [conversationId]: { ...s.byChat[conversationId], ...patch },
       });
-      localStorage.setItem(PER_CHAT_KEY, JSON.stringify(byChat));
+      localStorage.setItem(scoped(PER_CHAT_KEY), JSON.stringify(byChat));
       return { defaults, byChat };
     }),
 }));

@@ -10,6 +10,7 @@ import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { languageForPath } from "@/lib/diff-view";
 import { registerMarkdownMentions } from "@/lib/monaco-mentions";
 import { bridge } from "@/services/bridge-client";
+import { useWorkspaceStore } from "@/state/workspace.store";
 import type { SlashCommand } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
@@ -221,6 +222,17 @@ const FilePane = memo(function FilePane(props: {
     setSaveState("clean");
     return () => void flush();
   }, [props.selectedPath, flush]);
+
+  // Switching workspaces DROPS a queued edit instead of flushing it. The
+  // bridge is already re-pointed at the new project's agent, and the queued
+  // path is relative — retrying it there would write this project's content
+  // into the same relative path of another project.
+  const workspaceEpoch = useWorkspaceStore((s) => s.workspaceEpoch);
+  useEffect(() => {
+    window.clearTimeout(timerRef.current);
+    pendingRef.current = null;
+    setSaveState("clean");
+  }, [workspaceEpoch]);
 
   const onChange = (value: string | undefined) => {
     if (!editable || value === undefined || !props.selectedPath) return;

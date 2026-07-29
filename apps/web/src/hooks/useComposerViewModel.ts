@@ -216,6 +216,15 @@ export function useComposerViewModel(): ComposerViewModel {
     setError(null);
   }, [selectedId]);
 
+  // Switching WORKSPACES clears the draft outright. A thought in progress
+  // belongs to the project it was typed for — carrying the text (or staged
+  // images) into another workspace would send it to a different agent.
+  const workspaceEpoch = useWorkspaceStore((s) => s.workspaceEpoch);
+  useEffect(() => {
+    setInput("");
+    setImages([]);
+  }, [workspaceEpoch]);
+
   const send = useCallback(() => {
     const text = input.trim();
     // An image-only or prompt-file-only message is valid.

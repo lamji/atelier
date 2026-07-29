@@ -90,6 +90,11 @@ export class BridgeClient {
       url: `ws://127.0.0.1:${endpoint.port}`,
       token: endpoint.token,
     };
+    // Sequence numbers are per agent and restart low, so a seq carried over
+    // from the previous project would ask the new one to replay from a
+    // point in someone else's stream.
+    for (const entry of this.subs.values()) entry.lastSeq = 0;
+    this.hello = null;
   }
 
   clearEndpoint(): void {

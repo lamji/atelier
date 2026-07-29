@@ -24,6 +24,13 @@ interface WorkspaceStore {
   fileContent: string | null;
   fileMtime: number | null;
   rightTab: RightTab;
+  /**
+   * Bumped every time the app re-points at a different project. Anything
+   * holding workspace-scoped state OUTSIDE a store (React local state, refs)
+   * watches this to drop it — a draft or a queued file write from the old
+   * workspace must never reach the new one.
+   */
+  workspaceEpoch: number;
   /** Whether the bottom dock (terminal / timeline) is expanded. */
   bottomPanel: boolean;
   bottomTab: BottomTab;
@@ -51,6 +58,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   fileContent: null,
   fileMtime: null,
   rightTab: "chat",
+  workspaceEpoch: 0,
   bottomPanel: false,
   bottomTab: "terminal",
   skillDetail: null,
