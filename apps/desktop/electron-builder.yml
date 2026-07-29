@@ -1,0 +1,24 @@
+appId: dev.atelier.desktop
+productName: Atelier
+directories:
+  output: release
+# Only the tiny main/preload bundles live in the asar; the whole backend
+# ships as plain files under resources/ so native .node/.dll binaries and
+# self-relative reads (parse-worker.mjs, schema.sql) work unchanged.
+files:
+  - dist/**
+  - package.json
+extraResources:
+  - from: build/backend/web
+    to: web
+  - from: build/backend/agent
+    to: agent
+win:
+  target: nsis
+  artifactName: Atelier-Setup-${version}.exe
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+# The backend is staged by scripts/build-backend.mjs for the Electron ABI;
+# nothing in node_modules needs rebuilding for the app itself.
+npmRebuild: false

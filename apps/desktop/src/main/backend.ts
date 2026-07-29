@@ -36,6 +36,9 @@ function dataRoot(): string {
 }
 
 function preferredHubPort(): number {
+  // Pinned port wins — same contract as the CLI's --port flag.
+  const pinned = Number(process.env.ATELIER_HUB_PORT);
+  if (Number.isFinite(pinned) && pinned > 0) return pinned;
   try {
     const raw = fs.readFileSync(path.join(dataRoot(), "hub.json"), "utf8");
     const port = Number((JSON.parse(raw) as { port?: number }).port);
@@ -78,7 +81,9 @@ function backendResources(): {
   agentEntry: string;
   webDist: string;
 } {
-  const base = process.resourcesPath;
+  // ATELIER_BACKEND_DIR lets a dev run point at build/backend without
+  // packing an installer first.
+  const base = process.env.ATELIER_BACKEND_DIR ?? process.resourcesPath;
   return {
     supervisorEntry: path.join(base, "agent", "supervisor-main.mjs"),
     agentEntry: path.join(base, "agent", "main.mjs"),

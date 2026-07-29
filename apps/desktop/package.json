@@ -8,11 +8,14 @@
     "bundle": "node scripts/bundle.mjs",
     "bundle:watch": "node scripts/bundle.mjs --watch",
     "dev": "node scripts/dev.mjs",
+    "build:backend": "node scripts/build-backend.mjs",
+    "dist": "node scripts/bundle.mjs && node scripts/build-backend.mjs && electron-builder --config electron-builder.yml",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",
     "electron": "^34.0.0",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
   }
