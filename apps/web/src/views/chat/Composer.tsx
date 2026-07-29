@@ -7,8 +7,11 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  Cpu,
   FileCode2,
+  FileText,
   Folder,
+  Gauge,
   ImagePlus,
   Loader2,
   Paperclip,
@@ -26,7 +29,6 @@ import {
   splitMentionPath,
   type MentionEntry,
 } from "@/lib/mention-tree";
-import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMarkdownStore } from "@/state/markdown.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -563,7 +565,7 @@ export const Composer = memo(function Composer() {
                 </Tooltip>
               )}
             </div>
-            <div className="flex items-center gap-2 px-3 pb-2 pt-0.5">
+            <div className="flex items-center gap-1 px-2.5 pb-2 pt-0.5">
               <Tooltip content="Attach an image (or paste / drop a screenshot)">
                 <button
                   type="button"
@@ -574,62 +576,54 @@ export const Composer = memo(function Composer() {
                   <Paperclip className="h-3.5 w-3.5" />
                 </button>
               </Tooltip>
-              <ComposerSelect
+              <ComposerMenu
+                icon={Cpu}
+                tooltip="Model"
                 value={vm.model}
-                onChange={(v) => vm.changeModel(v as ModelChoice)}
                 options={modelOptions(vm.models)}
+                onChange={(v) => vm.changeModel(v as ModelChoice)}
+                shortLabel={(label) => label.replace(/\s*\(recommended\)/i, "")}
               />
-              <ComposerSelect
+              <ComposerMenu
+                icon={Gauge}
+                tooltip="Reasoning effort"
                 value={vm.effort}
-                onChange={(v) => vm.changeEffort(v as EffortChoice)}
                 options={reasoningOptions}
+                onChange={(v) => vm.changeEffort(v as EffortChoice)}
+                shortLabel={(label) => label.replace(/^Reasoning:\s*/i, "")}
               />
               <PromptFileMenu
                 value={vm.promptFile}
                 files={vm.promptFiles}
                 onChange={vm.setPromptFile}
               />
-              <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                <input
-                  type="checkbox"
-                  checked={vm.planMode}
-                  onChange={(e) => vm.setPlanMode(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-[var(--primary)]"
-                />
-                <ClipboardList className="h-3.5 w-3.5" />
-                Plan mode
-              </label>
-              <Tooltip
-                content={
+              <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
+              <ComposerToggle
+                icon={ClipboardList}
+                label="Plan"
+                active={vm.planMode}
+                onToggle={vm.setPlanMode}
+                tooltip="Plan mode: the agent proposes a plan for approval before touching files"
+              />
+              <ComposerToggle
+                icon={Brain}
+                label="Knowledge"
+                active={vm.systemKnowledge}
+                onToggle={vm.setSystemKnowledge}
+                tooltip={
                   vm.systemKnowledge
                     ? "System knowledge ON: retrieval, impact, plan, review and session memory"
                     : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
                 }
-              >
-                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={vm.systemKnowledge}
-                    onChange={(e) => vm.setSystemKnowledge(e.target.checked)}
-                    className="h-3.5 w-3.5 accent-[var(--primary)]"
-                  />
-                  <Brain className="h-3.5 w-3.5" />
-                  Knowledge
-                </label>
-              </Tooltip>
-              <Tooltip content="Vibe coding: the agent owns the feature end to end — UX, edge cases, polish">
-                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={vm.vibe}
-                    onChange={(e) => vm.changeVibe(e.target.checked)}
-                    className="h-3.5 w-3.5 accent-[var(--primary)]"
-                  />
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Vibe
-                </label>
-              </Tooltip>
-              <span className="ml-auto text-[10px] text-muted-foreground/50">
+              />
+              <ComposerToggle
+                icon={Sparkles}
+                label="Vibe"
+                active={vm.vibe}
+                onToggle={vm.changeVibe}
+                tooltip="Vibe coding: the agent owns the feature end to end — UX, edge cases, polish"
+              />
+              <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/50 min-[560px]:inline">
                 Enter ↵ · Shift+Enter newline
               </span>
             </div>
@@ -862,31 +856,179 @@ function MentionRowHint({ entry, dir }: { entry: MentionEntry; dir: string }) {
   );
 }
 
-function ComposerSelect(props: {
-  value: string;
-  onChange: (value: string) => void;
-  options: PickerOption[];
+function optionValue(option: PickerOption): string {
+  return Array.isArray(option) ? option[0] : option.value;
+}
+
+function optionLabel(option: PickerOption): string {
+  return Array.isArray(option) ? option[1] : option.label;
+}
+
+function isSeparator(
+  option: PickerOption,
+): option is { separator: true; value: string; label: string } {
+  return !Array.isArray(option) && option.separator;
+}
+
+/**
+ * Ghost-pill toggle for the composer's mode switches (Plan / Knowledge /
+ * Vibe). Lit with the primary tint while active — same state, same
+ * handlers as the old checkboxes, just IDE-style chrome.
+ */
+function ComposerToggle(props: {
+  icon: typeof Brain;
+  label: string;
+  active: boolean;
+  tooltip: string;
+  onToggle: (next: boolean) => void;
 }) {
+  const Icon = props.icon;
   return (
-    <Select
-      value={props.value}
-      onChange={props.onChange}
-      direction="up"
-      options={props.options.map((option) =>
-        Array.isArray(option)
-          ? {
-              value: option[0],
-              label: option[1],
-              hint: option[2],
-            }
-          : option
-      )}
-    />
+    <Tooltip content={props.tooltip}>
+      <button
+        type="button"
+        aria-pressed={props.active}
+        onClick={() => props.onToggle(!props.active)}
+        className={cn(
+          "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+          "text-[11px] font-medium transition-colors",
+          props.active
+            ? "bg-primary/15 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+        )}
+      >
+        <Icon className="h-3.5 w-3.5" />
+        {props.label}
+      </button>
+    </Tooltip>
   );
 }
 
-function optionValue(option: PickerOption): string {
-  return Array.isArray(option) ? option[0] : option.value;
+/**
+ * Compact drop-up picker pill (model, reasoning effort). Replaces the
+ * bordered Select in the composer row; separators become group headers.
+ */
+function ComposerMenu(props: {
+  icon: typeof Brain;
+  tooltip: string;
+  value: string;
+  options: PickerOption[];
+  onChange: (value: string) => void;
+  /** Compresses the selected label for the trigger pill. */
+  shortLabel?: (label: string) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const Icon = props.icon;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const selected = props.options.find(
+    (o) => !isSeparator(o) && optionValue(o) === props.value
+  );
+  const rawLabel = selected ? optionLabel(selected) : props.value;
+  const label = props.shortLabel ? props.shortLabel(rawLabel) : rawLabel;
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Tooltip content={props.tooltip}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={cn(
+            "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+            "text-[11px] text-muted-foreground transition-colors",
+            "hover:bg-accent hover:text-foreground",
+            open && "bg-accent text-foreground"
+          )}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          <span className="max-w-[9rem] truncate">{label}</span>
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </Tooltip>
+
+      <AnimatePresence>
+        {open && (
+          <motion.ul
+            role="listbox"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full left-0 z-50 mb-1 max-h-64 w-56",
+              "overflow-y-auto rounded-lg border border-border bg-card p-1",
+              "shadow-xl"
+            )}
+          >
+            {props.options.map((option) =>
+              isSeparator(option) ? (
+                <li
+                  key={option.value}
+                  className="px-2 pb-0.5 pt-1.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 first:pt-0.5"
+                >
+                  {option.label}
+                </li>
+              ) : (
+                <li key={optionValue(option)} role="option"
+                  aria-selected={optionValue(option) === props.value}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      props.onChange(optionValue(option));
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1",
+                      "text-left text-[11px] transition-colors",
+                      optionValue(option) === props.value
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-accent/60"
+                    )}
+                  >
+                    <span className="min-w-0 flex-1 truncate">
+                      {optionLabel(option)}
+                    </span>
+                    {Array.isArray(option) && option[2] && (
+                      <span className="shrink-0 text-[10px] text-muted-foreground/60">
+                        {option[2]}
+                      </span>
+                    )}
+                    {optionValue(option) === props.value && (
+                      <Check className="h-3 w-3 shrink-0" />
+                    )}
+                  </button>
+                </li>
+              )
+            )}
+          </motion.ul>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 /**
@@ -948,19 +1090,21 @@ function PromptFileMenu(props: {
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "flex h-6 cursor-pointer items-center gap-1 rounded-md bg-muted/80",
-          "px-1.5 text-[11px] outline-none",
+          "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+          "text-[11px] outline-none transition-colors",
           selected
-            ? "text-primary"
-            : "text-muted-foreground hover:text-foreground"
+            ? "bg-primary/15 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          open && !selected && "bg-accent text-foreground"
         )}
       >
+        <FileText className="h-3.5 w-3.5" />
         <span className="max-w-[9rem] truncate">
-          {selected?.title ?? "Prompt file"}
+          {selected?.title ?? "Prompt"}
         </span>
         <ChevronDown
           className={cn(
-            "h-3 w-3 shrink-0 transition-transform",
+            "h-3 w-3 shrink-0 opacity-60 transition-transform",
             open && "rotate-180"
           )}
         />
@@ -975,7 +1119,7 @@ function PromptFileMenu(props: {
             transition={{ duration: 0.12 }}
             className={cn(
               "absolute bottom-full left-0 z-50 mb-1 w-64 max-w-[80vw]",
-              "overflow-hidden rounded-lg border border-white/10 bg-card p-1 shadow-xl"
+              "overflow-hidden rounded-lg border border-border bg-card p-1 shadow-xl"
             )}
           >
             <input

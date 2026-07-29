@@ -55,11 +55,11 @@ export function HeaderBar(props: HeaderBarProps) {
         )}
       </div>
 
-      <div className="ml-2">
+      <div className="app-no-drag ml-2">
         <ProjectSwitcher />
       </div>
 
-      <nav className="ml-auto flex items-center gap-1">
+      <nav className="app-no-drag ml-auto flex items-center gap-1">
         {tabs.map((tab) => (
           <button
             key={tab.id}

@@ -18,7 +18,9 @@ export function TitleBar(props: { children: React.ReactNode }) {
         "border-b border-border bg-card"
       )}
     >
-      <div className="app-no-drag min-w-0 flex-1">{props.children}</div>
+      {/* The bar itself stays draggable; interactive children inside
+          HeaderBar opt out individually with app-no-drag. */}
+      <div className="min-w-0 flex-1">{props.children}</div>
       <WindowControls />
     </div>
   );
