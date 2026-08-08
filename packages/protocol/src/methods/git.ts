@@ -19,6 +19,11 @@ export const gitMethods = {
       active: z.string().nullable(),
     }),
   },
+  /** `git init` at the workspace root, for a workspace with no repo at all. */
+  "git.init": {
+    params: z.object({}).optional(),
+    result: z.object({ root: z.string() }),
+  },
   // Points the git panel (and unqualified git commands) at one checkout.
   "git.selectRepo": {
     params: z.object({ repo: z.string() }),

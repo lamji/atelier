@@ -1,10 +1,11 @@
-import { bridge } from "@/services/bridge-client";
+import { useProjectsStore } from "@/state/projects.store";
 import { useConnectionStore } from "@/state/connection.store";
+import { openWorkspace } from "@/services/project-switch";
 
 /**
- * ViewModel for connection status (status bar). Recovery from a dropped
- * connection is owned by useConnectionGateViewModel, which knows whether the
- * supervisor or just the project's agent is missing.
+ * ViewModel for connection status (status bar). A dead port means the
+ * agent process died; reconnect re-attaches through the desktop main,
+ * which restarts the agent if needed.
  */
 export function useConnectionViewModel() {
   const state = useConnectionStore((s) => s.state);
@@ -17,6 +18,9 @@ export function useConnectionViewModel() {
     agentStatus,
     agentStatusDetail,
     workspaceRoot,
-    reconnect: () => bridge.connect(),
+    reconnect: () => {
+      const id = useProjectsStore.getState().activeId;
+      if (id) void openWorkspace(id).catch(() => undefined);
+    },
   };
 }

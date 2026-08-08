@@ -71,6 +71,11 @@ export interface OllamaChatOptions {
   timeoutMs?: number;
   /** Which endpoint to call. Defaults to the hosted one. */
   target?: OllamaTarget;
+  /**
+   * Base64 image payloads (no data: prefix) for the user message. Ollama
+   * takes them on the message itself; a text-only model simply ignores them.
+   */
+  images?: string[];
 }
 
 /**
@@ -254,9 +259,17 @@ export async function ollamaReachable(
  * text (a commit message, a JSON summary), never deltas.
  */
 export async function ollamaChat(opts: OllamaChatOptions): Promise<string> {
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: Array<{
+    role: string;
+    content: string;
+    images?: string[];
+  }> = [];
   if (opts.system) messages.push({ role: "system", content: opts.system });
-  messages.push({ role: "user", content: opts.prompt });
+  messages.push({
+    role: "user",
+    content: opts.prompt,
+    ...(opts.images?.length ? { images: opts.images } : {}),
+  });
 
   const target = opts.target ?? "ollama-cloud";
   const response = await fetchWithTimeout(`${ollamaHost(target)}/api/chat`, {

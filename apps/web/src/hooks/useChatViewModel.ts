@@ -28,7 +28,7 @@ export interface ChatViewModel {
   cancelling: boolean;
   busy: boolean;
   lastError: string | null;
-  /** Monaco theme ("vs-dark" | "light") for inline transcript diffs. */
+  /** Monaco theme ("atelier-dark" | "atelier-light") for inline diffs. */
   monacoTheme: string;
 }
 
@@ -70,7 +70,7 @@ export function useChatViewModel(): ChatViewModel {
     cancelling: cancelling ?? false,
     busy: status === "working",
     lastError: lastError ?? null,
-    monacoTheme: theme === "dark" ? "vs-dark" : "light",
+    monacoTheme: theme === "dark" ? "atelier-dark" : "atelier-light",
   };
 }
 

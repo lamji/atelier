@@ -33,16 +33,19 @@ export const CLAUDE = "claude";
 /** The Codex CLI, on the user's signed-in ChatGPT/Codex session. */
 export const CODEX = "codex";
 
-/** Panel order — the two signed-in CLIs first, then the Ollama endpoints. */
+/**
+ * The three providers exposed by Settings. The legacy local-Ollama id stays
+ * readable in the credential store so older installs are not corrupted, but
+ * it is no longer an Atelier provider tab or model-picker source.
+ */
 const LABELS: Record<string, string> = {
-  [CLAUDE]: "Claude",
-  [CODEX]: "Codex",
   [OLLAMA_CLOUD]: "Ollama Cloud",
-  [OLLAMA_LOCAL]: "Ollama (local)",
+  [CODEX]: "Codex",
+  [CLAUDE]: "Claude",
 };
 
-/** Providers that are a program on this machine, so no key can apply. */
-const KEYLESS = new Set([OLLAMA_LOCAL, CLAUDE, CODEX]);
+/** Providers that use an already signed-in account, so no key can apply. */
+const KEYLESS = new Set([CLAUDE, CODEX]);
 
 /**
  * Providers reached through a CLI the user is already signed in to, so
@@ -58,7 +61,7 @@ const HOSTLESS = new Set([CLAUDE, CODEX]);
  * pulling a model, signing in to a CLI — so making the user re-declare that
  * in Settings would just look like the provider was broken.
  */
-const ALLOWLIST_IMPLIES_ALL = new Set([OLLAMA_LOCAL, CLAUDE, CODEX]);
+const ALLOWLIST_IMPLIES_ALL = new Set([CLAUDE, CODEX]);
 
 export function allowlistImpliesAll(id: string): boolean {
   return ALLOWLIST_IMPLIES_ALL.has(id);
@@ -142,8 +145,8 @@ export function listProviders(): ProviderCredential[] {
     return {
       id: id as ProviderCredential["id"],
       label: LABELS[id] ?? id,
-      // A keyless provider is a daemon, not an account: there is nothing to
-      // configure before it can be used, so it is always on the panel.
+      // Signed-in providers have nothing for Atelier to store first, so they
+      // are always present. Ollama Cloud appears after an API key is saved.
       configured: keyless || Boolean(key),
       enabled: config?.enabled !== false,
       keyless,

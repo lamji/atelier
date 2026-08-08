@@ -18,6 +18,8 @@ export function registerGitHandlers(
     active: git.activeRepo,
   }));
 
+  router.register("git.init", async () => git.init());
+
   router.register("git.selectRepo", async (params) => ({
     active: await git.select(params.repo),
   }));

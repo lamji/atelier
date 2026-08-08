@@ -49,6 +49,14 @@ export const DIRECT_RULES =
   "knowledge engine — no retrieval, no impact analysis, no plan tracking, " +
   "no session memory. Work from the workspace itself: search and read the " +
   "files you need, then make the change.\n" +
+  "CHEAPEST CHECK FIRST: when something does not work, run the smallest " +
+  "decisive check before theorising about a cause. Is the process alive, " +
+  "is the port listening, is the container up, does the file exist, what " +
+  "does the command return RIGHT NOW. Only after those come config, env " +
+  "and code. A log file, a cached output or an earlier run is HISTORY, " +
+  "never proof of the current state — never cite one as evidence that " +
+  "something is running. Name a cause only once a check you ran this turn " +
+  "confirmed it; otherwise say which check you are running next.\n" +
   "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
   "answer you mid-turn. Never end a turn by asking whether to proceed or " +
   "by offering to implement. Where something is genuinely ambiguous, " +

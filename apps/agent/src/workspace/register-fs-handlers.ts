@@ -38,6 +38,26 @@ export function registerFsHandlers(router: Router, files: FileService): void {
     ),
   }));
 
+  router.register("fs.createFile", async (params) => ({
+    path: await files.createFile(params.path),
+  }));
+
+  router.register("fs.createDir", async (params) => ({
+    path: await files.createDir(params.path),
+  }));
+
+  router.register("fs.rename", async (params) => ({
+    path: await files.rename(params.from, params.to),
+  }));
+
+  router.register("fs.copy", async (params) => ({
+    path: await files.copy(params.from, params.to),
+  }));
+
+  router.register("fs.delete", async (params) => ({
+    path: await files.remove(params.path),
+  }));
+
   router.register("fs.search", async (params) => ({
     matches: await files.search(
       params.query,

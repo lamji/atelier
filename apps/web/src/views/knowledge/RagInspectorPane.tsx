@@ -81,7 +81,7 @@ export function RagInspectorPane({ vm }: RagInspectorPaneProps) {
               >
                 <div className="flex items-center gap-2">
                   {chunk.kind === "lesson" ? (
-                    <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                    <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning dark:text-warning">
                       lesson
                     </span>
                   ) : (

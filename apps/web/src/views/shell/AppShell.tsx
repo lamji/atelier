@@ -1,10 +1,18 @@
-import { useEffect, useMemo } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence } from "framer-motion";
+import {
+  Panel,
+  PanelGroup,
+  PanelResizeHandle,
+  type ImperativePanelHandle,
+} from "react-resizable-panels";
 import { HeaderBar } from "./HeaderBar";
+import { TitleBar } from "./TitleBar";
+import { BottomPanel } from "./BottomPanel";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
+import { CommandPalette } from "./CommandPalette";
+import { EditorTabBar } from "./EditorTabBar";
 import { StatusBar } from "./StatusBar";
-import { ConnectionGate } from "./ConnectionGate";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
@@ -21,7 +29,6 @@ import { RightDock } from "@/views/right/RightDock";
 import { useTerminalViewModel } from "@/hooks/useTerminalViewModel";
 import { useSessionsViewModel } from "@/hooks/useSessionsViewModel";
 import { useConnectionViewModel } from "@/hooks/useConnectionViewModel";
-import { useConnectionGateViewModel } from "@/hooks/useConnectionGateViewModel";
 import { useTimelineViewModel } from "@/hooks/useTimelineViewModel";
 import { useFileExplorerViewModel } from "@/hooks/useFileExplorerViewModel";
 import { useEditorViewModel } from "@/hooks/useEditorViewModel";
@@ -33,33 +40,13 @@ import { useMarkdownViewModel } from "@/hooks/useMarkdownViewModel";
 import { useDbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
 import { useUsageViewModel } from "@/hooks/useUsageViewModel";
 import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
+import { useCommandRegistry } from "@/hooks/useCommandRegistry";
 import { bridge } from "@/services/bridge-client";
 import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import { cn } from "@/lib/cn";
-
-function Island(props: {
-  children: React.ReactNode;
-  className?: string;
-  delay?: number;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 14, scale: 0.985 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{
-        type: "spring",
-        stiffness: 260,
-        damping: 26,
-        delay: props.delay ?? 0,
-      }}
-      className={cn("island h-full", props.className)}
-    >
-      {props.children}
-    </motion.div>
-  );
-}
+import { isDesktop } from "@/lib/desktop";
 
 /**
  * Single-console layout: header tabs (Chat / Editor / Terminal / Activity)
@@ -72,7 +59,6 @@ export function AppShell() {
   const setActiveView = useWorkspaceStore((s) => s.setActivityView);
   const { theme, toggle } = useThemeStore();
   const connection = useConnectionViewModel();
-  const gate = useConnectionGateViewModel();
   const sessions = useSessionsViewModel();
   const timeline = useTimelineViewModel();
   const explorer = useFileExplorerViewModel();
@@ -89,6 +75,74 @@ export function AppShell() {
   const skillDetail = useWorkspaceStore((s) => s.skillDetail);
   const closeSkillDetail = useWorkspaceStore((s) => s.closeSkillDetail);
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
+  // Same live git state the status bar reads, badged onto the Source Control
+  // rail icon so pending changes are visible without opening the view.
+  const changedCount = useGitStore(
+    (s) => s.live?.changedFiles ?? s.status?.files.length ?? 0
+  );
+  const bottomOpen = useWorkspaceStore((s) => s.bottomPanel);
+  const setBottomPanel = useWorkspaceStore((s) => s.setBottomPanel);
+  const openBottom = useWorkspaceStore((s) => s.openBottom);
+  const workbenchVisible = useWorkspaceStore((s) => s.workbenchVisible);
+  const setWorkbenchVisible = useWorkspaceStore(
+    (s) => s.setWorkbenchVisible
+  );
+  const bottomRef = useRef<ImperativePanelHandle>(null);
+  const [palette, setPalette] = useState<{ open: boolean; query: string }>({
+    open: false,
+    query: "",
+  });
+
+  // The panel is the source of truth for its size; the store drives
+  // expand/collapse so anything (header tab, Ctrl+`) can toggle it.
+  useEffect(() => {
+    const panel = bottomRef.current;
+    if (!panel) return;
+    if (bottomOpen && panel.isCollapsed()) {
+      panel.expand();
+      // First open starts from defaultSize 0, so give it a real height.
+      if (panel.getSize() < 15) panel.resize(30);
+    }
+    if (!bottomOpen && !panel.isCollapsed()) panel.collapse();
+  }, [bottomOpen]);
+
+  // Ctrl+` toggles the bottom dock; Ctrl+P / Ctrl+Shift+P open the palette in
+  // its file and command modes. All VS Code conventions.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && event.key === "`") {
+        event.preventDefault();
+        useWorkspaceStore.setState((s) => ({ bottomPanel: !s.bottomPanel }));
+        return;
+      }
+      // Ctrl+P is the browser print dialog until we claim it, and inside
+      // Electron it is ours to claim — EXCEPT over the terminal, where
+      // Ctrl+P is readline's "previous command" and belongs to the shell.
+      if (mod && (event.key === "p" || event.key === "P")) {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest?.(".xterm")) return;
+        event.preventDefault();
+        setPalette({ open: true, query: event.shiftKey ? ">" : "" });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  /*
+   * "terminal" toggles the bottom dock; everything else is an editor-area
+   * pane, Activity (the execution timeline) included — it moved out of the
+   * bottom dock so that dock's bar could become the terminal tab strip.
+   */
+  const selectHeaderTab = (tab: Parameters<typeof editor.setRightTab>[0]) => {
+    if (tab === "terminal") {
+      if (bottomOpen) setBottomPanel(false);
+      else openBottom();
+      return;
+    }
+    editor.setRightTab(tab);
+  };
 
   // Wildcard subscriptions do not replay, so seed the branch once on
   // connect; git.state.changed keeps it live afterward.
@@ -119,15 +173,11 @@ export function AppShell() {
         selectedId={sessions.selectedId}
         onSelect={sessions.selectSession}
         onCreate={() => void sessions.createSession()}
+        onRename={sessions.renameSession}
+        onDelete={(id) => void sessions.deleteSession(id)}
       />
     ) : activeView === "explorer" ? (
-      <FileTreePanel
-        tree={explorer.tree}
-        expanded={explorer.expanded}
-        selectedPath={explorer.selectedPath}
-        onToggleDir={explorer.toggleDir}
-        onOpenFile={(path) => void explorer.openFile(path)}
-      />
+      <FileTreePanel vm={explorer} />
     ) : activeView === "markdown" ? (
       <MarkdownPanel
         vm={markdownVm}
@@ -160,77 +210,187 @@ export function AppShell() {
     [sessions.error]
   );
 
+  /*
+   * Command sources. Every entry is the SAME callback the corresponding button
+   * already invokes, so the palette can never drift from the UI: memoized
+   * because useCommandRegistry keys its list off this object's identity.
+   */
+  const commandSources = useMemo(
+    () => ({
+      createSession: () => void sessions.createSession(),
+      createTerminal: () => {
+        // Open the dock first, or the new terminal is created into a panel
+        // the user cannot see.
+        openBottom();
+        void terminal.create();
+      },
+      openTerminalPanel: () => openBottom(),
+      refreshExplorer: explorer.refresh,
+      collapseFolders: explorer.collapseAll,
+      refreshGit: git.refresh,
+      openFile: (path: string) => void explorer.openFile(path),
+    }),
+    [
+      explorer.collapseAll,
+      explorer.openFile,
+      explorer.refresh,
+      git.refresh,
+      openBottom,
+      sessions,
+      terminal,
+    ]
+  );
+  const commands = useCommandRegistry(commandSources);
+
+  const headerBar = (
+    <HeaderBar
+      workingCount={sessions.workingCount}
+      rightTab={editor.rightTab}
+      terminalCount={terminal.sessions.length}
+      workbenchVisible={workbenchVisible}
+      bottomOpen={bottomOpen}
+      onSelectTab={selectHeaderTab}
+      onToggleWorkbench={() => setWorkbenchVisible(!workbenchVisible)}
+      onOpenCommands={(query) => setPalette({ open: true, query })}
+    />
+  );
+
   return (
-    <div className="flex h-full flex-col gap-2 p-2">
-      <Island className="h-12 shrink-0" delay={0}>
-        <HeaderBar
-          workingCount={sessions.workingCount}
-          rightTab={editor.rightTab}
-          terminalCount={terminal.sessions.length}
-          onSelectTab={editor.setRightTab}
-        />
-      </Island>
-      <div className="flex min-h-0 flex-1 gap-2">
-        <Island className="w-[56px] shrink-0" delay={0.03}>
+    <div className="flex h-full flex-col overflow-hidden bg-background">
+      {isDesktop() ? (
+        <TitleBar>{headerBar}</TitleBar>
+      ) : (
+        <div className="h-[var(--titlebar-h)] shrink-0 border-b border-border bg-titlebar">
+          {headerBar}
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1">
+        <div className="w-[var(--activitybar-w)] shrink-0 border-r border-border bg-activity">
           <ActivityBar
             active={activeView}
             theme={theme}
+            workingCount={sessions.workingCount}
+            changedCount={changedCount}
             onSelect={setActiveView}
             onToggleTheme={toggle}
           />
-        </Island>
+        </div>
         <PanelGroup direction="horizontal" className="min-w-0 flex-1">
-          <Panel defaultSize={22} minSize={15}>
-            <Island delay={0.06}>{leftPanel}</Island>
+          {/*
+           * Primary sidebar. `minSize` in percent would let the sidebar be
+           * squeezed to unreadable at small window widths, so it is floored in
+           * pixels too — below ~190px the tree indentation and the header
+           * actions stop fitting.
+           */}
+          <Panel
+            defaultSize={22}
+            minSize={14}
+            maxSize={40}
+            className="min-w-[190px]"
+          >
+            <div className="h-full overflow-hidden border-r border-border bg-sidebar">
+              {leftPanel}
+            </div>
           </Panel>
-          <PanelResizeHandle className="w-2" />
-          <Panel defaultSize={78} minSize={40}>
-            <Island
-              delay={0.12}
-              className={cn("relative", busy && "glow-working")}
-            >
-              <AnimatePresence>
-                {showIndexingWelcome && (
-                  <IndexingWelcome
-                    vm={knowledge}
-                    workspaceRoot={connection.workspaceRoot}
-                  />
-                )}
-              </AnimatePresence>
-              <RightDock
-                rightTab={editor.rightTab}
-                chatPane={chatPane}
-                skillDetail={skillDetail}
-                onCloseSkillDetail={closeSkillDetail}
-                selectedPath={editor.selectedPath}
-                fileContent={editor.fileContent}
-                language={editor.language}
-                monacoTheme={editor.monacoTheme}
-                gitDiff={git.gitDiff}
-                onCloseGitDiff={git.closeDiff}
-                terminalSessions={terminal.sessions}
-                activeTermId={terminal.activeTermId}
-                onSelectTerm={terminal.setActive}
-                onCreateTerm={() => void terminal.create()}
-                onKillTerm={(id) => void terminal.kill(id)}
-                onMountTerm={terminal.mount}
-                onRefitTerm={terminal.refit}
-                timelineEntries={timeline.entries}
-                knowledgeVm={knowledge}
-                ragVm={rag}
-                appTheme={theme}
-              />
-            </Island>
+          <PanelResizeHandle className="resize-handle w-[3px]" />
+          <Panel defaultSize={78} minSize={35} className="min-w-[360px]">
+            <PanelGroup direction="vertical">
+              {/* 100, not 72: the bottom dock starts collapsed at 0, so the
+                  editor owns the whole column until the dock is opened. The
+                  old 72/0 pair summed to 72% and react-resizable-panels
+                  normalised it away with a console warning on every mount. */}
+              <Panel defaultSize={100} minSize={25}>
+                <div
+                  className={cn(
+                    "relative flex h-full flex-col bg-editor",
+                    busy && "glow-working"
+                  )}
+                >
+                  <AnimatePresence>
+                    {showIndexingWelcome && (
+                      <IndexingWelcome
+                        vm={knowledge}
+                        workspaceRoot={connection.workspaceRoot}
+                      />
+                    )}
+                  </AnimatePresence>
+                  {workbenchVisible && (
+                    <EditorTabBar
+                      rightTab={editor.rightTab}
+                      selectedPath={editor.selectedPath}
+                      diffPath={git.gitDiff?.path ?? null}
+                      onSelectTab={selectHeaderTab}
+                    />
+                  )}
+                  <div className="relative min-h-0 flex-1">
+                    <RightDock
+                      rightTab={editor.rightTab}
+                      chatPane={chatPane}
+                      skillDetail={skillDetail}
+                      onCloseSkillDetail={closeSkillDetail}
+                      selectedPath={editor.selectedPath}
+                      fileContent={editor.fileContent}
+                      language={editor.language}
+                      monacoTheme={editor.monacoTheme}
+                      gitDiff={git.gitDiff}
+                      onCloseGitDiff={git.closeDiff}
+                      knowledgeVm={knowledge}
+                      ragVm={rag}
+                      appTheme={theme}
+                      timelineEntries={timeline.entries}
+                    />
+                  </div>
+                </div>
+              </Panel>
+              <PanelResizeHandle className="resize-handle h-[3px]" />
+              <Panel
+                ref={bottomRef}
+                defaultSize={0}
+                minSize={12}
+                collapsible
+                collapsedSize={0}
+                onCollapse={() => setBottomPanel(false)}
+                onExpand={() => setBottomPanel(true)}
+              >
+                <BottomPanel
+                  open={bottomOpen}
+                  onClose={() => setBottomPanel(false)}
+                  terminalSessions={terminal.sessions}
+                  activeTermId={terminal.activeTermId}
+                  onSelectTerm={terminal.setActive}
+                  onCreateTerm={() => void terminal.create()}
+                  onKillTerm={(id) => void terminal.kill(id)}
+                  onRenameTerm={terminal.rename}
+                  onMountTerm={terminal.mount}
+                  onRefitTerm={terminal.refit}
+                  termSearchOpen={terminal.searchOpen}
+                  onOpenTermSearch={terminal.openSearch}
+                  onCloseTermSearch={terminal.closeSearch}
+                />
+              </Panel>
+            </PanelGroup>
           </Panel>
         </PanelGroup>
       </div>
+      {/* Shell-level: the palette overlays every region, so it cannot live
+          inside one of them. */}
+      <CommandPalette
+        open={palette.open}
+        initialQuery={palette.query}
+        commands={commands}
+        onOpenFile={(path) => void explorer.openFile(path)}
+        onClose={() => setPalette((p) => ({ ...p, open: false }))}
+      />
       {/* Shell-level: raised by the git panel or by the git-flow hook. */}
       <GitFlowHost />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />
-      {/* Blocks the whole viewport while there is no live agent behind it. */}
-      <ConnectionGate vm={gate} />
-      <Island className="h-8 shrink-0" delay={0.2}>
+      <div
+        className={cn(
+          "h-[var(--statusbar-h)] shrink-0 overflow-hidden border-t",
+          "border-border bg-titlebar"
+        )}
+      >
         <StatusBar
           connection={connection.state}
           agentStatus={connection.agentStatus}
@@ -243,7 +403,7 @@ export function AppShell() {
           indexing={knowledge.indexing}
           lastIndexedAt={knowledge.stats?.lastIndexedAt ?? null}
         />
-      </Island>
+      </div>
     </div>
   );
 }

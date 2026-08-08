@@ -1,43 +1,42 @@
-import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
+import path from "node:path";
 
 export interface AgentConfig {
   /** Directory the agent operates on (the user's project). */
   workspaceRoot: string;
-  /** Directory for agent-owned data (db, bridge.json, logs). */
+  /** Directory for agent-owned data (db, logs). */
   dataDir: string;
-  host: string;
-  port: number;
+  /** Project id assigned by the desktop registry. */
+  projectId: string;
   agentVersion: string;
-  /**
-   * Built web UI directory to serve over HTTP on the same port (packaged
-   * mode). Undefined in dev, where Vite serves the UI separately.
-   */
-  webDistPath?: string;
 }
 
-function defaultDataDir(): string {
-  const base =
-    process.env.LOCALAPPDATA ?? path.join(os.homedir(), ".local", "share");
-  return path.join(base, "atelier");
-}
-
-export function loadConfig(): AgentConfig {
-  const workspaceRoot = path.resolve(
-    process.env.ATELIER_WORKSPACE ?? process.cwd()
-  );
-  const dataDir = process.env.ATELIER_DATA_DIR ?? defaultDataDir();
-  fs.mkdirSync(dataDir, { recursive: true });
-  const webDistEnv = process.env.ATELIER_WEB_DIST;
-  const webDistPath =
-    webDistEnv && fs.existsSync(webDistEnv) ? webDistEnv : undefined;
+/**
+ * The agent never guesses its workspace. It is forked by the desktop's
+ * ProjectManager with an explicit init message; a missing or invalid
+ * workspaceRoot is a hard error. (The old `process.cwd()` fallback is how
+ * a mis-launched agent silently served the wrong folder.)
+ */
+export function resolveConfig(init: {
+  projectId: string;
+  workspaceRoot: string;
+  dataDir: string;
+}): AgentConfig {
+  if (!init.workspaceRoot) {
+    throw new Error("agent init: workspaceRoot is required");
+  }
+  const workspaceRoot = path.resolve(init.workspaceRoot);
+  if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
+    throw new Error(`agent init: workspaceRoot is not a directory: ${workspaceRoot}`);
+  }
+  if (!init.dataDir) {
+    throw new Error("agent init: dataDir is required");
+  }
+  fs.mkdirSync(init.dataDir, { recursive: true });
   return {
     workspaceRoot,
-    dataDir,
-    host: "127.0.0.1",
-    port: Number(process.env.ATELIER_PORT ?? 43110),
+    dataDir: init.dataDir,
+    projectId: init.projectId,
     agentVersion: "0.1.0",
-    webDistPath,
   };
 }

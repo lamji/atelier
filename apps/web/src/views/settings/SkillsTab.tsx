@@ -124,38 +124,46 @@ function Group({
         <ul className="space-y-1">
           {items.map((item) => (
             <li key={item.id}>
-              <button
-                type="button"
-                onClick={() => onOpen(item)}
+              {/*
+                Row is a plain container, NOT a button. Switch renders its own
+                <button role="switch">, and nesting that inside a row button
+                was invalid HTML — React logged a DOM-nesting error on every
+                render, and the inner control could not be reached or
+                activated by keyboard. The two actions are siblings now: the
+                label opens the item, the switch toggles it.
+              */}
+              <div
                 className={cn(
                   "flex w-full items-center gap-2 rounded-lg bg-muted/40",
-                  "px-2.5 py-2 text-left transition-colors hover:bg-muted/70",
+                  "px-2.5 py-2 transition-colors hover:bg-muted/70",
                   !item.enabled && "opacity-55"
                 )}
               >
-                <span className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => onOpen(item)}
+                  className="min-w-0 flex-1 rounded text-left"
+                >
                   <span className="block truncate font-mono text-[11px] font-semibold">
                     /{item.name}
                   </span>
                   <span className="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground/70">
                     {item.description || "No description."}
                   </span>
-                </span>
+                </button>
                 {item.kind === "skill" ? (
-                  <span onClick={(e) => e.stopPropagation()}>
-                    <Switch
-                      checked={item.enabled}
-                      disabled={saving === item.id}
-                      onChange={(next) => onToggle?.(item, next)}
-                      label={`${item.name} skill`}
-                    />
-                  </span>
+                  <Switch
+                    checked={item.enabled}
+                    disabled={saving === item.id}
+                    onChange={(next) => onToggle?.(item, next)}
+                    label={`${item.name} skill`}
+                  />
                 ) : (
                   <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] uppercase text-muted-foreground">
                     {item.scope}
                   </span>
                 )}
-              </button>
+              </div>
             </li>
           ))}
         </ul>

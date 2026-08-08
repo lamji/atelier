@@ -13,8 +13,8 @@ import {
   providerEnabled,
 } from "../credentials.js";
 
-/** Both Ollama endpoints, in picker order: hosted first, then this machine. */
-const TARGETS: OllamaTarget[] = ["ollama-cloud", "ollama-local"];
+/** Settings exposes Ollama Cloud as Atelier's Ollama provider. */
+const TARGETS: OllamaTarget[] = ["ollama-cloud"];
 
 /** Model-id namespace per endpoint, so a tag routes back to its host. */
 const PREFIX: Record<OllamaTarget, string> = {
@@ -27,9 +27,9 @@ const PREFIX: Record<OllamaTarget, string> = {
  * SDK roster feeds. Empty when nothing is enabled or nothing answers, so
  * the composer simply shows the Claude rows.
  *
- * BOTH endpoints are probed. A machine can have a daemon and a cloud
- * account at the same time, and making one setting choose between them is
- * what left a locally pulled model invisible.
+ * Only the hosted account is probed. The local id remains understood by the
+ * lower-level client for credential-store compatibility, but it is not one
+ * of the three providers exposed by Atelier.
  */
 export async function probeOllamaModels(): Promise<ModelOption[]> {
   const rosters = await Promise.all(TARGETS.map((target) => probe(target)));

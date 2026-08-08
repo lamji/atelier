@@ -96,11 +96,25 @@ export interface ComposerViewModel {
   connected: boolean;
   busy: boolean;
   cancelling: boolean;
+  /**
+   * Follow-ups typed while the agent was working, still waiting their turn.
+   * Sending during a run queues rather than refuses, so this is how many
+   * turns are already lined up behind the one in flight.
+   */
+  queuedCount: number;
+  /** Drops every waiting follow-up; the running task is left alone. */
+  clearQueue: () => void;
   error: string | null;
   send: () => void;
   cancel: () => void;
   model: ModelChoice;
   models: ModelOption[];
+  /**
+   * The roster came back empty — every provider is switched off, so there
+   * is nothing to send a turn to. Distinct from "not loaded yet": false
+   * until the agent has actually answered.
+   */
+  noProvidersEnabled: boolean;
   changeModel: (value: ModelChoice) => void;
   effort: EffortChoice;
   changeEffort: (value: EffortChoice) => void;
@@ -111,6 +125,9 @@ export interface ComposerViewModel {
   setSystemKnowledge: (value: boolean) => void;
   vibe: boolean;
   changeVibe: (value: boolean) => void;
+  /** Ticked: an independent reviewer checks the changes before the summary. */
+  autoReview: boolean;
+  changeAutoReview: (value: boolean) => void;
   attachments: string[];
   addAttachment: (path: string) => void;
   removeAttachment: (path: string) => void;
@@ -146,6 +163,9 @@ export function useComposerViewModel(): ComposerViewModel {
   const cancelling = useSessionsStore((s) =>
     s.selectedId ? (s.sessions[s.selectedId]?.cancelling ?? false) : false
   );
+  const queuedCount = useSessionsStore((s) =>
+    s.selectedId ? (s.sessions[s.selectedId]?.queuedTaskIds.length ?? 0) : 0
+  );
   const attachCandidate = useWorkspaceStore((s) => s.selectedPath);
 
   // Model / effort / plan mode belong to the CHAT: picking haiku here must
@@ -160,6 +180,10 @@ export function useComposerViewModel(): ComposerViewModel {
   // switch and the Settings switch are the same control.
   const vibe = usePreferencesStore((s) => s.vibe);
   const changeVibe = usePreferencesStore((s) => s.setVibe);
+  // Auto review rides with it: both are "how the agent works here", sticky
+  // per project rather than something to re-tick every message.
+  const autoReview = usePreferencesStore((s) => s.autoReview);
+  const changeAutoReview = usePreferencesStore((s) => s.setAutoReview);
 
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -167,8 +191,28 @@ export function useComposerViewModel(): ComposerViewModel {
   const [images, setImages] = useState<PendingImage[]>([]);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [promptFile, setPromptFile] = useState<string>(NO_PROMPT_FILE);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  // The prompt file is a per-chat preference, not composer-local state:
+  // it has to survive both sending and switching away and back.
+  const storedPromptFile = own?.promptFile ?? "";
+  const setPromptFile = useCallback(
+    (value: string) =>
+      setComposer(selectedId, {
+        promptFile: value === NO_PROMPT_FILE ? "" : value,
+      }),
+    [setComposer, selectedId]
+  );
   const promptFiles = useMarkdownStore((s) => s.files);
+  const catalogLoaded = useMarkdownStore((s) => s.fetchedVersion) >= 0;
+  // A remembered file that has since been deleted or renamed must not sit
+  // in the pill claiming to govern the chat. The catalog has to be loaded
+  // before that judgement is made, or the pick would clear itself on every
+  // reload while the list is still in flight.
+  const promptFile =
+    storedPromptFile &&
+    (!catalogLoaded || promptFiles.some((file) => file.path === storedPromptFile))
+      ? storedPromptFile
+      : NO_PROMPT_FILE;
   const treeVersion = useWorkspaceStore((s) => s.treeVersion);
   const mentions = useMentionBrowser();
 
@@ -204,7 +248,12 @@ export function useComposerViewModel(): ComposerViewModel {
     if (!online) return;
     void bridge
       .rpc("models.list", {})
-      .then(({ models }) => setModels(models))
+      .then(({ models }) => {
+        setModels(models);
+        // Only a real answer proves the roster is empty; a failed probe
+        // must not be read as "you turned everything off".
+        setModelsLoaded(true);
+      })
       .catch(() => undefined);
   }, [online, providerRevision]);
 
@@ -212,9 +261,17 @@ export function useComposerViewModel(): ComposerViewModel {
   // is the thought in progress, the attachments belonged to the old chat.
   useEffect(() => {
     setAttachments([]);
-    setPromptFile(NO_PROMPT_FILE);
     setError(null);
   }, [selectedId]);
+
+  // Switching WORKSPACES clears the draft outright. A thought in progress
+  // belongs to the project it was typed for — carrying the text (or staged
+  // images) into another workspace would send it to a different agent.
+  const workspaceEpoch = useWorkspaceStore((s) => s.workspaceEpoch);
+  useEffect(() => {
+    setInput("");
+    setImages([]);
+  }, [workspaceEpoch]);
 
   const send = useCallback(() => {
     const text = input.trim();
@@ -223,7 +280,10 @@ export function useComposerViewModel(): ComposerViewModel {
     const store = useSessionsStore.getState();
     const id = store.selectedId;
     const selected = id ? store.sessions[id] : undefined;
-    if (!id || !selected || selected.status === "working") return;
+    // A busy session no longer refuses the send: the agent queues it behind
+    // the running task, so a correction costs its turn in line instead of
+    // costing the run.
+    if (!id || !selected) return;
 
     // Async because a prompt file is read at send time — never cached on
     // select, so an edit between picking and sending is always honored.
@@ -244,7 +304,9 @@ export function useComposerViewModel(): ComposerViewModel {
         }
         // Shared format: the agent splits this apart again to record what
         // the user asked rather than the note quoting itself.
-        body = composePromptFilePrompt(clipPromptFile(content), text);
+        // The path rides with the body: "update this md file" has to name a
+        // file the agent can write back to, not one it has to guess at.
+        body = composePromptFilePrompt(clipPromptFile(content), text, note);
       }
 
       const prompt =
@@ -259,7 +321,8 @@ export function useComposerViewModel(): ComposerViewModel {
       setInput("");
       setAttachments([]);
       setImages([]);
-      setPromptFile(NO_PROMPT_FILE);
+      // The prompt file deliberately survives the send — it governs the
+      // conversation, not the one message it was picked on.
       setError(null);
       store.addUserMessage(
         id,
@@ -281,13 +344,22 @@ export function useComposerViewModel(): ComposerViewModel {
           // an older agent that ignores the flag still behaves correctly.
           systemKnowledge: pick.systemKnowledge === false ? false : undefined,
           vibe: prefs.vibe || undefined,
+          // Same "only when OFF" rule: absent keeps the review stage.
+          autoReview: prefs.autoReview ? undefined : false,
           images:
             sent.length > 0
               ? sent.map((i) => ({ mediaType: i.mediaType, data: i.data }))
               : undefined,
           promptFile: note,
         })
-        .then(({ taskId }) => {
+        .then(({ taskId, queued }) => {
+          // Queued behind a running task: it owns neither the live feed nor
+          // the busy state yet. It announces itself with task.started when
+          // its turn comes, and taskStarted takes it out of the line then.
+          if (queued) {
+            useSessionsStore.getState().taskQueued(id, taskId);
+            return;
+          }
           // Read fresh rather than closed over, so the catalog refreshing
           // does not rebuild this whole callback on every file write.
           const noteTitle = note
@@ -322,9 +394,34 @@ export function useComposerViewModel(): ComposerViewModel {
     const taskId = session?.activeTaskId;
     if (!id || !taskId) return;
     store.taskCancelling(id);
-    void bridge.rpc("task.cancel", { taskId }).catch(() => {
-      // Task already finished; the store clears on its end event.
-    });
+    void bridge
+      .rpc("task.cancel", { taskId })
+      .then(({ cancelled }) => {
+        // Nothing live to stop: the run already ended, or the agent restarted
+        // under a task this tab still believes is running. Either way no end
+        // event is coming, so clear here — otherwise the composer sits in
+        // "Stopping…" and the session can never be used again.
+        if (!cancelled) useSessionsStore.getState().taskEnded(id, "cancelled");
+      })
+      .catch(() => {
+        useSessionsStore.getState().taskEnded(id, "cancelled");
+      });
+  }, []);
+
+  /**
+   * Drops the follow-ups still waiting, leaving the running task alone.
+   *
+   * Each cancel comes back as its own task.cancelled, which is what takes
+   * the entry out of the line — so a drop that the agent has already
+   * promoted to running is simply cancelled instead, never lost silently.
+   */
+  const clearQueue = useCallback(() => {
+    const store = useSessionsStore.getState();
+    const id = store.selectedId;
+    const waiting = id ? (store.sessions[id]?.queuedTaskIds ?? []) : [];
+    for (const taskId of waiting) {
+      void bridge.rpc("task.cancel", { taskId }).catch(() => undefined);
+    }
   }, []);
 
   /** Stage image Files (from picker, paste, or drop); rejects report why. */
@@ -383,11 +480,14 @@ export function useComposerViewModel(): ComposerViewModel {
     connected: online && selectedId !== null,
     busy,
     cancelling,
+    queuedCount,
+    clearQueue,
     error,
     send,
     cancel,
     model: own?.model ?? defaults.model,
     models,
+    noProvidersEnabled: modelsLoaded && models.length === 0,
     changeModel,
     effort: own?.effort ?? defaults.effort,
     changeEffort,
@@ -397,6 +497,8 @@ export function useComposerViewModel(): ComposerViewModel {
     setSystemKnowledge,
     vibe,
     changeVibe,
+    autoReview,
+    changeAutoReview,
     attachments,
     addAttachment,
     removeAttachment,

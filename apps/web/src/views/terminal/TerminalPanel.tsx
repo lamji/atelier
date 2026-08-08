@@ -1,23 +1,26 @@
 import { memo, useEffect, useRef } from "react";
-import { Plus, TerminalSquare, X } from "lucide-react";
-import { motion } from "framer-motion";
+import { TerminalSquare } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { TerminalFindBar } from "./TerminalFindBar";
 import type { TerminalSession } from "@atelier/protocol";
 
 export interface TerminalPanelProps {
   sessions: TerminalSession[];
   activeTermId: string | null;
-  onSelect: (termId: string) => void;
+  /** Whether the Ctrl+F find bar is showing for the active terminal. */
+  searchOpen: boolean;
   onCreate: () => void;
-  onKill: (termId: string) => void;
   onMount: (termId: string, container: HTMLElement) => void;
   onRefit: (termId: string) => void;
+  onCloseSearch: () => void;
 }
 
 /**
- * Terminal tabs + the persistent containers xterm renders into. Memoized:
- * output never flows through React (see terminal-registry), so a shell
- * re-render has no business walking this subtree.
+ * The persistent containers xterm renders into, and nothing else. Selecting
+ * and closing terminals now happens in the dock's tab bar, so this component
+ * owns only the surfaces. Memoized: output never flows through React (see
+ * terminal-registry), so a shell re-render has no business walking this
+ * subtree.
  */
 export const TerminalPanel = memo(function TerminalPanel(
   props: TerminalPanelProps
@@ -58,39 +61,6 @@ export const TerminalPanel = memo(function TerminalPanel(
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-1.5 px-2 py-1.5">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-          {props.sessions.map((session) => (
-            <span
-              key={session.id}
-              className={cn(
-                "group flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-2 py-0.5 text-[11px]",
-                session.id === props.activeTermId
-                  ? "bg-accent font-medium text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent/50"
-              )}
-              onClick={() => props.onSelect(session.id)}
-            >
-              {session.name}
-              <X
-                className="h-3 w-3 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  props.onKill(session.id);
-                }}
-              />
-            </span>
-          ))}
-        </div>
-        <motion.button
-          whileTap={{ scale: 0.9 }}
-          title="New terminal"
-          onClick={props.onCreate}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </motion.button>
-      </div>
       {sessions.length > 0 ? (
         <div className="relative min-h-0 flex-1">
           {sessions.map((session) => (
@@ -106,6 +76,14 @@ export const TerminalPanel = memo(function TerminalPanel(
               )}
             />
           ))}
+          {props.searchOpen && activeTermId && (
+            <TerminalFindBar
+              // Remounted per terminal: a find belongs to one scrollback.
+              key={activeTermId}
+              termId={activeTermId}
+              onClose={props.onCloseSearch}
+            />
+          )}
         </div>
       ) : (
         <button

@@ -57,6 +57,34 @@ export function registerSessionHandlers(
     return { conversation };
   });
 
+  router.register("session.renameConversation", (params) => {
+    const title = params.title.trim();
+    if (!title) throw new RpcError("INVALID_PARAMS", "Title cannot be empty");
+    if (!conversations.get(params.conversationId)) {
+      throw new RpcError("NOT_FOUND", `Unknown conversation: ${params.conversationId}`);
+    }
+    conversations.setTitle(params.conversationId, title);
+    // Re-read rather than echoing the input: setTitle also moves updated_at,
+    // which is what orders the list.
+    return { conversation: conversations.get(params.conversationId)! };
+  });
+
+  router.register("session.deleteConversation", (params) => {
+    const { conversationId } = params;
+    if (!conversations.get(conversationId)) return { deleted: false };
+    // A running task would keep writing messages and events into a chat the
+    // user just deleted, so stop it before the rows go — and take its queued
+    // follow-ups with it, or one could still start as the running task ends.
+    orchestrator.dropQueued(conversationId);
+    const live = new Set(orchestrator.listRunningTaskIds());
+    for (const task of conversations.listTasks(true)) {
+      if (task.conversationId === conversationId && live.has(task.id)) {
+        orchestrator.cancelTask(task.id);
+      }
+    }
+    return { deleted: conversations.remove(conversationId) };
+  });
+
   router.register("session.getMessages", (params) => ({
     messages: conversations.getMessages(params.conversationId),
   }));
@@ -110,17 +138,17 @@ export function registerSessionHandlers(
         `Skill /${disabled.name} is disabled in Settings.`
       );
     }
-    const taskId = orchestrator.startTask(params.conversationId, params.prompt, {
+    return orchestrator.startTask(params.conversationId, params.prompt, {
       model: params.model,
       effort: params.effort,
       planMode: params.planMode,
       vibe: params.vibe,
+      autoReview: params.autoReview,
       systemKnowledge: params.systemKnowledge,
       scopeRoots: params.scopeRoots,
       images: params.images,
       promptFile: params.promptFile,
     });
-    return { taskId };
   });
 
   router.register("task.cancel", (params) => ({

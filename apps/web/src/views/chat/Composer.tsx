@@ -7,9 +7,13 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  Cpu,
   FileCode2,
+  FileText,
   Folder,
+  Gauge,
   ImagePlus,
+  ListPlus,
   Loader2,
   Paperclip,
   Plus,
@@ -26,9 +30,10 @@ import {
   splitMentionPath,
   type MentionEntry,
 } from "@/lib/mention-tree";
-import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
+import { NoProviderModal } from "./NoProviderModal";
 import { useMarkdownStore } from "@/state/markdown.store";
+import { createMarkdownFile } from "@/hooks/useMarkdownViewModel";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import {
   NO_PROMPT_FILE,
@@ -66,7 +71,6 @@ function modelOptions(models: ModelOption[]): PickerOption[] {
   const order: Array<NonNullable<ModelOption["provider"]>> = [
     "claude",
     "ollama",
-    "ollama-local",
     "codex",
   ];
   for (const provider of order) {
@@ -149,6 +153,20 @@ export const Composer = memo(function Composer() {
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [providerAlert, setProviderAlert] = useState(false);
+
+  /**
+   * Send, unless there is nothing to send to. With every provider off the
+   * turn would start against an empty roster, so the composer says why
+   * instead — and keeps the draft.
+   */
+  const send = () => {
+    if (vm.noProvidersEnabled) {
+      setProviderAlert(true);
+      return;
+    }
+    vm.send();
+  };
 
   /**
    * Auto-size the composer from the value, not from keystrokes: sending,
@@ -385,12 +403,16 @@ export const Composer = memo(function Composer() {
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      vm.send();
+      send();
     }
   };
 
   return (
     <div className="px-4 pb-3">
+      <NoProviderModal
+        open={providerAlert}
+        onClose={() => setProviderAlert(false)}
+      />
       <div className="mx-auto w-full max-w-3xl">
         {vm.error && (
           <motion.p
@@ -500,10 +522,10 @@ export const Composer = memo(function Composer() {
                 value={vm.input}
                 placeholder={
                   vm.busy
-                    ? "Agent is working — you can cancel or switch sessions"
+                    ? "Agent is working — send to queue a follow-up"
                     : "Describe a task, paste or drop a screenshot…"
                 }
-                disabled={!vm.connected || vm.busy}
+                disabled={!vm.connected}
                 rows={1}
                 onChange={(e) => changeInput(e.target.value)}
                 onKeyDown={onComposerKeyDown}
@@ -517,7 +539,36 @@ export const Composer = memo(function Composer() {
                   "disabled:opacity-60"
                 )}
               />
-              {vm.busy ? (
+              {/* While the agent works, BOTH actions are offered: queue this
+                  draft behind the run, or stop the run. Sending no longer
+                  costs the task in flight, so stopping stops being the only
+                  way to say something. */}
+              <Tooltip content={vm.busy ? "Queue follow-up (Enter)" : "Send (Enter)"}>
+                <motion.button
+                  whileTap={{ scale: 0.92 }}
+                  disabled={
+                    !vm.connected ||
+                    (!vm.input.trim() &&
+                      vm.images.length === 0 &&
+                      vm.promptFile === NO_PROMPT_FILE)
+                  }
+                  onClick={send}
+                  className={cn(
+                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                    "transition-opacity hover:opacity-90 disabled:opacity-30",
+                    vm.busy
+                      ? "bg-muted text-foreground"
+                      : "bg-primary text-primary-foreground"
+                  )}
+                >
+                  {vm.busy ? (
+                    <ListPlus className="h-4 w-4" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                </motion.button>
+              </Tooltip>
+              {vm.busy && (
                 <Tooltip
                   content={
                     vm.cancelling
@@ -541,95 +592,101 @@ export const Composer = memo(function Composer() {
                     )}
                   </motion.button>
                 </Tooltip>
-              ) : (
-                <Tooltip content="Send (Enter)">
-                  <motion.button
-                    whileTap={{ scale: 0.92 }}
-                    disabled={
-                      !vm.connected ||
-                      (!vm.input.trim() &&
-                        vm.images.length === 0 &&
-                        vm.promptFile === NO_PROMPT_FILE)
-                    }
-                    onClick={vm.send}
-                    className={cn(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                      "bg-primary text-primary-foreground transition-opacity",
-                      "hover:opacity-90 disabled:opacity-30"
-                    )}
-                  >
-                    <ArrowUp className="h-4 w-4" />
-                  </motion.button>
-                </Tooltip>
               )}
             </div>
-            <div className="flex items-center gap-2 px-3 pb-2 pt-0.5">
+            {vm.queuedCount > 0 && (
+              <div className="flex items-center gap-2 px-3 pb-1 text-[11px] text-muted-foreground">
+                <ListPlus className="h-3 w-3" />
+                <span>
+                  {vm.queuedCount} follow-up{vm.queuedCount > 1 ? "s" : ""} queued
+                </span>
+                <button
+                  type="button"
+                  onClick={vm.clearQueue}
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+            <div className="flex items-center gap-1 px-2.5 pb-2 pt-0.5">
               <Tooltip content="Attach an image (or paste / drop a screenshot)">
                 <button
                   type="button"
-                  disabled={!vm.connected || vm.busy}
+                  disabled={!vm.connected}
                   onClick={() => fileInputRef.current?.click()}
                   className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
                 >
                   <Paperclip className="h-3.5 w-3.5" />
                 </button>
               </Tooltip>
-              <ComposerSelect
+              <ComposerMenu
+                icon={Cpu}
+                tooltip="Model"
                 value={vm.model}
-                onChange={(v) => vm.changeModel(v as ModelChoice)}
                 options={modelOptions(vm.models)}
+                onChange={(v) => vm.changeModel(v as ModelChoice)}
+                shortLabel={(label) => label.replace(/\s*\(recommended\)/i, "")}
+                interceptOpen={() => {
+                  if (!vm.noProvidersEnabled) return false;
+                  setProviderAlert(true);
+                  return true;
+                }}
               />
-              <ComposerSelect
+              <ComposerMenu
+                icon={Gauge}
+                tooltip="Reasoning effort"
                 value={vm.effort}
-                onChange={(v) => vm.changeEffort(v as EffortChoice)}
                 options={reasoningOptions}
+                onChange={(v) => vm.changeEffort(v as EffortChoice)}
+                shortLabel={(label) => label.replace(/^Reasoning:\s*/i, "")}
               />
               <PromptFileMenu
                 value={vm.promptFile}
                 files={vm.promptFiles}
                 onChange={vm.setPromptFile}
               />
-              <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                <input
-                  type="checkbox"
-                  checked={vm.planMode}
-                  onChange={(e) => vm.setPlanMode(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-[var(--primary)]"
-                />
-                <ClipboardList className="h-3.5 w-3.5" />
-                Plan mode
-              </label>
-              <Tooltip
-                content={
+              <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
+              <ComposerToggle
+                icon={ClipboardList}
+                label="Plan"
+                active={vm.planMode}
+                onToggle={vm.setPlanMode}
+                tooltip="Plan mode: the agent proposes a plan for approval before touching files"
+              />
+              <ComposerToggle
+                icon={Brain}
+                label="Knowledge"
+                active={vm.systemKnowledge}
+                onToggle={vm.setSystemKnowledge}
+                tooltip={
                   vm.systemKnowledge
                     ? "System knowledge ON: retrieval, impact, plan, review and session memory"
                     : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
                 }
-              >
-                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={vm.systemKnowledge}
-                    onChange={(e) => vm.setSystemKnowledge(e.target.checked)}
-                    className="h-3.5 w-3.5 accent-[var(--primary)]"
-                  />
-                  <Brain className="h-3.5 w-3.5" />
-                  Knowledge
-                </label>
-              </Tooltip>
-              <Tooltip content="Vibe coding: the agent owns the feature end to end — UX, edge cases, polish">
-                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={vm.vibe}
-                    onChange={(e) => vm.changeVibe(e.target.checked)}
-                    className="h-3.5 w-3.5 accent-[var(--primary)]"
-                  />
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Vibe
-                </label>
-              </Tooltip>
-              <span className="ml-auto text-[10px] text-muted-foreground/50">
+              />
+              <ComposerChecks
+                icon={Sparkles}
+                label="Modes"
+                tooltip="How the agent works on this project"
+                items={[
+                  {
+                    key: "vibe",
+                    label: "Vibe code",
+                    hint: "Owns the feature end to end — UX, edge cases, polish",
+                    checked: vm.vibe,
+                    onChange: vm.changeVibe,
+                  },
+                  {
+                    key: "autoReview",
+                    label: "Auto review",
+                    hint: "An independent reviewer checks the changes and can send them back for a fix",
+                    checked: vm.autoReview,
+                    onChange: vm.changeAutoReview,
+                  },
+                ]}
+              />
+              <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/50 min-[560px]:inline">
                 Enter ↵ · Shift+Enter newline
               </span>
             </div>
@@ -862,38 +919,327 @@ function MentionRowHint({ entry, dir }: { entry: MentionEntry; dir: string }) {
   );
 }
 
-function ComposerSelect(props: {
-  value: string;
-  onChange: (value: string) => void;
-  options: PickerOption[];
-}) {
-  return (
-    <Select
-      value={props.value}
-      onChange={props.onChange}
-      direction="up"
-      options={props.options.map((option) =>
-        Array.isArray(option)
-          ? {
-              value: option[0],
-              label: option[1],
-              hint: option[2],
-            }
-          : option
-      )}
-    />
-  );
-}
-
 function optionValue(option: PickerOption): string {
   return Array.isArray(option) ? option[0] : option.value;
 }
 
+function optionLabel(option: PickerOption): string {
+  return Array.isArray(option) ? option[1] : option.label;
+}
+
+function isSeparator(
+  option: PickerOption,
+): option is { separator: true; value: string; label: string } {
+  return !Array.isArray(option) && option.separator;
+}
+
+/**
+ * Ghost-pill toggle for the composer's mode switches (Plan / Knowledge /
+ * Vibe). Lit with the primary tint while active — same state, same
+ * handlers as the old checkboxes, just IDE-style chrome.
+ */
+function ComposerToggle(props: {
+  icon: typeof Brain;
+  label: string;
+  active: boolean;
+  tooltip: string;
+  onToggle: (next: boolean) => void;
+}) {
+  const Icon = props.icon;
+  return (
+    <Tooltip content={props.tooltip}>
+      <button
+        type="button"
+        aria-pressed={props.active}
+        onClick={() => props.onToggle(!props.active)}
+        className={cn(
+          "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+          "text-[11px] font-medium transition-colors",
+          props.active
+            ? "bg-primary/15 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+        )}
+      >
+        <Icon className="h-3.5 w-3.5" />
+        {props.label}
+      </button>
+    </Tooltip>
+  );
+}
+
+interface CheckItem {
+  key: string;
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}
+
+/**
+ * Drop-up of independent checkboxes (Vibe code / Auto review). Unlike
+ * ComposerMenu these are not one-of-N, and the menu stays open after a tick
+ * so both can be set in a single visit.
+ */
+function ComposerChecks(props: {
+  icon: typeof Brain;
+  label: string;
+  tooltip: string;
+  items: CheckItem[];
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissOnOutside(open, rootRef, () => setOpen(false));
+
+  const Icon = props.icon;
+  const onCount = props.items.filter((item) => item.checked).length;
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Tooltip content={props.tooltip}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-haspopup="true"
+          aria-expanded={open}
+          className={cn(
+            "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+            "text-[11px] font-medium transition-colors",
+            onCount > 0
+              ? "bg-primary/15 text-primary"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            open && onCount === 0 && "bg-accent text-foreground"
+          )}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          {props.label}
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </Tooltip>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full left-0 z-50 mb-1 w-64 rounded-lg",
+              "border border-border bg-card p-1 shadow-xl"
+            )}
+          >
+            {props.items.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={item.checked}
+                onClick={() => item.onChange(!item.checked)}
+                className={cn(
+                  "flex w-full items-start gap-2 rounded-md px-2 py-1.5",
+                  "text-left transition-colors hover:bg-accent/60"
+                )}
+              >
+                <span
+                  className={cn(
+                    "mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                    "rounded border transition-colors",
+                    item.checked
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border"
+                  )}
+                >
+                  {item.checked && <Check className="h-2.5 w-2.5" />}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[11px] text-foreground">
+                    {item.label}
+                  </span>
+                  <span className="block text-[10px] leading-tight text-muted-foreground">
+                    {item.hint}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** Closes a drop-up on an outside click or Escape, while it is open. */
+function useDismissOnOutside(
+  open: boolean,
+  ref: React.RefObject<HTMLElement | null>,
+  close: () => void
+): void {
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+    // `close` is a fresh arrow each render; the deps that matter are open/ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, ref]);
+}
+
+/**
+ * Compact drop-up picker pill (model, reasoning effort). Replaces the
+ * bordered Select in the composer row; separators become group headers.
+ */
+function ComposerMenu(props: {
+  icon: typeof Brain;
+  tooltip: string;
+  value: string;
+  options: PickerOption[];
+  onChange: (value: string) => void;
+  /** Compresses the selected label for the trigger pill. */
+  shortLabel?: (label: string) => string;
+  /**
+   * Runs before the menu opens; returning true swallows the click. Lets a
+   * caller answer the click with an explanation when the list would be
+   * meaningless — e.g. no provider is enabled.
+   */
+  interceptOpen?: () => boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const Icon = props.icon;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const selected = props.options.find(
+    (o) => !isSeparator(o) && optionValue(o) === props.value
+  );
+  const rawLabel = selected ? optionLabel(selected) : props.value;
+  const label = props.shortLabel ? props.shortLabel(rawLabel) : rawLabel;
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Tooltip content={props.tooltip}>
+        <button
+          type="button"
+          onClick={() => {
+            if (props.interceptOpen?.()) return;
+            setOpen((v) => !v);
+          }}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={cn(
+            "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+            "text-[11px] text-muted-foreground transition-colors",
+            "hover:bg-accent hover:text-foreground",
+            open && "bg-accent text-foreground"
+          )}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          <span className="max-w-[9rem] truncate">{label}</span>
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </Tooltip>
+
+      <AnimatePresence>
+        {open && (
+          <motion.ul
+            role="listbox"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full left-0 z-50 mb-1 max-h-64 w-56",
+              "overflow-y-auto rounded-lg border border-border bg-card p-1",
+              "shadow-xl"
+            )}
+          >
+            {props.options.map((option) =>
+              isSeparator(option) ? (
+                <li
+                  key={option.value}
+                  className="px-2 pb-0.5 pt-1.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 first:pt-0.5"
+                >
+                  {option.label}
+                </li>
+              ) : (
+                <li key={optionValue(option)} role="option"
+                  aria-selected={optionValue(option) === props.value}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      props.onChange(optionValue(option));
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1",
+                      "text-left text-[11px] transition-colors",
+                      optionValue(option) === props.value
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-accent/60"
+                    )}
+                  >
+                    <span className="min-w-0 flex-1 truncate">
+                      {optionLabel(option)}
+                    </span>
+                    {Array.isArray(option) && option[2] && (
+                      <span className="shrink-0 text-[10px] text-muted-foreground/60">
+                        {option[2]}
+                      </span>
+                    )}
+                    {optionValue(option) === props.value && (
+                      <Check className="h-3 w-3 shrink-0" />
+                    )}
+                  </button>
+                </li>
+              )
+            )}
+          </motion.ul>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 /**
  * Prompt-file picker: workspace .md files (the .atelier catalog) offered
- * as ready-made prompts. Always visible; the menu has a search box, and
- * an empty catalog (or search) offers "Create markdown file", which jumps
- * to the Markdown panel with its create form open.
+ * as ready-made prompts. Always visible; the menu has a search box and a
+ * permanent "Create prompt" footer that writes a new `.atelier/*.md` file
+ * inline and selects it — creating a prompt is the reason the menu is open
+ * often enough that it should not be hidden behind an empty catalog.
  */
 function PromptFileMenu(props: {
   value: string;
@@ -902,13 +1248,16 @@ function PromptFileMenu(props: {
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selected = props.files.find((f) => f.path === props.value);
 
-  // Click-outside / Escape close; the search resets on every open.
+  // Click-outside / Escape close; the search and draft reset on every open.
   useEffect(() => {
     if (!open) return;
     setQuery("");
+    setDraft(null);
     const onPointerDown = (e: MouseEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
@@ -936,7 +1285,29 @@ function PromptFileMenu(props: {
     setOpen(false);
   };
 
-  const startCreate = () => {
+  // Seed the name box from whatever was typed in the search: a search that
+  // found nothing is usually the name of the prompt you meant to write.
+  const startCreate = () => setDraft(query.trim());
+
+  const submitCreate = async () => {
+    const name = (draft ?? "").trim();
+    if (!name || saving) return;
+    setSaving(true);
+    try {
+      const path = await createMarkdownFile(name);
+      if (!path) return;
+      // Created prompts are almost always meant for the message you are
+      // about to send, so select it rather than just listing it.
+      props.onChange(path);
+      setDraft(null);
+      setOpen(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Full editing lives in the Markdown panel, not this dropdown. */
+  const openMarkdownPanel = () => {
     setOpen(false);
     useMarkdownStore.getState().setCreating(true);
     useWorkspaceStore.getState().setActivityView("markdown");
@@ -948,19 +1319,21 @@ function PromptFileMenu(props: {
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "flex h-6 cursor-pointer items-center gap-1 rounded-md bg-muted/80",
-          "px-1.5 text-[11px] outline-none",
+          "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+          "text-[11px] outline-none transition-colors",
           selected
-            ? "text-primary"
-            : "text-muted-foreground hover:text-foreground"
+            ? "bg-primary/15 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          open && !selected && "bg-accent text-foreground"
         )}
       >
+        <FileText className="h-3.5 w-3.5" />
         <span className="max-w-[9rem] truncate">
-          {selected?.title ?? "Prompt file"}
+          {selected?.title ?? "Prompt"}
         </span>
         <ChevronDown
           className={cn(
-            "h-3 w-3 shrink-0 transition-transform",
+            "h-3 w-3 shrink-0 opacity-60 transition-transform",
             open && "rotate-180"
           )}
         />
@@ -975,7 +1348,7 @@ function PromptFileMenu(props: {
             transition={{ duration: 0.12 }}
             className={cn(
               "absolute bottom-full left-0 z-50 mb-1 w-64 max-w-[80vw]",
-              "overflow-hidden rounded-lg border border-white/10 bg-card p-1 shadow-xl"
+              "overflow-hidden rounded-lg border border-border bg-card p-1 shadow-xl"
             )}
           >
             <input
@@ -989,21 +1362,11 @@ function PromptFileMenu(props: {
               )}
             />
             {matches.length === 0 ? (
-              <div className="px-2 py-1.5">
-                <p className="text-[10px] text-muted-foreground/60">
-                  {props.files.length === 0
-                    ? "No markdown files yet."
-                    : "No matches."}
-                </p>
-                <button
-                  type="button"
-                  onClick={startCreate}
-                  className="mt-1 flex items-center gap-1 text-[11px] text-primary hover:underline"
-                >
-                  <Plus className="h-3 w-3" />
-                  Create markdown file
-                </button>
-              </div>
+              <p className="px-2 py-1.5 text-[10px] text-muted-foreground/60">
+                {props.files.length === 0
+                  ? "No markdown files yet."
+                  : "No matches."}
+              </p>
             ) : (
               <ul className="max-h-56 overflow-y-auto">
                 {props.value !== NO_PROMPT_FILE && (
@@ -1043,6 +1406,72 @@ function PromptFileMenu(props: {
                 ))}
               </ul>
             )}
+
+            <div className="mt-1 border-t border-border pt-1">
+              {draft === null ? (
+                <button
+                  type="button"
+                  onClick={startCreate}
+                  className={cn(
+                    "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
+                    "text-left text-[11px] text-primary",
+                    "outline-none transition-colors hover:bg-accent/60"
+                  )}
+                >
+                  <Plus className="h-3 w-3 shrink-0" />
+                  Create prompt
+                </button>
+              ) : (
+                <div className="flex items-center gap-1 px-1 pb-0.5">
+                  <input
+                    autoFocus
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void submitCreate();
+                      }
+                      // Cancel the name box without closing the whole menu.
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        setDraft(null);
+                      }
+                    }}
+                    placeholder="prompt-name"
+                    className={cn(
+                      "min-w-0 flex-1 rounded-md bg-muted/60 px-2 py-1",
+                      "font-mono text-[11px] outline-none",
+                      "placeholder:text-muted-foreground/50"
+                    )}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void submitCreate()}
+                    disabled={saving || draft.trim() === ""}
+                    className={cn(
+                      "shrink-0 rounded-md px-2 py-1 text-[11px] font-medium",
+                      "text-primary outline-none transition-colors",
+                      "hover:bg-accent/60 disabled:opacity-40"
+                    )}
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={openMarkdownPanel}
+                className={cn(
+                  "flex w-full items-center gap-1.5 rounded-md px-2 py-1",
+                  "text-left text-[10px] text-muted-foreground/70",
+                  "outline-none transition-colors hover:bg-accent/60"
+                )}
+              >
+                <FileText className="h-3 w-3 shrink-0" />
+                Manage in Markdown panel
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

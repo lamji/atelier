@@ -3,9 +3,14 @@ import path from "node:path";
 import { toPosix } from "@atelier/shared";
 
 export interface Mention {
-  /** Workspace-relative posix path that exists on disk. */
+  /**
+   * Posix path that exists on disk: workspace-relative normally, absolute
+   * when the user pointed at something outside the workspace.
+   */
   path: string;
   isDir: boolean;
+  /** Outside the workspace — readable as a reference, never writable. */
+  outside: boolean;
 }
 
 /**
@@ -14,10 +19,53 @@ export interface Mention {
  * than depending on the UI to send a second, structured copy that a typed
  * mention (or a resumed conversation) would not have.
  */
-const MENTION = /(^|\s)@([A-Za-z0-9._\-/\\]+)/g;
+const MENTION = /(^|\s)@([A-Za-z0-9._\-/\\]+(?::[\\/][A-Za-z0-9._\-/\\]*)?)/g;
 
 /** Trailing prose punctuation that is never part of a real path. */
 const TRAILING = /[.,;:!?)\]}'"]+$/;
+
+/**
+ * A path typed WITHOUT the "@" — `.atelier/notes.md`, `src/app/page.tsx`.
+ * Requires a separator, so ordinary prose and bare filenames never match;
+ * every candidate still has to exist on disk before it counts.
+ */
+const BARE_PATH = /(?:^|[\s"'`(\[])([A-Za-z0-9._-]+(?:[/\\][A-Za-z0-9._-]+)+)/g;
+
+/**
+ * Paths the user typed literally, without an "@".
+ *
+ * Naming a file IS pointing at it. Only "@" mentions used to register, so a
+ * prompt like "update .atelier/foo.md" left the session's lock untouched and
+ * the guard then refused to read the very file the request named. These do
+ * not re-lock the session — they grant access to what was named, and
+ * nothing else.
+ */
+export function parseTypedPaths(
+  prompt: string,
+  workspaceRoot: string
+): string[] {
+  const root = path.resolve(workspaceRoot);
+  const found = new Set<string>();
+
+  for (const match of prompt.matchAll(BARE_PATH)) {
+    const raw = (match[1] ?? "").replace(TRAILING, "");
+    if (!raw || raw.includes("..")) continue;
+    const cleaned = toPosix(raw).replace(/\/+$/, "");
+    if (!cleaned) continue;
+
+    const abs = path.resolve(root, cleaned);
+    // Reference access is granted inside the workspace only; "@" remains
+    // the way to point at something outside it.
+    if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+    try {
+      fs.statSync(abs);
+    } catch {
+      continue; // a path-shaped string that names nothing real
+    }
+    found.add(cleaned);
+  }
+  return [...found];
+}
 
 /**
  * Pulls the "@path" mentions out of a prompt, keeping only the ones that
@@ -35,14 +83,19 @@ export function parseMentions(
 
   for (const match of prompt.matchAll(MENTION)) {
     const raw = (match[2] ?? "").replace(TRAILING, "");
+    // ".." stays banned: an escape spelled as traversal is never a
+    // deliberate reference, it is a path guard being probed.
     if (!raw || raw.includes("..")) continue;
 
-    const rel = toPosix(raw).replace(/\/+$/, "");
-    if (!rel) continue;
+    const cleaned = toPosix(raw).replace(/\/+$/, "");
+    if (!cleaned) continue;
 
-    const abs = path.resolve(root, rel);
-    // Rejects both traversal and an absolute path pointing outside.
-    if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+    const abs = path.resolve(root, cleaned);
+    // A path that lands outside the workspace is kept as a reference
+    // rather than dropped: the user named it on purpose, and refusing to
+    // read what you were just pointed at is the worse failure. It travels
+    // as an absolute path, and the guard only ever grants it reads.
+    const outside = abs !== root && !abs.startsWith(root + path.sep);
 
     let stat: fs.Stats;
     try {
@@ -50,8 +103,9 @@ export function parseMentions(
     } catch {
       continue;
     }
-    if (!seen.has(rel)) {
-      seen.set(rel, { path: rel, isDir: stat.isDirectory() });
+    const wire = outside ? toPosix(abs) : cleaned;
+    if (!seen.has(wire)) {
+      seen.set(wire, { path: wire, isDir: stat.isDirectory(), outside });
     }
   }
   return [...seen.values()];

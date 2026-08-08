@@ -175,7 +175,7 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
                         feature.status === "fresh"
                           ? "bg-success/15 text-success"
                           : feature.status === "stale"
-                            ? "bg-amber-500/15 text-amber-500"
+                            ? "bg-warning/15 text-warning"
                             : "bg-muted text-muted-foreground"
                       )}
                     >
@@ -202,7 +202,7 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
               <Tooltip key={lesson.id} content={lesson.body}>
                 <li className="rounded-lg bg-muted/40 px-2.5 py-1.5">
                   <div className="flex items-start gap-1.5">
-                    <GraduationCap className="mt-0.5 h-3 w-3 shrink-0 text-amber-500/80" />
+                    <GraduationCap className="mt-0.5 h-3 w-3 shrink-0 text-warning/80" />
                     <p className="min-w-0 text-[11px] leading-snug">{lesson.title}</p>
                   </div>
                   <p className="mt-0.5 truncate pl-[18px] text-[10px] text-muted-foreground/70">

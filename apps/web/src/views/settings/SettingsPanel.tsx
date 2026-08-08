@@ -3,33 +3,34 @@ import {
   Check,
   ChevronRight,
   Cloud,
-  Cpu,
   Gauge,
+  HelpCircle,
   Loader2,
   Plug,
-  Plus,
   RefreshCw,
   Scale,
-  Settings as SettingsIcon,
+  Sparkles,
   Terminal,
   Trash2,
+  UserRound,
   Wand2,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { RulesTab } from "./RulesTab";
 import { McpTab } from "./McpTab";
 import { SkillsTab } from "./SkillsTab";
-import {
-  ADDABLE_PROVIDERS,
-  useProvidersViewModel,
-  type ProvidersVm,
-} from "@/hooks/useProvidersViewModel";
-import type { ProviderCredential, ProviderUsage } from "@atelier/protocol";
-
-/** Where the Ollama daemon listens unless the user says otherwise. */
-const LOCAL_OLLAMA_HOST = "http://127.0.0.1:11434";
+import { AccountTab } from "./AccountTab";
+import { ProviderHelpModal } from "./ProviderHelpModal";
+import { useProvidersViewModel, type ProvidersVm } from "@/hooks/useProvidersViewModel";
+import type {
+  ProviderCredential,
+  ProviderId,
+  ProviderUsage,
+} from "@atelier/protocol";
 
 /**
  * Settings: model providers the user supplies credentials for. Everything
@@ -42,17 +43,24 @@ export function SettingsPanel() {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
-      <div className="flex items-center gap-2">
-        <SettingsIcon className="h-4 w-4 text-primary/80" />
-        <h2 className="text-sm font-semibold">Settings</h2>
-        <div className="ml-auto flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5">
+      {/*
+        No title row: the rail icon and its tooltip already say Settings, and
+        the tab strip is the only thing here that does any work. It gets the
+        full width instead of being pushed into the corner by a label.
+      */}
+      <div className="flex items-center">
+        <div className="flex w-full items-center gap-0.5 rounded-lg bg-muted/60 p-0.5">
+          {/* One tab for every model provider. They are the same kind of
+              thing configured the same way, so splitting them across three
+              icons only hid two of them at a time. */}
           <TabButton
             active={tab === "providers"}
             onClick={() => setTab("providers")}
-            title="Providers"
+            title="Model providers"
           >
             <Cloud className="h-3.5 w-3.5" />
           </TabButton>
+          <span className="mx-0.5 h-4 w-px bg-border" />
           <TabButton
             active={tab === "mcp"}
             onClick={() => setTab("mcp")}
@@ -74,6 +82,16 @@ export function SettingsPanel() {
           >
             <Scale className="h-3.5 w-3.5" />
           </TabButton>
+          <span className="mx-0.5 h-4 w-px bg-border" />
+          {/* Last, and behind its own divider: this is about you, not about
+              the workspace's model plumbing. */}
+          <TabButton
+            active={tab === "account"}
+            onClick={() => setTab("account")}
+            title="Account"
+          >
+            <UserRound className="h-3.5 w-3.5" />
+          </TabButton>
         </div>
       </div>
 
@@ -81,11 +99,58 @@ export function SettingsPanel() {
       {tab === "mcp" && <McpTab />}
       {tab === "skills" && <SkillsTab />}
       {tab === "rules" && <RulesTab />}
+      {tab === "account" && <AccountTab />}
     </div>
   );
 }
 
-type Tab = "providers" | "mcp" | "skills" | "rules";
+type ProviderTab = "ollama-cloud" | "codex" | "claude";
+type Tab = "providers" | "mcp" | "skills" | "rules" | "account";
+
+interface ProviderDef {
+  id: ProviderTab;
+  title: string;
+  icon: typeof Cloud;
+  /** Shown when the provider has no credential yet. */
+  connectLabel: string;
+  connectHint: string;
+}
+
+/**
+ * Every model provider, rendered as one stacked list under a single tab.
+ * The connect copy is per-provider: Ollama Cloud takes an API key, while
+ * Codex and Claude are CLIs you sign in to, so telling all three to paste an
+ * Ollama key (as one shared string used to) was simply wrong for two of them.
+ */
+const PROVIDER_DEFS: ProviderDef[] = [
+  {
+    id: "ollama-cloud",
+    title: "Ollama Cloud",
+    icon: Cloud,
+    connectLabel: "Connect Ollama Cloud",
+    connectHint:
+      "Use an API key from ollama.com/settings/keys. Atelier stores it " +
+      "locally and never sends it back to the UI.",
+  },
+  {
+    id: "codex",
+    title: "Codex",
+    icon: Terminal,
+    connectLabel: "Connect Codex",
+    connectHint:
+      "Codex runs as a signed-in CLI on this machine. Sign in with the " +
+      "codex CLI, then use Test to pick it up — no key is stored here.",
+  },
+  {
+    id: "claude",
+    title: "Claude",
+    icon: Sparkles,
+    connectLabel: "Connect Claude",
+    connectHint:
+      "Claude runs as a signed-in CLI on this machine. Sign in with the " +
+      "claude CLI, then use Test to pick it up — no key is stored here.",
+  },
+];
 
 /** Icon-only tab: the title is the tooltip and the accessible name. */
 function TabButton({
@@ -100,31 +165,29 @@ function TabButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      size="icon"
       onClick={onClick}
       title={title}
       aria-label={title}
       aria-pressed={active}
       className={cn(
-        "flex h-6 w-7 items-center justify-center rounded-md transition-colors",
+        "!h-6 !w-7 rounded-md",
         active
           ? "bg-background text-foreground shadow-sm"
           : "text-muted-foreground hover:text-foreground"
       )}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
+/** All model providers, one section each, under the single Cloud tab. */
 function ProvidersTab() {
   const vm = useProvidersViewModel();
-  const [adding, setAdding] = useState(false);
-
-  // Providers that have no entry yet are the ones "Add provider" offers.
-  const configuredIds = new Set(vm.providers.filter((p) => p.configured).map((p) => p.id));
-  const available = ADDABLE_PROVIDERS.filter((p) => !configuredIds.has(p.id));
 
   return (
     <div className="flex flex-col gap-3">
@@ -138,63 +201,42 @@ function ProvidersTab() {
         </p>
       )}
 
-      <section className="space-y-1.5">
-        <div className="flex items-center gap-2 px-0.5">
-          <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
-            Providers
-          </h3>
-          {available.length > 0 && (
-            <button
-              type="button"
-              disabled={!vm.connected}
-              onClick={() => setAdding((v) => !v)}
-              className={cn(
-                "ml-auto flex items-center gap-1 rounded-md px-1.5 py-0.5",
-                "text-[10px] font-medium transition-colors",
-                "bg-primary/10 text-primary hover:bg-primary/20",
-                "disabled:cursor-not-allowed disabled:opacity-40"
-              )}
-            >
-              {adding ? (
-                <X className="h-3 w-3" />
-              ) : (
-                <Plus className="h-3 w-3" />
-              )}
-              {adding ? "Cancel" : "Add provider"}
-            </button>
-          )}
-        </div>
+      {PROVIDER_DEFS.map((definition) => {
+        const provider = vm.providers.find(
+          (candidate) => candidate.id === definition.id
+        );
+        return (
+          <section key={definition.id} className="space-y-1.5">
+            <div className="flex items-center gap-1.5 px-0.5">
+              <definition.icon className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+              <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+                {definition.title}
+              </h3>
+            </div>
 
-        {adding && (
-          <div className="space-y-1 rounded-xl bg-muted/40 p-1.5">
-            {available.map((option) => (
+            {!provider || vm.loading ? (
+              <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] text-muted-foreground/70">
+                Loading provider…
+              </p>
+            ) : provider.configured ? (
+              <ProviderCard provider={provider} vm={vm} />
+            ) : provider.hostless ? (
+              // No key to take and no endpoint to set: the only way in is to
+              // sign in to the CLI, so a key form here would be a dead end.
+              <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] leading-relaxed text-muted-foreground/70">
+                {definition.connectHint}
+              </p>
+            ) : (
               <ProviderForm
-                key={option.id}
-                id={option.id}
-                label={option.label}
-                hint={option.hint}
+                id={provider.id}
+                label={definition.connectLabel}
+                hint={definition.connectHint}
                 vm={vm}
-                onDone={() => setAdding(false)}
               />
-            ))}
-          </div>
-        )}
-
-        {vm.providers.filter((p) => p.configured && !p.keyless).length === 0 &&
-          !adding && (
-            <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] leading-relaxed text-muted-foreground/70">
-              No API-key providers configured. The signed-in CLIs and the local
-              daemon below need no key. Add a provider to run calls against a
-              hosted account as well.
-            </p>
-          )}
-
-        {vm.providers
-          .filter((p) => p.configured)
-          .map((provider) => (
-            <ProviderCard key={provider.id} provider={provider} vm={vm} />
-          ))}
-      </section>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -209,6 +251,7 @@ function ProviderCard({
 }) {
   const [editing, setEditing] = useState(false);
   const [showModels, setShowModels] = useState(false);
+  const [helpFor, setHelpFor] = useState<string | null>(null);
   const check = vm.checks[provider.id];
   const busy = vm.checking === provider.id;
   const models = vm.catalog[provider.id];
@@ -229,10 +272,23 @@ function ProviderCard({
   }, [vm.connected, showModels, loadUsage, provider.id]);
 
   const enabledCount = models?.filter((m) => m.enabled).length ?? 0;
-  const Icon = provider.hostless ? Terminal : provider.keyless ? Cpu : Cloud;
+  const Icon =
+    provider.id === "claude"
+      ? Sparkles
+      : provider.id === "codex"
+        ? Terminal
+        : Cloud;
 
   return (
     <div className="overflow-hidden rounded-xl bg-muted/40">
+      {/* "Already working" is read from what the card has: a Test result
+          when the user has run one, otherwise a non-empty catalog — a CLI
+          that is not signed in, or a bad key, offers no models. */}
+      <ProviderHelpModal
+        providerId={helpFor}
+        ready={check ? check.ok : (models?.length ?? 0) > 0}
+        onClose={() => setHelpFor(null)}
+      />
       <div className="flex items-start gap-2.5 p-2.5">
         <Icon
           className={cn(
@@ -242,33 +298,40 @@ function ProviderCard({
         />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-medium">{provider.label}</p>
-          <p className="mt-0.5 break-all font-mono text-[10px] text-muted-foreground/70">
-            {provider.hostless ? (
-              <>signed-in session · no key needed</>
-            ) : provider.keyless ? (
-              <>{provider.host ?? LOCAL_OLLAMA_HOST} · no key needed</>
-            ) : (
-              <>
-                key {provider.keyHint ?? "stored"}
-                {provider.host ? ` · ${provider.host}` : ""}
-              </>
-            )}
-          </p>
+          {/* A hostless provider has nothing to say here — it signs in
+              through its own session, so there is no key or host to show. */}
+          {!provider.hostless && (
+            <p className="mt-0.5 break-all font-mono text-[10px] text-muted-foreground/70">
+              key {provider.keyHint ?? "stored"}
+              {provider.host ? ` · ${provider.host}` : ""}
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon"
+            title="How this provider connects"
+            onClick={() => setHelpFor(provider.id)}
+            className="!h-6 !w-6 text-muted-foreground hover:text-foreground"
+          >
+            <HelpCircle className="h-3 w-3" />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
             disabled={busy || !vm.connected}
             onClick={() => vm.check(provider.id)}
-            className={cn(
-              "rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground",
-              "hover:text-foreground disabled:opacity-40"
-            )}
+            className="!h-5 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
           >
             {busy ? "Checking…" : "Test"}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            size="icon"
             // A keyless provider cannot be removed, only reset: it is a
             // program on this machine, and it comes back on the next list.
             title={
@@ -280,17 +343,23 @@ function ProviderCard({
             }
             disabled={vm.saving}
             onClick={() => vm.remove(provider.id)}
-            className="rounded-md p-1 text-muted-foreground hover:text-destructive disabled:opacity-40"
+            className="!h-6 !w-6 text-muted-foreground hover:text-destructive"
           >
             <Trash2 className="h-3 w-3" />
-          </button>
+          </Button>
           {/* The whole provider, in one move. Kept beside the label rather
               than inside the model list: it decides whether that list means
               anything at all. Model choices survive being switched off. */}
           <Switch
             checked={provider.enabled}
             disabled={!vm.connected}
-            onChange={(next) => vm.setProviderEnabled(provider.id, next)}
+            // Switching on is the moment the user expects models to appear;
+            // if this provider needs a CLI sign-in or a key, that is the
+            // moment to say so rather than let the list come back empty.
+            onChange={(next) => {
+              vm.setProviderEnabled(provider.id, next);
+              if (next) setHelpFor(provider.id);
+            }}
             label={`${provider.label} models in chat`}
             className="ml-0.5"
           />
@@ -326,10 +395,11 @@ function ProviderCard({
             the list would otherwise own the whole panel. The enabled count
             stays visible while closed, which is the part worth glancing at. */}
         <div className="flex items-center gap-1 px-2.5 py-1.5">
-          <button
+          <Button
             type="button"
+            variant="ghost"
             onClick={() => setShowModels((v) => !v)}
-            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            className="!h-auto min-w-0 flex-1 justify-start gap-1.5 p-0 text-left hover:bg-transparent"
           >
             <ChevronRight
               className={cn(
@@ -343,18 +413,20 @@ function ProviderCard({
             <span className="text-[10px] text-muted-foreground/50">
               {provider.enabled ? `${enabledCount} in chat` : "none in chat"}
             </span>
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            size="icon"
             disabled={loadingModels || !vm.connected}
             onClick={() => loadCatalog(provider.id)}
-            className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground disabled:opacity-40"
+            className="!h-6 !w-6 shrink-0 text-muted-foreground hover:text-foreground"
             title="Refresh model list"
           >
             <RefreshCw
               className={cn("h-3 w-3", loadingModels && "animate-spin")}
             />
-          </button>
+          </Button>
         </div>
 
         {showModels && <UsageBlock usage={vm.usage[provider.id]} />}
@@ -408,9 +480,7 @@ function ProviderCard({
           <p className="px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/60">
             {provider.hostless
               ? "No models returned. Run Test to check you are signed in to this CLI."
-              : provider.keyless
-                ? "Nothing pulled yet. Run `ollama pull <model>` in a terminal, then refresh — anything you pull shows up here and in the chat picker."
-                : "No models returned. Run Test to check the key and host."}
+              : "No models returned. Run Test to check the Ollama Cloud API key."}
           </p>
         )}
       </div>
@@ -421,25 +491,20 @@ function ProviderCard({
           <ProviderForm
             id={provider.id}
             label={provider.label}
-            hint={
-              provider.keyless
-                ? `Where the daemon listens — blank means ${LOCAL_OLLAMA_HOST}`
-                : "Leave the key blank to keep the stored one"
-            }
+            hint="Enter a replacement Ollama Cloud API key."
             vm={vm}
-            keyless={provider.keyless}
-            initialHost={provider.host ?? ""}
             onDone={() => setEditing(false)}
           />
         </div>
       ) : (
-        <button
+        <Button
           type="button"
+          variant="ghost"
           onClick={() => setEditing(true)}
-          className="w-full border-t border-border/60 px-2.5 py-1.5 text-left text-[10px] text-muted-foreground hover:text-foreground"
+          className="!h-auto w-full justify-start rounded-none border-t border-border/60 px-2.5 py-1.5 text-left text-[10px] text-muted-foreground hover:text-foreground"
         >
-          {provider.keyless ? "Edit host" : "Edit key or host"}
-        </button>
+          Edit API key
+        </Button>
       )}
     </div>
   );
@@ -510,37 +575,28 @@ function duration(seconds: number): string {
   return `${seconds}s`;
 }
 
-/** Key + optional host entry. The key is never rendered back. */
+/** Ollama Cloud key entry. The key is never rendered back. */
 function ProviderForm({
   id,
   label,
   hint,
   vm,
-  keyless = false,
-  initialHost = "",
   onDone,
 }: {
-  id: string;
+  id: ProviderId;
   label: string;
   hint: string;
   vm: ProvidersVm;
-  /** A daemon on this machine: host only, no secret to ask for. */
-  keyless?: boolean;
-  initialHost?: string;
-  onDone: () => void;
+  onDone?: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
-  const [host, setHost] = useState(initialHost);
 
   const submit = () => {
-    // An untouched key field means "keep what's stored", so it is omitted
-    // rather than sent as an empty string that would clear the key.
-    vm.save(id, {
-      ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-      host: host.trim(),
-    });
+    const key = apiKey.trim();
+    if (!key) return;
+    vm.save(id, { apiKey: key });
     setApiKey("");
-    onDone();
+    onDone?.();
   };
 
   return (
@@ -551,59 +607,37 @@ function ProviderForm({
           {hint}
         </p>
       </div>
-      {!keyless && (
-        <input
-          type="password"
-          value={apiKey}
-          autoComplete="off"
-          spellCheck={false}
-          placeholder="API key"
-          onChange={(e) => setApiKey(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          className={cn(
-            "w-full rounded-md bg-muted px-2 py-1 font-mono text-[11px]",
-            "outline-none placeholder:text-muted-foreground/50",
-            "focus:ring-1 focus:ring-primary/40"
-          )}
-        />
-      )}
-      <input
-        type="text"
-        value={host}
+      <Input
+        type="password"
+        value={apiKey}
         autoComplete="off"
         spellCheck={false}
-        placeholder={
-          keyless
-            ? `Host (optional) — defaults to ${LOCAL_OLLAMA_HOST}`
-            : "Host (optional) — defaults to https://ollama.com"
-        }
-        onChange={(e) => setHost(e.target.value)}
+        placeholder="Ollama Cloud API key"
+        onChange={(e) => setApiKey(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
-        className={cn(
-          "w-full rounded-md bg-muted px-2 py-1 font-mono text-[11px]",
-          "outline-none placeholder:text-muted-foreground/50",
-          "focus:ring-1 focus:ring-primary/40"
-        )}
+        className="!h-7 px-2 py-1 font-mono text-[11px]"
       />
       <div className="flex gap-1.5 pt-0.5">
-        <button
+        <Button
           type="button"
-          disabled={vm.saving || !vm.connected}
+          size="sm"
+          disabled={vm.saving || !vm.connected || !apiKey.trim()}
           onClick={submit}
-          className={cn(
-            "rounded-md bg-primary px-2 py-0.5 text-[10px] font-medium",
-            "text-primary-foreground hover:opacity-90 disabled:opacity-40"
-          )}
+          className="!h-6 px-2 py-0.5 text-[10px]"
         >
           Save
-        </button>
-        <button
-          type="button"
-          onClick={onDone}
-          className="rounded-md px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-        >
-          Cancel
-        </button>
+        </Button>
+        {onDone && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onDone}
+            className="!h-6 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </Button>
+        )}
       </div>
     </div>
   );

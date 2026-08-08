@@ -1,0 +1,611 @@
+<!doctype html>
+<!--
+  Atelier's landing page. Served by GitHub Pages from this folder
+  (Settings -> Pages -> Branch: main, Folder: /docs), so it is deliberately a
+  single self-contained file: no build step, no framework, no CDN. The only
+  assets it loads are the screenshots in ./assets, which are real captures of
+  the running app produced by `node scripts/capture-ui.mjs`.
+-->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atelier — your workshop for building software with agents</title>
+    <meta
+      name="description"
+      content="A local-first, agentic software-engineering IDE. Your code, your index, your terminal and your git history never leave the machine."
+    />
+    <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Atelier — build software with agents, locally" />
+    <meta
+      property="og:description"
+      content="Tree-sitter index, on-device embeddings, a ten-stage agent pipeline and guardrails that actually block. Open source, MIT."
+    />
+    <meta property="og:image" content="https://lamji.github.io/atelier/assets/console-dark.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <style>
+      /* Tokens lifted from the app's own dark theme (apps/web/src/index.css)
+         so the page and the product are recognisably the same object. */
+      :root {
+        --bg: #101718;
+        --bg-elevated: #152123;
+        --bg-card: #17282a;
+        --border: #2d4144;
+        --border-subtle: #233538;
+        --text: #e7eeee;
+        --text-secondary: #aebfc1;
+        --text-muted: #93a9ac;
+        --brand: #224248;
+        --accent: #68aeb8;
+        --accent-soft: rgba(104, 174, 184, 0.12);
+        --success: #4fa879;
+        --radius: 14px;
+        --max: 1120px;
+        --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo,
+          Consolas, monospace;
+      }
+
+      * { box-sizing: border-box; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* One soft teal wash behind the fold — the app's own orb, flattened. */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: -40vh 0 auto 0;
+        height: 90vh;
+        background: radial-gradient(
+          60% 55% at 50% 50%,
+          rgba(104, 174, 184, 0.13),
+          transparent 70%
+        );
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .wrap { position: relative; z-index: 1; max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      /* ---------------------------------------------------------- nav */
+      header.nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        backdrop-filter: blur(12px);
+        background: rgba(16, 23, 24, 0.82);
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .nav-inner {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        height: 58px;
+        max-width: var(--max);
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+      .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -0.01em; }
+      .brand img { width: 22px; height: 22px; }
+      .nav-links { margin-left: auto; display: flex; gap: 22px; font-size: 14px; }
+      .nav-links a { color: var(--text-secondary); }
+      .nav-links a:hover { color: var(--text); text-decoration: none; }
+      @media (max-width: 720px) { .nav-links a.opt { display: none; } }
+
+      /* --------------------------------------------------------- hero */
+      .hero { padding: 78px 0 44px; text-align: center; }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+      h1 {
+        margin: 14px 0 0;
+        font-size: clamp(34px, 6vw, 58px);
+        line-height: 1.05;
+        letter-spacing: -0.03em;
+        font-weight: 750;
+      }
+      h1 .accent {
+        background: linear-gradient(120deg, #68aeb8, #9ad2d8);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .lede {
+        margin: 20px auto 0;
+        max-width: 640px;
+        font-size: 17px;
+        color: var(--text-secondary);
+      }
+      .badges { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 24px; }
+      .badge {
+        font-family: var(--mono);
+        font-size: 11px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        background: var(--bg-elevated);
+      }
+      .badge.live { color: var(--accent); border-color: rgba(104, 174, 184, 0.35); background: var(--accent-soft); }
+
+      .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 30px; }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        height: 44px;
+        padding: 0 20px;
+        border-radius: 12px;
+        font-size: 14px;
+        font-weight: 600;
+        border: 1px solid transparent;
+        transition: opacity 0.15s ease, background 0.15s ease;
+      }
+      .btn:hover { text-decoration: none; }
+      .btn-primary { background: var(--accent); color: #0e1a1c; }
+      .btn-primary:hover { opacity: 0.9; }
+      .btn-ghost { border-color: var(--border); color: var(--text); background: var(--bg-elevated); }
+      .btn-ghost:hover { background: #1d2d30; }
+
+      /* ------------------------------------------------------ figures */
+      figure { margin: 0; }
+      .shot {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: var(--bg-elevated);
+      }
+      .hero-shot {
+        margin-top: 46px;
+        box-shadow: 0 30px 90px -30px rgba(0, 0, 0, 0.9);
+      }
+      figcaption { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+
+      /* -------------------------------------------------------- stats */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        margin: 64px 0 0;
+        background: var(--border-subtle);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .stat { background: var(--bg-elevated); padding: 20px 18px; text-align: center; }
+      .stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+      .stat span { font-size: 12px; color: var(--text-muted); }
+      .stats-note { margin: 12px 0 0; font-size: 13px; color: var(--text-muted); text-align: center; }
+      @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+
+      /* ------------------------------------------------------ sections */
+      section.band { padding: 74px 0 0; }
+      h2 {
+        margin: 0;
+        font-size: clamp(24px, 3.4vw, 32px);
+        letter-spacing: -0.02em;
+        font-weight: 700;
+      }
+      .sub { margin: 10px 0 0; max-width: 660px; color: var(--text-secondary); font-size: 15px; }
+
+      .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 30px; }
+      @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+      @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } }
+
+      .card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius);
+        padding: 20px;
+      }
+      .card h3 { margin: 0 0 8px; font-size: 15px; letter-spacing: -0.01em; }
+      .card p { margin: 0; font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+      .card code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
+
+      /* ----------------------------------------------------- pipeline */
+      .stages { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
+      .stage {
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 7px 13px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--bg-elevated);
+        color: var(--text-secondary);
+      }
+      .stage.on { color: var(--accent); border-color: rgba(104, 174, 184, 0.35); background: var(--accent-soft); }
+
+      /* ------------------------------------------------------ gallery */
+      .gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 26px; margin-top: 30px; }
+      @media (max-width: 780px) { .gallery { grid-template-columns: 1fr; } }
+
+      /* --------------------------------------------------------- code */
+      pre {
+        margin: 18px 0 0;
+        padding: 16px 18px;
+        background: #0c1314;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius);
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.7;
+        color: #cfe0e2;
+      }
+      pre .c { color: var(--text-muted); }
+      .steps { counter-reset: step; margin-top: 30px; display: grid; gap: 22px; }
+      .step { border-left: 2px solid var(--border); padding-left: 18px; }
+      .step h3 { margin: 0; font-size: 15px; }
+      .step h3::before {
+        counter-increment: step;
+        content: counter(step);
+        display: inline-grid;
+        place-items: center;
+        width: 20px;
+        height: 20px;
+        margin-right: 9px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 11px;
+        vertical-align: 1px;
+      }
+      .step p { margin: 8px 0 0; font-size: 14px; color: var(--text-secondary); }
+
+      .note {
+        margin-top: 26px;
+        padding: 16px 18px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: var(--bg-elevated);
+        font-size: 14px;
+        color: var(--text-secondary);
+      }
+      .note b { color: var(--text); }
+
+      /* ------------------------------------------------------- layout */
+      .rows { margin-top: 30px; border: 1px solid var(--border-subtle); border-radius: var(--radius); overflow: hidden; }
+      .row { display: grid; grid-template-columns: 200px 1fr; gap: 18px; padding: 16px 20px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-subtle); }
+      .row:last-child { border-bottom: 0; }
+      .row code { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+      .row p { margin: 0; font-size: 14px; color: var(--text-secondary); }
+      @media (max-width: 620px) { .row { grid-template-columns: 1fr; gap: 6px; } }
+
+      footer {
+        margin-top: 84px;
+        padding: 30px 0 46px;
+        border-top: 1px solid var(--border-subtle);
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+      .foot-inner { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+      .foot-inner .sp { margin-left: auto; }
+    </style>
+  </head>
+
+  <body>
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="brand" href="#top"><img src="assets/icon.svg" alt="" />Atelier</a>
+        <nav class="nav-links">
+          <a class="opt" href="#features">Features</a>
+          <a class="opt" href="#screens">Screens</a>
+          <a href="#quickstart">Run it</a>
+          <a href="https://github.com/lamji/atelier">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- ------------------------------------------------------- hero -->
+      <section class="wrap hero">
+        <p class="eyebrow">Local-first agentic IDE</p>
+        <h1>Your workshop for<br />building software <span class="accent">with agents</span>.</h1>
+        <p class="lede">
+          Atelier opens a folder, parses it with tree-sitter into a local SQLite
+          symbol graph and vector store, and runs agent sessions against that
+          index through a staged pipeline — with hooks that stop the destructive
+          things <em>before</em> they happen. Your code, your index, your
+          terminal and your git history never leave the machine.
+        </p>
+
+        <div class="badges">
+          <span class="badge">MIT licensed</span>
+          <span class="badge">Node 20 · Electron 34</span>
+          <span class="badge">Claude · Codex · Ollama</span>
+          <span class="badge live">Alpha</span>
+        </div>
+
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/lamji/atelier">View on GitHub</a>
+          <a class="btn btn-ghost" href="#quickstart">Run it locally</a>
+        </div>
+
+        <figure class="hero-shot">
+          <img
+            class="shot"
+            src="assets/console-dark.png"
+            width="3072"
+            height="1632"
+            alt="The Atelier console: agents rail, chat with a drafted prompt, editor tabs and the status bar."
+          />
+          <figcaption>
+            The console — one window for chat, editor, terminal, source control
+            and the knowledge graph. Every screenshot on this page is a real
+            capture of the app, not a mockup.
+          </figcaption>
+        </figure>
+
+        <!-- Numbers from the capture run: this repo, indexed on one laptop. -->
+        <div class="stats">
+          <div class="stat"><b>402</b><span>files indexed</span></div>
+          <div class="stat"><b>7,808</b><span>symbols</span></div>
+          <div class="stat"><b>39,903</b><span>call edges</span></div>
+          <div class="stat"><b>6,303</b><span>chunks embedded</span></div>
+        </div>
+        <p class="stats-note">
+          Atelier's own repository, indexed locally — tree-sitter for the graph,
+          on-device embeddings for search. No code, no embedding API call.
+        </p>
+      </section>
+
+      <!-- --------------------------------------------------- features -->
+      <section class="wrap band" id="features">
+        <h2>What is in the box</h2>
+        <p class="sub">
+          Everything below runs on your machine. The only thing that leaves it is
+          the request you send to the model provider you chose.
+        </p>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Many agents, many projects</h3>
+            <p>
+              Concurrent agent sessions per project and many projects open at
+              once — each project gets its own agent process, so one keeps
+              working while you look at another.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Bring your own model</h3>
+            <p>
+              <b>Claude</b> through the Agent SDK and your Claude Code sign-in,
+              <b>Codex CLI</b>, and <b>Ollama</b> (local daemon or Ollama Cloud).
+              Per-provider switches plus a model allowlist.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Knowledge engine, entirely local</h3>
+            <p>
+              tree-sitter into SQLite — files, symbols, imports, call edges,
+              features, chunks — with embeddings computed on-device
+              (<code>all-MiniLM-L6-v2</code>) into a <code>sqlite-vec</code> store.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Guardrails that actually block</h3>
+            <p>
+              Impact-radius check before a first edit, targeted edits over
+              whole-file rewrites, no self-service commits, and approval modals
+              for DB, dev-server and package commands.
+            </p>
+          </div>
+          <div class="card">
+            <h3>A real workbench</h3>
+            <p>
+              Monaco editor and diff viewer, ConPTY terminals shared with the
+              agent's own <code>run_terminal</code>, source control with a
+              commit → push → PR wizard, command palette, RAG inspector.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Context you can audit</h3>
+            <p>
+              Token ledger, per-request budgets, dedup and candidate ranking,
+              prompt caching, task summaries and a live usage monitor — the
+              context assembled for each request is accounted for and visible.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------- pipeline -->
+      <section class="wrap band" id="pipeline">
+        <h2>Ten observable stages</h2>
+        <p class="sub">
+          Every non-trivial turn runs the same pipeline, streamed to the process
+          rail as it happens. Trivial chat skips the whole thing instead of
+          paying for it.
+        </p>
+        <div class="stages">
+          <span class="stage on">understand</span>
+          <span class="stage on">retrieve</span>
+          <span class="stage on">impact</span>
+          <span class="stage on">plan</span>
+          <span class="stage on">hooks</span>
+          <span class="stage on">execute</span>
+          <span class="stage on">validate</span>
+          <span class="stage on">knowledge</span>
+          <span class="stage on">review</span>
+          <span class="stage on">summary</span>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------- gallery -->
+      <section class="wrap band" id="screens">
+        <h2>The console, screen by screen</h2>
+        <p class="sub">
+          Captured from a fresh clone opened on Atelier's own source tree.
+        </p>
+
+        <div class="gallery">
+          <figure>
+            <img class="shot" loading="lazy" src="assets/knowledge.png" width="3072" height="1632"
+              alt="Knowledge panel showing indexed files, symbols, call edges, chunks and detected features." />
+            <figcaption>Knowledge — the graph, the counts, and the features it inferred from your code.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/git-flow.png" width="3072" height="1632"
+              alt="Source control panel listing hundreds of changed files with stage and discard controls." />
+            <figcaption>Source control — stage, discard, and a commit → push → PR wizard the agent cannot skip.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/editor.png" width="3072" height="1632"
+              alt="File explorer beside the Monaco editor showing package.json." />
+            <figcaption>Explorer and Monaco — the same editor surface the agent's diffs render into.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/hooks.png" width="3072" height="1632"
+              alt="Hooks panel listing pre-tool guards for modularity, git flow, database and package commands." />
+            <figcaption>Hooks — the guards, what they match, and whether they block or ask.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/settings.png" width="3072" height="1632"
+              alt="Settings providers tab with Claude, Codex and Ollama sections." />
+            <figcaption>Providers — switch one on, allow the models you want; the composer's picker is exactly that union.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/terminal.png" width="3072" height="1632"
+              alt="The console with the bottom terminal dock expanded." />
+            <figcaption>Terminal — real ConPTY sessions in the bottom dock, shared with the agent.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/explorer.png" width="3072" height="1632"
+              alt="Explorer sidebar with the workspace file tree." />
+            <figcaption>Explorer — one folder per workspace, as many workspaces as you like.</figcaption>
+          </figure>
+          <figure>
+            <img class="shot" loading="lazy" src="assets/console-light.png" width="3072" height="1632"
+              alt="The same console rendered in the light theme." />
+            <figcaption>The same console in the light theme.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- -------------------------------------------------- quickstart -->
+      <section class="wrap band" id="quickstart">
+        <h2>Run it locally</h2>
+        <p class="sub">
+          There is no installer to download yet. Clone it, install, start the dev
+          stack — the whole thing boots from one command.
+        </p>
+
+        <div class="steps">
+          <div class="step">
+            <h3>Prerequisites</h3>
+            <p>
+              Node 20 LTS (21+ is rejected), pnpm 10 via <code>corepack enable</code>,
+              git, and at least one signed-in model provider — Claude Code, Codex
+              CLI, or a local Ollama daemon. The native modules ship prebuilt, so
+              no Visual Studio build tools are needed.
+            </p>
+          </div>
+          <div class="step">
+            <h3>Clone and install</h3>
+            <pre>git clone https://github.com/lamji/atelier.git
+cd atelier
+corepack enable
+pnpm install</pre>
+          </div>
+          <div class="step">
+            <h3>Start the dev stack</h3>
+            <pre><span class="c"># PowerShell — skip the Supabase sign-in gate while you work on the app</span>
+$env:ATELIER_DEV_SKIP_AUTH = "1"; pnpm dev
+
+<span class="c"># bash / zsh</span>
+ATELIER_DEV_SKIP_AUTH=1 pnpm dev</pre>
+          </div>
+          <div class="step">
+            <h3>First run</h3>
+            <p>
+              Pick a folder and let the first index finish — a large repo takes a
+              minute of CPU. Then open <b>Settings → Providers</b>, switch on a
+              provider and allow the models you want.
+            </p>
+          </div>
+        </div>
+
+        <p class="note">
+          <b>Alpha, and honest about it.</b> Windows is the platform Atelier is
+          developed and packaged on; the code is cross-platform but macOS and
+          Linux are unverified, and the installer script is NSIS-only. Real
+          sign-in needs your own Supabase project — or skip it in dev with
+          <code>ATELIER_DEV_SKIP_AUTH=1</code>. Full instructions live in the
+          <a href="https://github.com/lamji/atelier#run-it-locally">README</a>.
+        </p>
+      </section>
+
+      <!-- ------------------------------------------------ architecture -->
+      <section class="wrap band" id="architecture">
+        <h2>How it fits together</h2>
+        <p class="sub">
+          Four packages, one contract. The renderer never touches your disk; the
+          agent owns every privileged operation.
+        </p>
+
+        <div class="rows">
+          <div class="row">
+            <code>apps/desktop</code>
+            <p>
+              Electron shell. Owns Google sign-in (Supabase PKCE +
+              <code>atelier://</code> deep link), the project registry, and one
+              forked agent utilityProcess per open project.
+            </p>
+          </div>
+          <div class="row">
+            <code>apps/agent</code>
+            <p>
+              The Local Agent runtime: Agent SDK, filesystem, terminal, git,
+              tree-sitter knowledge engine, RAG, hooks, validation. Serves RPCs
+              over an Electron MessagePort — no sockets, no tokens.
+            </p>
+          </div>
+          <div class="row">
+            <code>apps/web</code>
+            <p>
+              The renderer (React + Vite), MVVM throughout: dumb views, hooks as
+              view-models, zustand stores. A pure presentation layer.
+            </p>
+          </div>
+          <div class="row">
+            <code>packages/protocol</code>
+            <p>
+              The zod-typed wire contract — RPC methods, event taxonomy, native
+              port frames — that every side compiles against.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="wrap">
+        <div class="foot-inner">
+          <span>MIT licensed · © jick</span>
+          <span class="sp"></span>
+          <a href="https://github.com/lamji/atelier">Repository</a>
+          <a href="https://github.com/lamji/atelier/issues">Issues</a>
+          <a href="https://github.com/lamji">@lamji</a>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>

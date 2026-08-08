@@ -1,18 +1,33 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
-import Editor, { DiffEditor, type Monaco } from "@monaco-editor/react";
+import {
+  lazy,
+  memo,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import Editor, { type Monaco } from "@monaco-editor/react";
+import { MonacoDiff } from "@/components/MonacoDiff";
 import { Activity, FileCode2, FileDiff, X } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import { TerminalPanel } from "@/views/terminal/TerminalPanel";
-import { TimelinePanel } from "@/views/timeline/TimelinePanel";
-import { GraphPane } from "@/views/knowledge/GraphPane";
+// three.js + the force-graph runtime live in their own chunk; nothing
+// loads until the Graph tab is first opened.
+const GraphPane = lazy(() =>
+  import("@/views/knowledge/GraphPane").then((m) => ({ default: m.GraphPane }))
+);
 import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
+import { TimelinePanel } from "@/views/timeline/TimelinePanel";
 import { languageForPath } from "@/lib/diff-view";
-import { registerMarkdownMentions } from "@/lib/monaco-mentions";
+import {
+  clearMentionCache,
+  registerMarkdownMentions,
+} from "@/lib/monaco-mentions";
 import { bridge } from "@/services/bridge-client";
-import type { TerminalSession } from "@atelier/protocol";
+import { useWorkspaceStore } from "@/state/workspace.store";
 import type { SlashCommand } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
@@ -35,20 +50,12 @@ export interface RightDockProps {
   // git file diff (takes over the editor pane while open)
   gitDiff: GitDiffView | null;
   onCloseGitDiff: () => void;
-  // terminal
-  terminalSessions: TerminalSession[];
-  activeTermId: string | null;
-  onSelectTerm: (termId: string) => void;
-  onCreateTerm: () => void;
-  onKillTerm: (termId: string) => void;
-  onMountTerm: (termId: string, container: HTMLElement) => void;
-  onRefitTerm: (termId: string) => void;
-  // activity
-  timelineEntries: TimelineEntryVm[];
   // knowledge
   knowledgeVm: ReturnType<typeof useKnowledgeViewModel>;
   ragVm: ReturnType<typeof useRagInspectorViewModel>;
   appTheme: "dark" | "light";
+  /** Execution timeline, shown as the Activity pane. */
+  timelineEntries: TimelineEntryVm[];
 }
 
 /**
@@ -100,13 +107,11 @@ const GIT_DIFF_EDITOR_OPTIONS = {
  * only while visible, so their lists cost nothing when they aren't on screen.
  */
 export function RightDock(props: RightDockProps) {
-  const { rightTab, activeTermId, onRefitTerm } = props;
-
-  useEffect(() => {
-    if (rightTab === "terminal" && activeTermId) {
-      requestAnimationFrame(() => onRefitTerm(activeTermId));
-    }
-  }, [rightTab, activeTermId, onRefitTerm]);
+  const { rightTab } = props;
+  // The graph chunk loads on first open, then the pane stays mounted so
+  // its WebGL scene survives tab switches (same rule as Monaco/xterm).
+  const graphOpened = useRef(false);
+  if (rightTab === "graph") graphOpened.current = true;
 
   return (
     <div className="flex h-full flex-col">
@@ -139,30 +144,25 @@ export function RightDock(props: RightDockProps) {
           )}
         </Pane>
 
-        <Pane active={rightTab === "terminal"}>
-          <TerminalPanel
-            sessions={props.terminalSessions}
-            activeTermId={props.activeTermId}
-            onSelect={props.onSelectTerm}
-            onCreate={props.onCreateTerm}
-            onKill={props.onKillTerm}
-            onMount={props.onMountTerm}
-            onRefit={props.onRefitTerm}
-          />
-        </Pane>
-
         <Pane active={rightTab === "graph"}>
-          <GraphPane
-            vm={props.knowledgeVm}
-            theme={props.appTheme}
-            active={rightTab === "graph"}
-          />
+          {graphOpened.current && (
+            <Suspense fallback={null}>
+              <GraphPane
+                vm={props.knowledgeVm}
+                theme={props.appTheme}
+                active={rightTab === "graph"}
+              />
+            </Suspense>
+          )}
         </Pane>
 
         <Pane active={rightTab === "rag"} mountWhenHidden={false}>
           <RagInspectorPane vm={props.ragVm} />
         </Pane>
 
+        {/* The execution timeline. It was a tab in the bottom dock; as a
+            full-height feed it belongs beside the editor, and moving it
+            freed the dock's bar to become the terminal tab strip. */}
         <Pane active={rightTab === "activity"} mountWhenHidden={false}>
           <TimelinePanel entries={props.timelineEntries} />
         </Pane>
@@ -258,6 +258,19 @@ const FilePane = memo(function FilePane(props: {
     return () => void flush();
   }, [props.selectedPath, flush]);
 
+  // Switching workspaces DROPS a queued edit instead of flushing it. The
+  // bridge is already re-pointed at the new project's agent, and the queued
+  // path is relative — retrying it there would write this project's content
+  // into the same relative path of another project.
+  const workspaceEpoch = useWorkspaceStore((s) => s.workspaceEpoch);
+  useEffect(() => {
+    window.clearTimeout(timerRef.current);
+    pendingRef.current = null;
+    setSaveState("clean");
+    // Cached "@" listings belong to the project we just left.
+    clearMentionCache();
+  }, [workspaceEpoch]);
+
   const onChange = (value: string | undefined) => {
     if (!editable || value === undefined || !props.selectedPath) return;
     pendingRef.current = { path: props.selectedPath, content: value };
@@ -343,7 +356,7 @@ const GitDiffPane = memo(function GitDiffPane(props: {
         </Tooltip>
       </div>
       <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 px-4 pb-4 pt-2">
-        <DiffEditor
+        <MonacoDiff
           original={gitDiff.before}
           modified={gitDiff.after}
           language={languageForPath(gitDiff.path)}

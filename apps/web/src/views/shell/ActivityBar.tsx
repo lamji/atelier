@@ -1,5 +1,5 @@
-import { motion } from "framer-motion";
 import {
+  Activity,
   BookOpen,
   Bot,
   Files,
@@ -9,7 +9,6 @@ import {
   Settings,
   Sun,
   Webhook,
-  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -25,69 +24,154 @@ export type ActivityView =
   | "monitor"
   | "settings";
 
-const ITEMS: Array<{ id: ActivityView; icon: typeof Files; label: string }> = [
+interface Item {
+  id: ActivityView;
+  icon: typeof Files;
+  label: string;
+}
+
+/**
+ * Workspace destinations, top group. Ordered by how often a session reaches
+ * for them, not alphabetically.
+ */
+const ITEMS: Item[] = [
   { id: "agents", icon: Bot, label: "Agents" },
   { id: "explorer", icon: Files, label: "Explorer" },
-  { id: "markdown", icon: BookOpen, label: "Markdown" },
-  { id: "git", icon: GitBranch, label: "Git" },
+  { id: "git", icon: GitBranch, label: "Source Control" },
   { id: "knowledge", icon: Network, label: "Knowledge" },
+  { id: "markdown", icon: BookOpen, label: "Notes" },
   { id: "hooks", icon: Webhook, label: "Hooks" },
   { id: "monitor", icon: Activity, label: "Monitor" },
-  { id: "settings", icon: Settings, label: "Settings" },
 ];
 
 export interface ActivityBarProps {
   active: ActivityView;
   theme: Theme;
+  /** Number of agents currently working, badged onto the Agents destination. */
+  workingCount: number;
+  /** Number of changed files, badged onto Source Control. */
+  changedCount: number;
   onSelect: (view: ActivityView) => void;
   onToggleTheme: () => void;
 }
 
-export function ActivityBar({
-  active,
-  theme,
-  onSelect,
-  onToggleTheme,
-}: ActivityBarProps) {
+/**
+ * The far-left destination rail. Settings and the theme toggle are pinned to
+ * the bottom — the VS Code convention that separates "where am I working" from
+ * "how is the app configured".
+ *
+ * The active destination is marked by a slim left rule plus a brighter icon,
+ * rather than a filled tile: at 44px wide a filled block is most of the rail,
+ * and it competes with the sidebar it opens.
+ */
+export function ActivityBar(props: ActivityBarProps) {
+  const badgeFor = (id: ActivityView): number | null => {
+    if (id === "agents" && props.workingCount > 0) return props.workingCount;
+    if (id === "git" && props.changedCount > 0) return props.changedCount;
+    return null;
+  };
+
   return (
-    <div className="flex h-full w-full flex-col items-center gap-1 py-2">
-      {ITEMS.map(({ id, icon: Icon, label }) => (
-        <Tooltip key={id} content={label} side="right">
+    <div
+      role="tablist"
+      aria-orientation="vertical"
+      aria-label="Workspace views"
+      className="flex h-full w-full flex-col items-center py-1"
+    >
+      {ITEMS.map((item) => (
+        <RailButton
+          key={item.id}
+          item={item}
+          active={props.active === item.id}
+          badge={badgeFor(item.id)}
+          onSelect={() => props.onSelect(item.id)}
+        />
+      ))}
+
+      <div className="mt-auto flex flex-col items-center pt-1">
+        <RailButton
+          item={{ id: "settings", icon: Settings, label: "Settings" }}
+          active={props.active === "settings"}
+          badge={null}
+          onSelect={() => props.onSelect("settings")}
+        />
+        <Tooltip
+          content={
+            props.theme === "dark"
+              ? "Switch to light theme"
+              : "Switch to dark theme"
+          }
+          side="right"
+        >
           <button
-            onClick={() => onSelect(id)}
+            type="button"
+            onClick={props.onToggleTheme}
+            aria-label={
+              props.theme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
             className={cn(
-              "relative flex h-10 w-10 items-center justify-center rounded-xl",
-              "text-muted-foreground transition-colors hover:text-foreground",
-              active === id && "text-primary"
+              "flex h-10 w-11 items-center justify-center text-muted-foreground",
+              "transition-colors hover:text-foreground"
             )}
           >
-            {active === id && (
-              <motion.span
-                layoutId="activity-active"
-                transition={{ type: "spring", stiffness: 400, damping: 32 }}
-                className="absolute inset-0 rounded-xl bg-primary/12"
-              />
+            {props.theme === "dark" ? (
+              <Sun className="h-[18px] w-[18px]" />
+            ) : (
+              <Moon className="h-[18px] w-[18px]" />
             )}
-            <Icon className="relative h-[18px] w-[18px]" />
           </button>
         </Tooltip>
-      ))}
-      <Tooltip
-        content={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-        side="right"
-      >
-        <motion.button
-          whileTap={{ scale: 0.85, rotate: 40 }}
-          onClick={onToggleTheme}
-          className="mt-auto flex h-10 w-10 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:text-foreground"
-        >
-          {theme === "dark" ? (
-            <Sun className="h-[18px] w-[18px]" />
-          ) : (
-            <Moon className="h-[18px] w-[18px]" />
-          )}
-        </motion.button>
-      </Tooltip>
+      </div>
     </div>
+  );
+}
+
+function RailButton(props: {
+  item: Item;
+  active: boolean;
+  badge: number | null;
+  onSelect: () => void;
+}) {
+  const { item, active } = props;
+  return (
+    <Tooltip content={item.label} side="right">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={active}
+        aria-label={item.label}
+        onClick={props.onSelect}
+        className={cn(
+          "relative flex h-11 w-11 items-center justify-center",
+          "transition-colors",
+          active
+            ? "text-foreground"
+            : "text-muted-foreground hover:text-foreground"
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "absolute inset-y-1.5 left-0 w-[2px] rounded-r bg-primary",
+            "transition-opacity",
+            active ? "opacity-100" : "opacity-0"
+          )}
+        />
+        <item.icon className="h-[18px] w-[18px]" />
+        {props.badge !== null && (
+          <span
+            className={cn(
+              "absolute bottom-1.5 right-1.5 min-w-[14px] rounded-full",
+              "bg-primary px-[3px] text-[9px] font-semibold leading-[14px]",
+              "tabular-nums text-primary-foreground"
+            )}
+          >
+            {props.badge > 99 ? "99+" : props.badge}
+          </span>
+        )}
+      </button>
+    </Tooltip>
   );
 }

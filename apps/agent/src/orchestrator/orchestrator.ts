@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 import type { Diff, ImageAttachment, ReasoningEffort } from "@atelier/protocol";
 import { conversationTitle, newId } from "@atelier/shared";
 import type { EventBus, PublishedEvent } from "../events/event-bus.js";
+import type { AttachmentStore } from "../context/attachments/attachment-store.js";
 import type { NoteJournal } from "../notes/note-journal.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
 import { isAuthError } from "./auth-status.js";
@@ -19,7 +20,31 @@ interface RunningTask {
   taskId: string;
   conversationId: string;
   abort: AbortController;
+  /** A cancel was sent; further cancels are no-ops. */
+  cancelling: boolean;
+  /** Backstop that closes the session if the run never unwinds. */
+  forceTimer?: NodeJS.Timeout;
 }
+
+/**
+ * A send that arrived while its conversation was busy. Persisted and shown
+ * in the transcript straight away; started when the conversation frees up.
+ */
+interface QueuedTask {
+  taskId: string;
+  conversationId: string;
+  prompt: string;
+  opts: TaskOptions;
+}
+
+/**
+ * How long a cancelled run gets to unwind on its own before the session is
+ * closed out from under it. A stage that is not abort-aware (an embedding
+ * pass, a shell command mid-flight) can outlive its signal, and a task left
+ * in `running` blocks every later send on that conversation — the stop
+ * button appearing to do nothing at all.
+ */
+const CANCEL_GRACE_MS = 4000;
 
 export interface TaskOptions {
   model?: string;
@@ -27,6 +52,11 @@ export interface TaskOptions {
   planMode?: boolean;
   /** Vibe coding: autonomous product-builder mode for this task. */
   vibe?: boolean;
+  /**
+   * Independent review after the changes land. Absent means ON: only an
+   * explicit `false` skips the review stage and its repair rounds.
+   */
+  autoReview?: boolean;
   /**
    * System knowledge — the full 10-stage pipeline (retrieval, impact,
    * plan, review, session memory). Absent means ON: only an explicit
@@ -60,11 +90,14 @@ export interface OrchestratorDeps extends PipelineDeps {
  */
 export class Orchestrator {
   private running = new Map<string, RunningTask>();
+  /** Follow-ups waiting on a busy conversation, oldest first. */
+  private queue: QueuedTask[] = [];
   private pipeline: PipelineExecutor;
   private bus: EventBus;
   private conversations: ConversationRepo;
   private planTracker: PlanTracker;
   private notes: NoteJournal;
+  private attachments: AttachmentStore;
   private log: Logger;
 
   constructor(deps: OrchestratorDeps) {
@@ -73,6 +106,7 @@ export class Orchestrator {
     this.conversations = deps.conversations;
     this.planTracker = deps.planTracker;
     this.notes = deps.notes;
+    this.attachments = deps.attachments;
     this.log = deps.log;
     // Pins diffs and knowledge/impact logs into chat history so they
     // survive a hydrate (session reload / reconnect), matching what the
@@ -122,23 +156,26 @@ export class Orchestrator {
     });
   }
 
+  /**
+   * Accepts a turn. If the conversation is already working, the turn is
+   * QUEUED rather than refused.
+   *
+   * This used to throw, which made the composer's only answer to "that's not
+   * what I meant" a cancel — losing the run in flight and everything it had
+   * already established. A follow-up is now persisted and shown immediately,
+   * and starts by itself the moment the conversation frees up, so a
+   * correction costs nothing but its turn in line.
+   */
   startTask(
     conversationId: string,
     prompt: string,
     opts: TaskOptions = {}
-  ): string {
+  ): { taskId: string; queued: boolean } {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) {
       throw new Error(`Unknown conversation: ${conversationId}`);
     }
-    for (const task of this.running.values()) {
-      if (task.conversationId === conversationId) {
-        throw new Error(
-          "This agent session is already running a task; wait or cancel it. " +
-            "Start another session to run tasks in parallel."
-        );
-      }
-    }
+    const busy = this.busyWith(conversationId);
     // A note-driven prompt IS the note's whole text, so naming the
     // conversation after it would drop the file's body into the history
     // list. trackNote names it after the note's heading instead.
@@ -146,14 +183,12 @@ export class Orchestrator {
       this.conversations.setTitle(conversationId, conversationTitle(prompt));
     }
     const taskId = newId("task");
-    const abort = new AbortController();
-    this.running.set(taskId, { taskId, conversationId, abort });
 
     this.conversations.createTask({
       id: taskId,
       conversationId,
       prompt,
-      status: "running",
+      status: busy ? "queued" : "running",
       startedAt: Date.now(),
       endedAt: null,
     });
@@ -165,19 +200,88 @@ export class Orchestrator {
       text: prompt,
       createdAt: Date.now(),
     });
-
     // Fire and forget: the note is a side record, and startTask must stay
     // synchronous so the caller gets its task id back immediately.
     if (opts.promptFile) {
       void this.trackNote(conversationId, opts.promptFile);
     }
 
+    if (busy) {
+      this.queue.push({ taskId, conversationId, prompt, opts });
+      this.bus.publish(
+        "task.queued",
+        {
+          conversationId,
+          prompt,
+          position: this.queue.filter(
+            (task) => task.conversationId === conversationId
+          ).length,
+        },
+        taskId
+      );
+      return { taskId, queued: true };
+    }
+
+    this.launch(taskId, conversationId, prompt, opts);
+    return { taskId, queued: false };
+  }
+
+  /** True while a task holds this conversation. */
+  private busyWith(conversationId: string): boolean {
+    for (const task of this.running.values()) {
+      if (task.conversationId === conversationId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Puts a task into flight. Split out of startTask so a queued turn takes
+   * exactly the same path when its turn comes, without re-running the
+   * persistence startTask already did.
+   */
+  private launch(
+    taskId: string,
+    conversationId: string,
+    prompt: string,
+    opts: TaskOptions
+  ): void {
+    const abort = new AbortController();
+    this.running.set(taskId, {
+      taskId,
+      conversationId,
+      abort,
+      cancelling: false,
+    });
     void this.runTask(taskId, conversationId, prompt, abort, opts).catch(
       (error) => {
         this.log.error({ err: error, taskId }, "task crashed");
       }
     );
-    return taskId;
+  }
+
+  /**
+   * Starts the next follow-up waiting on a conversation that just freed up.
+   *
+   * Runs after EVERY terminal outcome, cancel included: the queued text is
+   * something the user typed and still expects an answer to, and silently
+   * dropping it would lose work the composer has already cleared. A queued
+   * turn they no longer want can be cancelled on its own id.
+   *
+   * The row's start time is re-stamped here so the elapsed counter measures
+   * the run rather than the wait.
+   */
+  private startNextQueued(conversationId: string): void {
+    if (this.busyWith(conversationId)) return;
+    const index = this.queue.findIndex(
+      (task) => task.conversationId === conversationId
+    );
+    if (index === -1) return;
+    const [next] = this.queue.splice(index, 1);
+    if (!next) return;
+    // A conversation deleted while its follow-up waited has nothing to run.
+    if (!this.conversations.get(conversationId)) return;
+    this.conversations.startTask(next.taskId, Date.now());
+    this.launch(next.taskId, conversationId, next.prompt, next.opts);
   }
 
   /**
@@ -207,15 +311,108 @@ export class Orchestrator {
     await this.notes.markInProgress(notePath);
   }
 
+  /**
+   * Stores what this turn attached and returns the conversation's current
+   * image paths — this turn's own, or the last set it carried. A follow-up
+   * therefore always knows an address for the picture it is asked about,
+   * without the bytes being re-sent on every turn that never mentions it.
+   */
+  private attachmentPaths(
+    conversationId: string,
+    taskId: string,
+    images: ImageAttachment[] | undefined
+  ): string[] {
+    this.attachments.save(conversationId, taskId, images);
+    return this.attachments.recentPaths(conversationId);
+  }
+
   cancelTask(taskId: string): boolean {
+    // A queued turn has nothing to abort — dropping it from the line IS the
+    // cancel, and it must report as cancelled so the transcript does not
+    // keep showing a follow-up that will never run.
+    const queuedAt = this.queue.findIndex((entry) => entry.taskId === taskId);
+    if (queuedAt !== -1) {
+      const [dropped] = this.queue.splice(queuedAt, 1);
+      this.conversations.updateTaskStatus(taskId, "cancelled", Date.now());
+      if (dropped) {
+        this.bus.publish(
+          "task.cancelled",
+          { conversationId: dropped.conversationId },
+          taskId
+        );
+      }
+      return true;
+    }
     const task = this.running.get(taskId);
     if (!task) return false;
+    // Idempotent: a second click must not stack another backstop timer.
+    if (task.cancelling) return true;
+    task.cancelling = true;
     task.abort.abort();
+    task.forceTimer = setTimeout(() => this.forceCancel(taskId), CANCEL_GRACE_MS);
+    // The agent process must still be able to exit while one is pending.
+    task.forceTimer.unref?.();
     return true;
+  }
+
+  /**
+   * Closes a cancelled task that never unwound. The run itself may still be
+   * winding down in the background — it finds its entry gone and stops short
+   * of publishing a second lifecycle event — but the conversation is free
+   * again, which is the part the user is waiting on.
+   */
+  private forceCancel(taskId: string): void {
+    const task = this.running.get(taskId);
+    if (!task) return;
+    this.log.warn(
+      { taskId },
+      "cancelled task did not unwind in time; closing the session"
+    );
+    this.conversations.updateTaskStatus(taskId, "cancelled", Date.now());
+    this.release(taskId);
+    this.planTracker.clear(taskId);
+    this.bus.publish(
+      "task.cancelled",
+      { conversationId: task.conversationId },
+      taskId
+    );
+    this.startNextQueued(task.conversationId);
+    this.publishGlobalStatus();
+  }
+
+  /** Drops a task from the live set, cancelling its backstop with it. */
+  private release(taskId: string): void {
+    const task = this.running.get(taskId);
+    if (task?.forceTimer) clearTimeout(task.forceTimer);
+    this.running.delete(taskId);
   }
 
   listRunningTaskIds(): string[] {
     return [...this.running.keys()];
+  }
+
+  /** Follow-ups waiting on a busy conversation, oldest first. */
+  listQueuedTaskIds(): string[] {
+    return this.queue.map((task) => task.taskId);
+  }
+
+  /**
+   * Drops every follow-up waiting on a conversation, for a caller that is
+   * about to delete it. Without this a queued turn could still win the race
+   * against the running task's cancel and start against rows that are on
+   * their way out.
+   */
+  dropQueued(conversationId: string): void {
+    const dropped = this.queue.filter(
+      (task) => task.conversationId === conversationId
+    );
+    if (dropped.length === 0) return;
+    this.queue = this.queue.filter(
+      (task) => task.conversationId !== conversationId
+    );
+    for (const task of dropped) {
+      this.conversations.updateTaskStatus(task.taskId, "cancelled", Date.now());
+    }
   }
 
   private async runTask(
@@ -253,6 +450,12 @@ export class Orchestrator {
       prompt,
       priorTurns,
       messageId,
+      images: opts.images ?? [],
+      // chat_messages stores text, so an attachment left no trace there and
+      // the next turn could not see the picture it was asked about. The
+      // bytes go to disk and the path travels: into this turn's context,
+      // into session memory, and back through view_image on any later turn.
+      imagePaths: this.attachmentPaths(conversationId, taskId, opts.images),
       opts,
       abort,
       // Replaced by the real lock in the pipeline's first step; unlocked
@@ -282,11 +485,16 @@ export class Orchestrator {
     } catch (error) {
       if (abort.signal.aborted) {
         this.planTracker.cancelPending(taskId);
-        await this.rememberInterrupted(ctx, "cancelled");
+        // Step statuses are read off the tracker before finishTask clears it;
+        // the memory write itself happens after the task is reported over.
+        // It embeds, which costs seconds — and a user who pressed stop must
+        // not sit in "Stopping…" waiting on a record they never asked for.
+        this.pipeline.captureLivePlanSteps(ctx);
         this.finishTask(taskId, conversationId, messageId, ctx.collectedText, {
           status: "cancelled",
           startedAt,
         });
+        await this.rememberInterrupted(ctx, "cancelled");
         await this.writeNoteReport(ctx, {
           status: "cancelled",
           assistantText: ctx.collectedText,
@@ -294,7 +502,7 @@ export class Orchestrator {
         });
         return;
       }
-      await this.rememberInterrupted(ctx, "error");
+      this.pipeline.captureLivePlanSteps(ctx);
       if (isAuthError(error)) {
         this.bus.publish(
           "agent.status",
@@ -310,11 +518,18 @@ export class Orchestrator {
           ? `Blocked by hook: ${error.message}`
           : String(error);
       this.log.error({ err: error, taskId }, "task failed");
-      this.bus.publish("task.error", { conversationId, message }, taskId);
-      this.conversations.updateTaskStatus(taskId, "error", Date.now());
-      this.running.delete(taskId);
-      this.planTracker.clear(taskId);
-      this.publishGlobalStatus();
+      // Absent means the backstop already closed this task; the failure is
+      // still worth logging, a second lifecycle event is not.
+      if (this.running.has(taskId)) {
+        this.bus.publish("task.error", { conversationId, message }, taskId);
+        this.conversations.updateTaskStatus(taskId, "error", Date.now());
+        this.release(taskId);
+        this.planTracker.clear(taskId);
+        this.startNextQueued(conversationId);
+        this.publishGlobalStatus();
+      }
+      // Same ordering as the cancel path: report first, remember after.
+      await this.rememberInterrupted(ctx, "error");
       await this.writeNoteReport(ctx, {
         status: "error",
         assistantText: ctx.collectedText,
@@ -402,6 +617,11 @@ export class Orchestrator {
     assistantText: string,
     outcome: { status: "completed" | "cancelled"; startedAt: number }
   ): void {
+    // A run whose entry is gone was already closed by the cancel backstop.
+    // Whatever it managed to say is still worth keeping — the lifecycle
+    // event is not, and re-publishing it would restart the composer's
+    // "working" state on a session the user has moved on from.
+    const live = this.running.has(taskId);
     if (assistantText) {
       this.conversations.addMessage({
         id: messageId,
@@ -418,8 +638,9 @@ export class Orchestrator {
       );
     }
     this.conversations.touch(conversationId);
+    if (!live) return;
     this.conversations.updateTaskStatus(taskId, outcome.status, Date.now());
-    this.running.delete(taskId);
+    this.release(taskId);
     this.planTracker.clear(taskId);
     if (outcome.status === "completed") {
       this.bus.publish(
@@ -430,6 +651,7 @@ export class Orchestrator {
     } else {
       this.bus.publish("task.cancelled", { conversationId }, taskId);
     }
+    this.startNextQueued(conversationId);
     this.publishGlobalStatus();
   }
 

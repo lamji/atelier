@@ -35,6 +35,27 @@ function titleFromPath(mdPath: string): string {
     .join(" ");
 }
 
+/**
+ * Write a new catalog file and refresh the listing; returns its path, or
+ * null if the name was unusable or the write failed. Shared by the Markdown
+ * panel's create form and the composer's "Create prompt" button so both
+ * land in `.atelier/` with the same seeded heading.
+ */
+export async function createMarkdownFile(
+  rawName: string
+): Promise<string | null> {
+  const mdPath = toMarkdownPath(rawName);
+  if (!mdPath) return null;
+  try {
+    const content = `# ${titleFromPath(mdPath)}\n\n`;
+    await bridge.rpc("fs.writeFile", { path: mdPath, content });
+    await useMarkdownStore.getState().forceRefresh();
+    return mdPath;
+  } catch {
+    return null;
+  }
+}
+
 /** ViewModel for the Markdown panel: catalog listing + file creation. */
 export function useMarkdownViewModel() {
   const connected = useConnectionStore((s) => s.state === "connected");
@@ -67,22 +88,19 @@ export function useMarkdownViewModel() {
 
   /** Creates the drafted file; returns its path so the caller can open it. */
   const create = useCallback(async (): Promise<string | null> => {
-    const mdPath = toMarkdownPath(draftName);
-    if (!mdPath || saving) return null;
+    if (saving) return null;
     setSaving(true);
     try {
-      const content = `# ${titleFromPath(mdPath)}\n\n`;
-      await bridge.rpc("fs.writeFile", { path: mdPath, content });
-      setDraftName("");
-      setCreating(false);
-      await useMarkdownStore.getState().forceRefresh();
+      const mdPath = await createMarkdownFile(draftName);
+      if (mdPath) {
+        setDraftName("");
+        setCreating(false);
+      }
       return mdPath;
-    } catch {
-      return null;
     } finally {
       setSaving(false);
     }
-  }, [draftName, saving]);
+  }, [draftName, saving, setCreating]);
 
   return {
     connected,

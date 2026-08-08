@@ -107,6 +107,27 @@ export class GitService {
     return Promise.all(roots.map((root) => this.describeRepo(root)));
   }
 
+  /**
+   * Turn the workspace root into a git repository.
+   *
+   * Only ever creates one at the workspace root, and only when nothing is
+   * there yet: an existing checkout (or one nested inside) is a repo the
+   * user already has, and a second `git init` over it would shadow it.
+   * Binds the new repo as active so the panel fills in without a reopen.
+   */
+  async init(): Promise<{ root: string }> {
+    const existing = findRepoRoot(this.workspaceRoot, ".");
+    if (existing) {
+      await this.bindActive(existing);
+      return { root: repoLabel(this.workspaceRoot, existing) };
+    }
+    await this.clientFor(this.workspaceRoot).init();
+    await this.bindActive(this.workspaceRoot);
+    // The panel reads its state from the event, same as any other mutation.
+    await this.refresh();
+    return { root: repoLabel(this.workspaceRoot, this.workspaceRoot) };
+  }
+
   private async describeRepo(root: string): Promise<GitRepo> {
     const label = repoLabel(this.workspaceRoot, root);
     const base = {

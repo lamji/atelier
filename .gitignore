@@ -10,3 +10,8 @@ coverage/
 .atelier-data/
 apps/web/.vite/
 .loveai/
+apps/desktop/auth.local.json
+.atelier/
+
+# electron-builder output — installers and unpacked binaries, never commit
+apps/desktop/release/

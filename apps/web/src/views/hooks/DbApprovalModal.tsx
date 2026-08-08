@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CircleAlert, Database, Loader2, ShieldCheck, X } from "lucide-react";
+import {
+  CircleAlert,
+  Database,
+  Loader2,
+  Package,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { DbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
 
@@ -27,6 +34,8 @@ function useCountdown(expiresAt: number | undefined): number {
  */
 export function DbApprovalModal({ vm }: DbApprovalModalProps) {
   const request = vm.current;
+  const isPackage = request?.kind === "npm";
+  const Icon = isPackage ? Package : Database;
   const secondsLeft = useCountdown(request?.expiresAt);
   const minutes = Math.floor(secondsLeft / 60);
   const seconds = String(secondsLeft % 60).padStart(2, "0");
@@ -48,9 +57,9 @@ export function DbApprovalModal({ vm }: DbApprovalModalProps) {
             className="island flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden"
           >
             <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
-              <Database className="h-4 w-4 text-primary/80" />
+              <Icon className="h-4 w-4 text-primary/80" />
               <span className="text-sm font-medium">
-                Approve database operation
+                {isPackage ? "Run package command?" : "Approve database operation"}
               </span>
               <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">
                 auto-denies in {minutes}:{seconds}
@@ -68,7 +77,10 @@ export function DbApprovalModal({ vm }: DbApprovalModalProps) {
               <p className="text-xs text-muted-foreground">
                 The agent is waiting to run a{" "}
                 <span className="text-foreground">{request.operation}</span> —
-                it {request.detail}. Nothing has touched your database yet.
+                it {request.detail}.{" "}
+                {isPackage
+                  ? "Choose whether to run it or skip it."
+                  : "Nothing has touched your database yet."}
               </p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-black/40 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
                 $ {request.command}
@@ -80,13 +92,24 @@ export function DbApprovalModal({ vm }: DbApprovalModalProps) {
                 </p>
               )}
               <div className="flex items-center gap-2">
-                <Button size="sm" disabled={vm.busy} onClick={vm.approve}>
+                <Button
+                  size="sm"
+                  disabled={vm.busy}
+                  onClick={vm.approve}
+                  // The dialog interrupts whatever had focus — the composer,
+                  // the terminal, the editor — and those keep their own
+                  // capture-phase pointer handlers. Taking focus on open puts
+                  // the keyboard on the answer and stops the first click here
+                  // from being spent moving focus out of them.
+                  autoFocus
+                >
                   {vm.busy ? (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <ShieldCheck className="mr-1.5 h-3.5 w-3.5" />
                   )}
-                  Approve &amp; run
+                  {/* JSX text is not HTML: "&amp;" here renders literally. */}
+                  {isPackage ? "Run command" : "Approve & run"}
                 </Button>
                 <Button
                   size="sm"
@@ -94,7 +117,7 @@ export function DbApprovalModal({ vm }: DbApprovalModalProps) {
                   disabled={vm.busy}
                   onClick={vm.deny}
                 >
-                  Deny
+                  {isPackage ? "Skip" : "Deny"}
                 </Button>
                 {vm.queued > 0 && (
                   <span className="ml-auto text-[11px] text-muted-foreground">
@@ -105,7 +128,9 @@ export function DbApprovalModal({ vm }: DbApprovalModalProps) {
               <p className="text-[10px] text-muted-foreground/60">
                 Turn this gate off in the Hooks panel:{" "}
                 <span className="font-mono">
-                  Database: ask before running DB commands
+                  {isPackage
+                    ? "Package manager: ask before running npm commands"
+                    : "Database: ask before running DB commands"}
                 </span>
                 .
               </p>

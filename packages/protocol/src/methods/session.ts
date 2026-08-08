@@ -54,6 +54,15 @@ export const sessionMethods = {
     params: z.object({ title: z.string().optional() }),
     result: z.object({ conversation: Conversation }),
   },
+  "session.renameConversation": {
+    params: z.object({ conversationId: z.string(), title: z.string() }),
+    result: z.object({ conversation: Conversation }),
+  },
+  /** Drops the chat and its whole history. Any live task is cancelled first. */
+  "session.deleteConversation": {
+    params: z.object({ conversationId: z.string() }),
+    result: z.object({ deleted: z.boolean() }),
+  },
   "session.getMessages": {
     params: z.object({ conversationId: z.string() }),
     result: z.object({ messages: z.array(ChatMessage) }),

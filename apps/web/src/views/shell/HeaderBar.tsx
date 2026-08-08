@@ -1,106 +1,136 @@
-import { motion } from "framer-motion";
-import {
-  Activity,
-  FileCode2,
-  FolderGit2,
-  MessageSquare,
-  TerminalSquare,
-} from "lucide-react";
+import { Activity, Sidebar, TerminalSquare } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { BrandMark } from "@/components/BrandMark";
+import { Tooltip } from "@/components/ui/tooltip";
 import type { RightTab } from "@/state/workspace.store";
-import { useProjectsStore } from "@/state/projects.store";
+import { CommandCenter } from "./CommandCenter";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 export interface HeaderBarProps {
   workingCount: number;
   rightTab: RightTab;
   terminalCount: number;
+  workbenchVisible: boolean;
+  /** Whether the terminal dock is expanded. */
+  bottomOpen: boolean;
   onSelectTab: (tab: RightTab) => void;
-}
-
-interface TabDef {
-  id: RightTab;
-  label: string;
-  icon: typeof Activity;
-  badge?: number;
+  onToggleWorkbench: () => void;
+  /** Opens the command palette; the query seeds its mode. */
+  onOpenCommands: (initialQuery: string) => void;
 }
 
 /**
- * Top app header: brand on the left; the workbench tabs (Editor /
- * Terminal / Activity) on the right, controlling the right dock.
+ * Title-bar content: identity and workspace on the left, layout controls on
+ * the right.
+ *
+ * The pane tabs used to live here; they now sit in the editor region's own
+ * tab bar, which is the region they act on. What stays is genuinely global or
+ * layout-scoped: which workspace is open, the command center, and the two
+ * toggles. Both are aria-pressed toggles rather than tabs: Terminal shows or
+ * hides the bottom dock, Activity raises the execution timeline in the editor
+ * area.
  */
 export function HeaderBar(props: HeaderBarProps) {
-  const active = useProjectsStore((s) =>
-    s.projects.find((p) => p.id === s.activeId)
-  );
-  const tabs: TabDef[] = [
-    { id: "chat", label: "Chat", icon: MessageSquare },
-    { id: "editor", label: "Editor", icon: FileCode2 },
-    {
-      id: "terminal",
-      label: "Terminal",
-      icon: TerminalSquare,
-      badge: props.terminalCount,
-    },
-    { id: "activity", label: "Activity", icon: Activity },
-  ];
-
   return (
-    <div className="flex h-full items-center gap-3 px-3">
-      <div className="flex items-center gap-2.5">
-        <div className="orb flex h-8 w-8 items-center justify-center rounded-xl text-sm font-bold text-white">
-          A
-        </div>
-        <div className="leading-tight">
-          <p className="text-sm font-bold tracking-tight">Atelier</p>
-          <p className="text-[10px] text-muted-foreground">
-            agentic engineering
-          </p>
-        </div>
+    <div className="flex h-full items-center gap-2 pl-2.5 pr-1">
+      <div className="flex min-w-0 items-center gap-2">
+        <BrandMark className="h-[18px] w-[18px]" title="Atelier" />
+        <p className="shrink-0 text-xs font-semibold tracking-tight">Atelier</p>
         {props.workingCount > 0 && (
-          <span className="ml-1 flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-[11px] font-semibold text-primary">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-            {props.workingCount} working
-          </span>
+          <Tooltip
+            content={`${props.workingCount} agent${
+              props.workingCount > 1 ? "s" : ""
+            } working in this workspace`}
+          >
+            <span
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5",
+                "text-[10px] font-semibold tabular-nums text-primary"
+              )}
+              style={{ background: "var(--atelier-brand-soft)" }}
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+              {props.workingCount} working
+            </span>
+          </Tooltip>
         )}
       </div>
 
-      {active && (
-        <div className="ml-2 flex h-8 items-center gap-2 rounded-lg bg-accent/60 px-2.5 text-xs font-medium">
-          <FolderGit2 className="h-4 w-4 text-muted-foreground" />
-          <span className="max-w-[160px] truncate">{active.name}</span>
-        </div>
-      )}
+      <div className="app-no-drag ml-1 min-w-0">
+        <WorkspaceSwitcher />
+      </div>
 
-      <nav className="ml-auto flex items-center gap-1">
-        {tabs.map((tab) => (
+      {/*
+       * Centred command center. The wrapper is what centres it: `mx-auto` on a
+       * width-capped flex item keeps it near the middle of the bar without
+       * pinning it to an exact centre it would have to fight the two side
+       * groups for at narrow widths.
+       */}
+      <div className="mx-auto hidden min-w-0 max-w-[26rem] flex-1 px-2 md:block">
+        <CommandCenter onOpen={props.onOpenCommands} />
+      </div>
+
+      <div className="app-no-drag flex shrink-0 items-center gap-0.5">
+        <Tooltip
+          content={
+            props.workbenchVisible ? "Hide pane tabs" : "Show pane tabs"
+          }
+        >
           <button
-            key={tab.id}
-            onClick={() => props.onSelectTab(tab.id)}
+            type="button"
+            onClick={props.onToggleWorkbench}
+            aria-label={
+              props.workbenchVisible ? "Hide pane tabs" : "Show pane tabs"
+            }
+            aria-pressed={props.workbenchVisible}
             className={cn(
-              "relative flex h-8 items-center gap-1.5 rounded-lg px-3",
-              "text-xs font-medium transition-colors",
-              props.rightTab === tab.id
-                ? "text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+              "tool-btn",
+              props.workbenchVisible && "text-primary"
             )}
           >
-            {props.rightTab === tab.id && (
-              <motion.span
-                layoutId="header-dock-tab"
-                transition={{ type: "spring", stiffness: 420, damping: 34 }}
-                className="absolute inset-0 rounded-lg bg-accent"
-              />
+            <Sidebar className="h-4 w-4" />
+          </button>
+        </Tooltip>
+        <Tooltip content="Toggle terminal panel (Ctrl+`)">
+          <button
+            type="button"
+            onClick={() => props.onSelectTab("terminal")}
+            aria-label="Toggle terminal panel"
+            aria-pressed={props.bottomOpen}
+            className={cn(
+              "tool-btn relative",
+              props.bottomOpen && "text-primary"
             )}
-            <tab.icon className="relative h-4 w-4" />
-            <span className="relative">{tab.label}</span>
-            {tab.badge !== undefined && tab.badge > 0 && (
-              <span className="relative rounded-full bg-primary/15 px-1.5 text-[10px] font-semibold text-primary">
-                {tab.badge}
+          >
+            <TerminalSquare className="h-4 w-4" />
+            {props.terminalCount > 0 && (
+              <span
+                className={cn(
+                  "absolute -right-0.5 -top-0.5 min-w-[13px] rounded-full",
+                  "bg-primary px-[3px] text-[9px] font-semibold leading-[13px]",
+                  "tabular-nums text-primary-foreground"
+                )}
+              >
+                {props.terminalCount}
               </span>
             )}
           </button>
-        ))}
-      </nav>
+        </Tooltip>
+        <Tooltip content="Show the execution timeline">
+          <button
+            type="button"
+            onClick={() => props.onSelectTab("activity")}
+            aria-label="Show the execution timeline"
+            aria-pressed={props.rightTab === "activity"}
+            className={cn(
+              "tool-btn",
+              props.rightTab === "activity" && "text-primary"
+            )}
+          >
+            <Activity className="h-4 w-4" />
+          </button>
+        </Tooltip>
+      </div>
     </div>
   );
 }

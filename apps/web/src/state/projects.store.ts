@@ -1,56 +1,39 @@
 import { create } from "zustand";
-import type { ProjectInfo } from "@atelier/protocol";
-import type { ConnectionState } from "@/types";
 
+/**
+ * Project list mirrored from the desktop main process (the registry +
+ * per-agent run state). Fed by projects.onChanged pushes; there is no hub
+ * connection state anymore — main is always reachable over IPC.
+ */
 interface ProjectsStore {
-  projects: ProjectInfo[];
-  /** The project the bridge is currently pointed at. */
+  projects: AtelierProjectInfo[];
+  /** The project whose agent the bridge is currently attached to. */
   activeId: string | null;
-  /** True while a project switch is spawning/connecting. */
+  /** True while a project switch is starting/attaching. */
   switching: boolean;
-  /**
-   * True from the moment the hub connects until the initial project list is
-   * loaded and a project has been selected. Distinguishes "still booting"
-   * from "genuinely nothing open" for the connection gate.
-   */
-  bootstrapping: boolean;
-  /**
-   * Live link to the supervisor. Kept as the full state, not a boolean, so
-   * the connection gate can tell "still dialling" from "not running".
-   */
-  hubState: ConnectionState;
-  setProjects: (projects: ProjectInfo[]) => void;
-  /** Upsert one project (from a project.status event). */
-  upsert: (project: ProjectInfo) => void;
+  /** True once the first list has arrived — before that, "no projects" and
+   *  "not asked yet" are indistinguishable and would misroute the app. */
+  loaded: boolean;
+  /** Why the last open failed. Held in the store because the screen that
+   *  started the open is usually unmounted by the time it fails. */
+  openError: string | null;
+  setProjects: (projects: AtelierProjectInfo[]) => void;
   setActive: (activeId: string | null) => void;
   setSwitching: (switching: boolean) => void;
-  setBootstrapping: (bootstrapping: boolean) => void;
-  setHubState: (hubState: ConnectionState) => void;
-  active: () => ProjectInfo | undefined;
+  setOpenError: (openError: string | null) => void;
+  active: () => AtelierProjectInfo | undefined;
 }
 
 export const useProjectsStore = create<ProjectsStore>((set, get) => ({
   projects: [],
   activeId: null,
   switching: false,
-  bootstrapping: false,
-  // Optimistic: startHub() dials on mount, so treating the first paint as
-  // "connecting" keeps a normal boot from reading as a dead supervisor.
-  hubState: "connecting",
+  loaded: false,
+  openError: null,
 
-  setProjects: (projects) => set({ projects }),
-  upsert: (project) =>
-    set((s) => {
-      const exists = s.projects.some((p) => p.id === project.id);
-      return {
-        projects: exists
-          ? s.projects.map((p) => (p.id === project.id ? project : p))
-          : [...s.projects, project],
-      };
-    }),
+  setProjects: (projects) => set({ projects, loaded: true }),
   setActive: (activeId) => set({ activeId }),
   setSwitching: (switching) => set({ switching }),
-  setBootstrapping: (bootstrapping) => set({ bootstrapping }),
-  setHubState: (hubState) => set({ hubState }),
+  setOpenError: (openError) => set({ openError }),
   active: () => get().projects.find((p) => p.id === get().activeId),
 }));

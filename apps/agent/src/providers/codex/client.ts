@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -49,10 +50,6 @@ interface CodexJsonEvent {
 
 /** Runs Codex through the installed CLI and the user's signed-in Codex session. */
 export async function runCodexExec(opts: CodexExecOptions): Promise<string> {
-  const agentPackageRoot = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "../../.."
-  );
   const out = path.join(
     os.tmpdir(),
     `atelier-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`
@@ -78,26 +75,38 @@ export async function runCodexExec(opts: CodexExecOptions): Promise<string> {
   const imageFiles = await writeImageFiles(opts.images);
   for (const file of imageFiles) args.push("--image", file);
   if (opts.toolBridge) {
+    const mcpEntry = resolveMcpEntry();
     args.push(
       "-c",
       `mcp_servers.atelier.required=true`,
       "-c",
-      `mcp_servers.atelier.startup_timeout_sec=20`,
+      `mcp_servers.atelier.startup_timeout_sec=30`,
       "-c",
       `mcp_servers.atelier.tool_timeout_sec=120`,
       "-c",
       `mcp_servers.atelier.default_tools_approval_mode="approve"`,
+      // Spawn the bundle with the runtime we are already running under.
+      // pnpm/tsx are absent in the packaged app, and pnpm's own output on
+      // stdout broke the MCP initialize handshake even where it existed.
       "-c",
-      `mcp_servers.atelier.command="pnpm"`,
+      `mcp_servers.atelier.command="${escapeToml(process.execPath)}"`,
       "-c",
-      `mcp_servers.atelier.args=["--filter","@atelier/agent","exec","tsx","scripts/codex-atelier-mcp.ts"]`,
+      `mcp_servers.atelier.args=["${escapeToml(mcpEntry)}"]`,
       "-c",
-      `mcp_servers.atelier.cwd="${escapeToml(agentPackageRoot)}"`,
+      `mcp_servers.atelier.cwd="${escapeToml(path.dirname(mcpEntry))}"`,
+      // process.execPath is electron.exe in the desktop app; without this
+      // it would boot a browser process instead of Node.
+      "-c",
+      `mcp_servers.atelier.env.ELECTRON_RUN_AS_NODE="1"`,
       "-c",
       `mcp_servers.atelier.env.ATELIER_CODEX_TOOL_URL="${escapeToml(opts.toolBridge.url)}"`,
       "-c",
       `mcp_servers.atelier.env.ATELIER_CODEX_TOOL_TOKEN="${escapeToml(opts.toolBridge.token)}"`
     );
+    // Source-run fallback: plain Node cannot load the .ts entry on its own.
+    if (mcpEntry.endsWith(".ts")) {
+      args.push("-c", `mcp_servers.atelier.env.NODE_OPTIONS="--import tsx"`);
+    }
     // The proxy registers only these when set — an absent tool is the one
     // way to make "no retrieval" true for a model we do not otherwise gate.
     if (opts.toolNames) {
@@ -120,6 +129,9 @@ export async function runCodexExec(opts: CodexExecOptions): Promise<string> {
     const child = execa("codex", args, {
       cwd: opts.cwd,
       input: opts.prompt,
+      // `codex` is a .cmd on Windows, so it launches through cmd.exe —
+      // without this a console window appears on screen for every call.
+      windowsHide: true,
       stdout: "pipe",
       stderr: "pipe",
       all: true,
@@ -142,8 +154,22 @@ export async function runCodexExec(opts: CodexExecOptions): Promise<string> {
     if (opts.signal.aborted) killTree();
     else opts.signal.addEventListener("abort", killTree, { once: true });
     child.stdout?.on("data", (chunk: Buffer) => parser.push(chunk.toString("utf8")));
+
+    // Stop must be immediate. Killing the tree is best-effort — `codex`
+    // spawns its own MCP server and a shim on Windows — and waiting for
+    // that teardown left the UI sitting on "stopping" long after the user
+    // asked. The kill still runs; this just stops the task waiting on it.
+    const cancelled = new Promise<never>((_, reject) => {
+      const fail = () => reject(new Error("Codex run cancelled"));
+      if (opts.signal.aborted) fail();
+      else opts.signal.addEventListener("abort", fail, { once: true });
+    });
+    // The child is raced, so nothing else awaits it — without this an
+    // abort-time rejection would surface as an unhandled rejection.
+    void child.catch(() => undefined);
+
     try {
-      const result = await child;
+      const result = await Promise.race([child, cancelled]);
       parser.flush();
       const finalText = await fs.readFile(out, "utf8").catch(() => "");
       const outputText = finalText.trim() || text.trim() || (result.all ?? "").trim();
@@ -167,6 +193,25 @@ export async function runCodexExec(opts: CodexExecOptions): Promise<string> {
       imageFiles.map((file) => fs.unlink(file).catch(() => undefined))
     );
   }
+}
+
+/**
+ * Locates the bundled stdio MCP server. Every build emits codex-mcp.mjs
+ * beside the agent entry — dist-electron/ in dev, resources/agent/ when
+ * packaged — so this is one lookup in both. Running the agent straight
+ * from source under tsx has no bundle, so it falls back to the .ts entry
+ * spawned through the tsx loader already in this process.
+ */
+function resolveMcpEntry(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const bundled = path.join(here, "codex-mcp.mjs");
+  if (existsSync(bundled)) return bundled;
+  const source = path.join(here, "mcp-main.ts");
+  if (existsSync(source)) return source;
+  throw new Error(
+    `Atelier MCP server for Codex not found (looked in ${here}). ` +
+      "Rebuild the agent bundle: pnpm --filter @atelier/agent build:electron"
+  );
 }
 
 const IMAGE_EXTENSIONS: Record<string, string> = {

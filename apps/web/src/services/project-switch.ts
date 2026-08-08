@@ -1,152 +1,151 @@
-import type { EventFrame, ProjectInfo } from "@atelier/protocol";
 import { bridge } from "./bridge-client.js";
-import { hub } from "./hub-client.js";
+import { attachProject } from "./desktop-port.js";
 import { terminalRegistry } from "./terminal-registry.js";
+import { setRosterScope } from "./terminal-roster.js";
 import { useProjectsStore } from "@/state/projects.store";
+import { usePreferencesStore } from "@/state/preferences.store";
+import { useConnectionStore } from "@/state/connection.store";
 import { resetWorkspaceStores } from "@/state/reset";
 
-let hubStarted = false;
+let started = false;
 
 /**
- * Connect to the supervisor, load the project list, and select a project.
- * The hub stays connected for the whole session; the bridge re-points per
- * selected project via switchProject().
+ * Mirror the desktop's project list into the store. Called once at app
+ * boot; the list itself and every agent status change arrive as pushes.
  */
-export function startHub(): void {
-  if (hubStarted) return;
-  hubStarted = true;
-
-  hub.onStatus(async (state) => {
-    const store = useProjectsStore.getState();
-    store.setHubState(state);
-    if (state !== "connected") return;
-    try {
-      await loadAndAutoSelect();
-    } catch {
-      // A failed bootstrap leaves no active project; the connection gate
-      // tells the user to run `atelier run` and offers a retry.
-    }
+export function startProjectSync(): void {
+  if (started || !window.atelierDesktop) return;
+  started = true;
+  const desktop = window.atelierDesktop;
+  desktop.projects.onChanged((projects) => {
+    useProjectsStore.getState().setProjects(projects);
   });
-
-  hub.subscribe("project.status", (frame: EventFrame) => {
-    const project = (frame.payload as { project: ProjectInfo }).project;
-    useProjectsStore.getState().upsert(project);
-  });
-
-  hub.connect();
-}
-
-async function loadAndAutoSelect(): Promise<void> {
-  const store = useProjectsStore.getState();
-  // Held until a project is selected so the gate shows "connecting", not
-  // "no project open", during the list → start → handshake round trip.
-  store.setBootstrapping(true);
-  try {
-    const { projects, initialId } = await hub.rpc("projects.list", {});
-    store.setProjects(projects);
-    if (store.activeId) return; // already on a project (reconnect)
-
-    // `atelier run` opens the UI with ?open=<abs path> for the launching dir.
-    const openPath = new URLSearchParams(window.location.search).get("open");
-    if (openPath) {
-      try {
-        const project = await addProject(openPath);
-        await switchProject(project.id);
-        return;
-      } catch {
-        // fall through to the normal auto-select below
-      }
-    }
-
-    const target = pickInitial(projects, initialId);
-    if (target) await switchProject(target.id);
-  } finally {
-    useProjectsStore.getState().setBootstrapping(false);
-  }
+  void desktop.projects
+    .list()
+    .then((projects) => {
+      useProjectsStore.getState().setProjects(projects);
+    })
+    .catch((error) => {
+      // An empty welcome screen and a broken registry read look identical
+      // on screen, so make the difference visible somewhere.
+      console.error("failed to load the project list", error);
+      // Mark it loaded anyway: the app must route somewhere, and the
+      // welcome screen is the recoverable option.
+      useProjectsStore.getState().setProjects([]);
+    });
 }
 
 /**
- * The project this supervisor was launched for (`atelier debug` / `run` in
- * that folder), else most-recently opened, else the first running, else the
- * first known. Launch intent has to win: the initial project's agent is
- * still starting at this point, so its lastOpenedAt is not stamped yet and
- * a purely recency-based pick would open — and start — last session's
- * project instead.
+ * Open a workspace: start its agent (idempotent), attach a fresh RPC port,
+ * and reset all workspace-scoped state so nothing from the previous project
+ * leaks in. On a cold open the workspace screen is raised straight away and
+ * fills in when the port lands; see attach() for why.
  */
-function pickInitial(
-  projects: ProjectInfo[],
-  initialId?: string
-): ProjectInfo | undefined {
-  const launched = projects.find((p) => p.id === initialId);
-  if (launched) return launched;
-
-  const byRecent = [...projects].sort(
-    (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0)
-  );
-  return (
-    byRecent.find((p) => (p.lastOpenedAt ?? 0) > 0) ??
-    projects.find((p) => p.status === "running") ??
-    projects[0]
-  );
+export async function openWorkspace(id: string): Promise<void> {
+  // Adding a project pushes the new list before add() even returns, so the
+  // welcome screen's open and the app's "resume most recent" effect can both
+  // fire for the same id. Share the one attempt instead of failing one of
+  // them — a rejected duplicate used to leave the app on an empty screen.
+  const inFlight = pending.get(id);
+  if (inFlight) return inFlight;
+  const store = useProjectsStore.getState();
+  if (store.switching) throw new Error("a workspace switch is in progress");
+  const attempt = attach(id).finally(() => pending.delete(id));
+  pending.set(id, attempt);
+  return attempt;
 }
 
-/**
- * Point the bridge at a project's agent, resetting all workspace-scoped
- * state so nothing from the previous project leaks in. Starts the agent
- * first (idempotent) to obtain its port + token.
- */
-export async function switchProject(id: string): Promise<void> {
+const pending = new Map<string, Promise<void>>();
+
+async function attach(id: string): Promise<void> {
   const store = useProjectsStore.getState();
-  if (store.switching) return;
+  /*
+   * Cold open — nothing is on screen yet, so there is no working workspace to
+   * protect and the shell can be raised BEFORE the agent is up. That is the
+   * whole point: forking the agent takes seconds (native module load, schema,
+   * SDK boot), and gating the window on it meant the app opened onto a bare
+   * "Starting the agent…" spinner every single launch. The shell now mounts
+   * immediately and fills in as the port arrives; bridge.rpc queues until then
+   * and the status bar already reports "connecting".
+   *
+   * A switch between live workspaces keeps the old order: there the current
+   * workspace is on screen and working, and tearing it down before the new
+   * agent answers would trade a spinner for a broken window.
+   */
+  const coldOpen = store.activeId === null;
   store.setSwitching(true);
+  store.setOpenError(null);
+  if (coldOpen) {
+    // Say "connecting", not "disconnected", for the seconds the fork takes.
+    bridge.expectPort();
+    applyWorkspace(id);
+  }
   try {
-    const { endpoint } = await hub.rpc("projects.start", { id });
-    bridge.disconnect();
-    resetWorkspaceStores();
-    terminalRegistry.disposeAll();
-    bridge.setEndpoint({ port: endpoint.port, token: endpoint.token });
+    const port = await attachProject(id);
+    if (!coldOpen) {
+      bridge.disconnect();
+      applyWorkspace(id);
+    }
+    bridge.setPort(port);
     store.setActive(id);
-    bridge.connect();
+  } catch (error) {
+    // The shell was already raised on an agent that never answered; fall back
+    // to the picker rather than leaving a dead workspace on screen.
+    if (coldOpen) {
+      bridge.dropQueued();
+      useProjectsStore.getState().setActive(null);
+    }
+    // The caller is often gone by now (the welcome screen unmounts the
+    // moment the project list grows), so the reason has to outlive it.
+    const message =
+      error instanceof Error ? error.message : "could not open that workspace";
+    console.error("failed to open workspace", id, error);
+    useProjectsStore.getState().setOpenError(message);
+    throw error;
   } finally {
     useProjectsStore.getState().setSwitching(false);
   }
 }
 
 /**
- * Re-establish whichever link is missing, outermost first: the supervisor,
- * then the project list, then the active project's agent. Drives the
- * connection gate's Retry button, so it never throws.
+ * Point every workspace-scoped surface at `id`: drop the previous project's
+ * state, scope preferences, and publish the root the status bar reads. On a
+ * cold open this runs before the port exists — which is safe, because all of
+ * it is renderer-side and none of it talks to the agent.
  */
-export async function retryConnection(): Promise<void> {
-  const store = useProjectsStore.getState();
-  if (store.hubState !== "connected") {
-    hub.disconnect();
-    hub.connect();
-    return;
-  }
-  try {
-    // projects.start is idempotent: it revives a stopped agent and returns
-    // the live endpoint for one that is already running.
-    if (store.activeId) await switchProject(store.activeId);
-    else await loadAndAutoSelect();
-  } catch {
-    // The gate keeps showing the failure; the user can retry again.
-  }
+function applyWorkspace(id: string): void {
+  resetWorkspaceStores();
+  terminalRegistry.disposeAll();
+  // Each workspace keeps its own composer picks (model, effort, knowledge,
+  // vibe); load this project's before anything can read them.
+  usePreferencesStore.getState().setProjectScope(id);
+  // Terminals belong to the workspace they were opened in, so their saved
+  // roster is scoped the same way the composer picks are.
+  setRosterScope(id);
+  const project = useProjectsStore.getState().projects.find((p) => p.id === id);
+  useConnectionStore.getState().setWorkspaceRoot(project?.path ?? null);
+  useProjectsStore.getState().setActive(id);
 }
 
-export async function addProject(path: string): Promise<ProjectInfo> {
-  const { project } = await hub.rpc("projects.add", { path });
-  useProjectsStore.getState().upsert(project);
-  return project;
+/** Leave the workspace (back to the picker); the agent stays warm. */
+export function closeWorkspace(): void {
+  bridge.disconnect();
+  // Nothing is going to answer these now.
+  bridge.dropQueued();
+  useProjectsStore.getState().setActive(null);
+  useProjectsStore.getState().setOpenError(null);
+}
+
+export async function addProject(path: string): Promise<AtelierProjectInfo> {
+  const desktop = window.atelierDesktop;
+  if (!desktop) throw new Error("not running in the desktop app");
+  return desktop.projects.add(path);
 }
 
 export async function stopProject(id: string): Promise<void> {
-  await hub.rpc("projects.stop", { id });
+  await window.atelierDesktop?.projects.stop(id);
 }
 
 export async function removeProject(id: string): Promise<void> {
-  await hub.rpc("projects.remove", { id });
-  useProjectsStore.setState((s) => ({
-    projects: s.projects.filter((p) => p.id !== id),
-  }));
+  await window.atelierDesktop?.projects.remove(id);
 }

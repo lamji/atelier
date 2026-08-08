@@ -36,6 +36,15 @@ export interface WriteOptions {
   taskId?: string;
 }
 
+/** The shape of a `file.changed` event's `type` field. */
+type FileChangeType = "add" | "change" | "unlink" | "addDir" | "unlinkDir";
+
+/** A markdown note in the app's own cache — outside the watcher's tree. */
+function isNotePath(relPath: string): boolean {
+  const posix = relPath.replace(/\\/g, "/");
+  return posix.startsWith(".atelier/") && /\.md$/i.test(posix);
+}
+
 /**
  * A directory listing that survives a wrong path: when the requested
  * directory does not exist, the nearest existing ancestor is listed
@@ -197,7 +206,7 @@ export class FileService {
    */
   async markdownFile(relPath: string): Promise<MarkdownFile | null> {
     try {
-      const abs = this.guard.toAbsolute(relPath);
+      const abs = this.guard.toAbsolute(relPath, "read");
       const rel = this.guard.toRelative(abs);
       const stat = await fs.stat(abs);
       const head = await readHead(abs, MD_HEAD_BYTES);
@@ -231,7 +240,7 @@ export class FileService {
   }
 
   async list(relPath: string): Promise<FileEntry[]> {
-    const absDir = this.guard.toAbsolute(relPath || ".");
+    const absDir = this.guard.toAbsolute(relPath || ".", "read");
     let entries;
     try {
       entries = await fs.readdir(absDir, { withFileTypes: true });
@@ -262,7 +271,7 @@ export class FileService {
    * The path guard still applies — escapes throw as before.
    */
   async listForModel(relPath: string): Promise<ModelListing> {
-    const abs = this.guard.toAbsolute(relPath || ".");
+    const abs = this.guard.toAbsolute(relPath || ".", "read");
     const requested = this.guard.toRelative(abs);
     try {
       return { path: requested, entries: await this.list(requested) };
@@ -413,7 +422,7 @@ export class FileService {
   }
 
   async stat(relPath: string): Promise<FileEntry> {
-    const abs = this.guard.toAbsolute(relPath);
+    const abs = this.guard.toAbsolute(relPath, "read");
     const stat = await statOrThrow(abs, relPath, "path");
     return {
       path: this.guard.toRelative(abs),
@@ -428,7 +437,7 @@ export class FileService {
     relPath: string,
     opts: { offset?: number; limit?: number } = {}
   ): Promise<{ content: string; mtime: number; totalLines?: number }> {
-    const abs = this.guard.toAbsolute(relPath);
+    const abs = this.guard.toAbsolute(relPath, "read");
     const stat = await statOrThrow(abs, relPath, "file");
     if (stat.size > MAX_READ_BYTES) {
       throw new Error(`File too large (${stat.size} bytes): ${relPath}`);
@@ -539,7 +548,112 @@ export class FileService {
       { path: wirePath, diffId: diff.id },
       opts.taskId
     );
+    // The watcher never sees `.atelier/` (it is ignored so the cache stays
+    // out of the tree/search/index), so a note write — the status flip to
+    // in-progress, the report and the flip to review — produced no
+    // `file.changed` and the Markdown panel's badge stayed stale until
+    // something else moved the tree. Announce it here instead.
+    if (isNotePath(wirePath)) this.publishChange(wirePath, "change");
     return diff;
+  }
+
+  /**
+   * Creates an empty file for the explorer's "New File". Missing parent
+   * folders are created, mirroring VS Code's `a/b/c.ts` input. An existing
+   * path is refused rather than truncated — a create must never destroy.
+   */
+  async createFile(relPath: string): Promise<string> {
+    const abs = this.guard.toAbsolute(relPath);
+    const wirePath = this.guard.toRelative(abs);
+    await this.refuseExisting(abs, wirePath);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    // wx = create-or-fail, so a race loses instead of overwriting.
+    const handle = await fs.open(abs, "wx");
+    await handle.close();
+    this.publishChange(wirePath, "add");
+    return wirePath;
+  }
+
+  async createDir(relPath: string): Promise<string> {
+    const abs = this.guard.toAbsolute(relPath);
+    const wirePath = this.guard.toRelative(abs);
+    await this.refuseExisting(abs, wirePath);
+    await fs.mkdir(abs, { recursive: true });
+    this.publishChange(wirePath, "addDir");
+    return wirePath;
+  }
+
+  /** Rename in place or move to another folder; never overwrites. */
+  async rename(fromRel: string, toRel: string): Promise<string> {
+    const fromAbs = this.guard.toAbsolute(fromRel);
+    const toAbs = this.guard.toAbsolute(toRel);
+    const fromWire = this.guard.toRelative(fromAbs);
+    const toWire = this.guard.toRelative(toAbs);
+    const stat = await statForExplorer(fromAbs, fromWire);
+    // A case-only rename on Windows/macOS hits the same inode, so the
+    // "already exists" check would reject a legitimate rename.
+    if (fromAbs.toLowerCase() !== toAbs.toLowerCase()) {
+      await this.refuseExisting(toAbs, toWire);
+    }
+    this.refuseIntoSelf(fromAbs, toAbs, stat.isDirectory());
+    await fs.mkdir(path.dirname(toAbs), { recursive: true });
+    await fs.rename(fromAbs, toAbs);
+    const kind = stat.isDirectory() ? "Dir" : "";
+    this.publishChange(fromWire, `unlink${kind}` as FileChangeType);
+    this.publishChange(toWire, `add${kind}` as FileChangeType);
+    return toWire;
+  }
+
+  /** Copy a file, or a directory tree, to a path that must not exist. */
+  async copy(fromRel: string, toRel: string): Promise<string> {
+    const fromAbs = this.guard.toAbsolute(fromRel);
+    const toAbs = this.guard.toAbsolute(toRel);
+    const fromWire = this.guard.toRelative(fromAbs);
+    const toWire = this.guard.toRelative(toAbs);
+    const stat = await statForExplorer(fromAbs, fromWire);
+    await this.refuseExisting(toAbs, toWire);
+    this.refuseIntoSelf(fromAbs, toAbs, stat.isDirectory());
+    await fs.mkdir(path.dirname(toAbs), { recursive: true });
+    await fs.cp(fromAbs, toAbs, { recursive: stat.isDirectory() });
+    this.publishChange(toWire, stat.isDirectory() ? "addDir" : "add");
+    return toWire;
+  }
+
+  /** Deletes a file, or a directory and everything under it. */
+  async remove(relPath: string): Promise<string> {
+    const abs = this.guard.toAbsolute(relPath);
+    const wirePath = this.guard.toRelative(abs);
+    if (!wirePath) throw new Error("Refusing to delete the workspace root");
+    const stat = await statForExplorer(abs, wirePath);
+    const isDir = stat.isDirectory();
+    await fs.rm(abs, { recursive: isDir, force: false });
+    this.publishChange(wirePath, isDir ? "unlinkDir" : "unlink");
+    return wirePath;
+  }
+
+  private async refuseExisting(abs: string, wirePath: string): Promise<void> {
+    const exists = await fs
+      .stat(abs)
+      .then(() => true)
+      .catch(() => false);
+    if (exists) throw new Error(`Already exists: ${wirePath}`);
+  }
+
+  /** Moving or copying a folder inside itself would recurse forever. */
+  private refuseIntoSelf(fromAbs: string, toAbs: string, isDir: boolean): void {
+    if (!isDir) return;
+    const inside = toAbs.toLowerCase().startsWith(fromAbs.toLowerCase() + path.sep);
+    if (inside) throw new Error("Cannot move a folder into itself");
+  }
+
+  /**
+   * Announces an explorer mutation on the same event the watcher uses, so
+   * every client refreshes its tree the way it already does for edits.
+   * Directory events are the reason this exists: chokidar's file-only
+   * listeners never report an empty folder appearing or vanishing.
+   */
+  private publishChange(relPath: string, type: FileChangeType): void {
+    this.bus.publish("file.changed", { path: relPath, type, source: "user" });
   }
 
   async search(
@@ -614,6 +728,19 @@ export class FileService {
 function isMissing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * stat for the explorer's mutations. The model-facing variant appends
+ * advice about list_dir and search_workspace, which reads as noise in a
+ * "couldn't rename that" banner — a person can see the tree already.
+ */
+async function statForExplorer(abs: string, wirePath: string) {
+  try {
+    return await fs.stat(abs);
+  } catch {
+    throw new Error(`No such file or folder: ${wirePath}`);
+  }
 }
 
 async function statOrThrow(

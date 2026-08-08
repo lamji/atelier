@@ -3,21 +3,251 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🛠️</text></svg>"
-    />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>Atelier</title>
     <script>
       const theme = localStorage.getItem("atelier.theme");
       const dark =
         theme === "dark" ||
         (!theme && matchMedia("(prefers-color-scheme: dark)").matches);
+      // Both signals, pre-paint, so the first frame is already on the right
+      // palette — index.css selects on `data-theme`, Tailwind on `.dark`.
       if (dark) document.documentElement.classList.add("dark");
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
     </script>
+    <!--
+      Boot splash. The bundle defers mount() until the session resolves (up to
+      AUTH_BOOT_TIMEOUT_MS in main.tsx), and in dev Vite adds its own transform
+      time on top — without this the window is plain black for a second or two.
+      Styles are inline because index.css only arrives with the module graph.
+      React clears #root's children when it mounts, so nothing has to remove it.
+    -->
+    <style>
+      /*
+       * Splash tokens mirror the index.css palette closely enough for the
+       * hand-off to be seamless, but must be literal — the real tokens are
+       * not parsed yet at this point in the boot.
+       */
+      #boot {
+        --s-bg: #eef3f2;
+        --s-ink: #152527;
+        --s-muted: #5f7477;
+        --s-line: #c7d4d1;
+        --s-surface: #ffffff;
+        --s-shade: #dce7e4;
+        --s-brand: #224248;
+        --s-brand-lift: #35666e;
+        --s-accent: #68aeb8;
+
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 34px;
+        background: var(--s-bg);
+        color: var(--s-ink);
+        font-family:
+          ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      :root.dark #boot {
+        --s-bg: #0d1314;
+        --s-ink: #e8f1f0;
+        --s-muted: #8aa3a5;
+        --s-line: #24373a;
+        --s-surface: #16211f;
+        --s-shade: #1d2c2e;
+        --s-brand: #35666e;
+        --s-brand-lift: #68aeb8;
+        --s-accent: #9ad2d8;
+      }
+
+      /* Flat illustration: the atelier desk, drawn from the token set above. */
+      #boot .art {
+        width: min(340px, 56vw);
+        height: auto;
+      }
+
+      #boot .mark {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      #boot .mark svg {
+        width: 34px;
+        height: 34px;
+      }
+      #boot .name {
+        font-size: 25px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      #boot .tag {
+        margin-top: -22px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        color: var(--s-muted);
+      }
+
+      /* Indeterminate bar — honest about progress we cannot measure. */
+      #boot .bar {
+        width: 168px;
+        height: 3px;
+        border-radius: 999px;
+        background: var(--s-shade);
+        overflow: hidden;
+      }
+      #boot .bar i {
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(
+          90deg,
+          var(--s-brand),
+          var(--s-brand-lift),
+          var(--s-accent)
+        );
+        animation: boot-slide 1.25s ease-in-out infinite;
+      }
+      @keyframes boot-slide {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(310%);
+        }
+      }
+
+      /* Fade the whole thing in so a fast boot does not flash the art. */
+      #boot > * {
+        animation: boot-in 0.45s ease-out both;
+      }
+      #boot .mark {
+        animation-delay: 0.06s;
+      }
+      #boot .tag {
+        animation-delay: 0.1s;
+      }
+      @keyframes boot-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot > *,
+        #boot .bar i {
+          animation: none;
+        }
+        #boot .bar i {
+          width: 100%;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot" role="status" aria-label="Loading Atelier">
+        <!--
+          The workshop, flat: desk, screen mid-edit, lamp, plant, and the app's
+          own orb floating over it. Inline so it paints with the document — a
+          linked image would race the very gap this splash exists to cover.
+        -->
+        <svg class="art" viewBox="0 0 320 200" fill="none" aria-hidden="true">
+          <circle cx="160" cy="94" r="78" fill="var(--s-shade)" />
+
+          <!-- Desk -->
+          <rect x="26" y="158" width="268" height="7" rx="3.5"
+                fill="var(--s-line)" />
+          <rect x="52" y="165" width="6" height="26" rx="3"
+                fill="var(--s-line)" />
+          <rect x="262" y="165" width="6" height="26" rx="3"
+                fill="var(--s-line)" />
+
+          <!-- Monitor -->
+          <rect x="150" y="140" width="20" height="14" fill="var(--s-line)" />
+          <rect x="134" y="152" width="52" height="6" rx="3"
+                fill="var(--s-line)" />
+          <rect x="96" y="60" width="128" height="84" rx="9"
+                fill="var(--s-surface)" stroke="var(--s-line)"
+                stroke-width="2" />
+          <circle cx="110" cy="70" r="2.5" fill="var(--s-line)" />
+          <circle cx="119" cy="70" r="2.5" fill="var(--s-line)" />
+          <circle cx="128" cy="70" r="2.5" fill="var(--s-line)" />
+          <rect x="106" y="80" width="108" height="54" rx="5"
+                fill="var(--s-bg)" />
+          <rect x="115" y="89" width="46" height="4" rx="2"
+                fill="var(--s-brand)" />
+          <rect x="115" y="99" width="72" height="4" rx="2"
+                fill="var(--s-line)" />
+          <rect x="123" y="109" width="34" height="4" rx="2"
+                fill="var(--s-accent)" />
+          <rect x="115" y="119" width="58" height="4" rx="2"
+                fill="var(--s-line)" />
+
+          <!-- Lamp -->
+          <rect x="44" y="150" width="30" height="6" rx="3"
+                fill="var(--s-brand)" />
+          <path d="M59 150 V108 L84 96" stroke="var(--s-brand)"
+                stroke-width="4" stroke-linecap="round"
+                stroke-linejoin="round" />
+          <path d="M78 88 L96 100 L86 108 Z" fill="var(--s-brand-lift)" />
+
+          <!-- Plant -->
+          <path d="M238 134 H266 L262 160 H242 Z" fill="var(--s-brand)" />
+          <path d="M252 134 V108" stroke="var(--s-brand-lift)"
+                stroke-width="3" stroke-linecap="round" />
+          <ellipse cx="241" cy="112" rx="11" ry="7"
+                   transform="rotate(-28 241 112)"
+                   fill="var(--s-brand-lift)" />
+          <ellipse cx="263" cy="106" rx="11" ry="7"
+                   transform="rotate(24 263 106)" fill="var(--s-accent)" />
+          <ellipse cx="252" cy="94" rx="9" ry="6"
+                   fill="var(--s-brand-lift)" />
+
+          <!-- Papers -->
+          <rect x="90" y="150" width="34" height="8" rx="2"
+                fill="var(--s-surface)" stroke="var(--s-line)"
+                stroke-width="2" />
+
+          <!-- The orb, same open ring and bead as the app icon. -->
+          <path d="M74 42 A 18 18 0 1 1 60 25" stroke="var(--s-accent)"
+                stroke-width="6" stroke-linecap="round" />
+          <circle cx="69" cy="28" r="4" fill="var(--s-accent)" />
+        </svg>
+
+        <div class="mark">
+          <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="boot-sweep" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#224248" />
+                <stop offset="38%" stop-color="#35666e" />
+                <stop offset="70%" stop-color="#68aeb8" />
+                <stop offset="100%" stop-color="#9ad2d8" />
+              </linearGradient>
+            </defs>
+            <path d="M47.4 26.7 A 16.3 16.3 0 1 1 37.3 16.6"
+                  stroke="url(#boot-sweep)" stroke-width="6.5"
+                  stroke-linecap="round" />
+            <circle cx="43.5" cy="20.5" r="3.4" fill="url(#boot-sweep)" />
+          </svg>
+          <div class="name">Atelier</div>
+        </div>
+        <div class="tag">Opening your workshop</div>
+
+        <div class="bar"><i></i></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

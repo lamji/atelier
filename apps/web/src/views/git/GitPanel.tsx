@@ -54,12 +54,58 @@ export function GitPanel({ vm }: GitPanelProps) {
   );
 }
 
-function EmptyState({ text }: { text: string }) {
+function EmptyState({
+  text,
+  action,
+}: {
+  text: string;
+  action?: React.ReactNode;
+}) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 p-4">
       <GitBranch className="h-6 w-6 text-muted-foreground/50" />
       <p className="text-center text-xs text-muted-foreground">{text}</p>
+      {action}
     </div>
+  );
+}
+
+/**
+ * The empty state for a workspace with no repository anywhere: the panel
+ * offers to create one instead of only reporting its absence. Not shown for
+ * the multi-checkout case — there a repo already exists and the answer is to
+ * pick one, not to init a second at the root.
+ */
+function NoRepoState({ text, vm }: { text: string; vm: GitViewModel }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const init = () => {
+    setBusy(true);
+    setError(null);
+    void vm
+      .initRepo()
+      .catch((err: unknown) => setError(shortError(errorText(err))))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <EmptyState
+      text={text}
+      action={
+        <div className="flex flex-col items-center gap-1.5">
+          <Button size="sm" variant="outline" onClick={init} disabled={busy}>
+            {busy ? (
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <GitBranch className="mr-1.5 h-3.5 w-3.5" />
+            )}
+            Initialize repository
+          </Button>
+          {error && <p className="text-center text-[11px] text-destructive">{error}</p>}
+        </div>
+      }
+    />
   );
 }
 
@@ -77,7 +123,15 @@ function GitRepoView({ vm }: GitPanelProps) {
   // only starts the flow; the host renders it.
   const flowVm = useGitFlowViewModel();
 
-  if (vm.error) return <EmptyState text={shortError(vm.error)} />;
+  if (vm.error) {
+    // No checkouts found anywhere is the one failure the user can fix from
+    // here; every other git error is reported as-is.
+    return vm.repos.length === 0 ? (
+      <NoRepoState text={shortError(vm.error)} vm={vm} />
+    ) : (
+      <EmptyState text={shortError(vm.error)} />
+    );
+  }
   if (!vm.status) {
     return (
       <p className="pt-8 text-center text-xs text-muted-foreground">
@@ -157,8 +211,9 @@ function GitRepoView({ vm }: GitPanelProps) {
           <Textarea
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            placeholder="Commit message"
+            placeholder={generating ? "Drafting a message…" : "Commit message"}
             rows={2}
+            disabled={generating}
             className="max-h-60 min-h-14 resize-y pr-8 text-xs"
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) doCommit();
@@ -191,6 +246,7 @@ function GitRepoView({ vm }: GitPanelProps) {
             className="w-full"
             disabled={
               busy ||
+              generating ||
               message.trim() === "" ||
               (staged.length === 0 && unstaged.length === 0)
             }
@@ -544,10 +600,10 @@ function statusChar(f: GitFileStatus): string {
 
 function statusColor(f: GitFileStatus): string {
   const c = statusChar(f);
-  if (c === "A" || c === "?") return "text-emerald-500";
+  if (c === "A" || c === "?") return "text-success";
   if (c === "D") return "text-destructive";
-  if (c === "R") return "text-sky-500";
-  return "text-amber-500";
+  if (c === "R") return "text-cyan";
+  return "text-warning";
 }
 
 function formatDate(iso: string): string {

@@ -10,7 +10,6 @@ import {
   GitPullRequest,
   Loader2,
   ShieldAlert,
-  Sparkles,
   Square,
   Wand2,
   X,
@@ -215,16 +214,17 @@ function CompareFallback({ url }: { url: string }) {
     <div className="rounded-lg bg-secondary/40 px-2.5 py-2">
       <p className="text-[11px] text-muted-foreground">
         The branch is pushed — if this is a `gh` sign-in or permission
-        problem, open the pull request on github.com instead:
+        problem, open the pull request on github.com instead. The title and
+        description you drafted are carried over.
       </p>
       <a
         href={url}
         target="_blank"
         rel="noreferrer"
-        className="mt-1 flex items-center gap-1.5 break-all text-[11px] text-primary hover:underline"
+        className="mt-1.5 inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90"
       >
         <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-        {url}
+        Open PR on github.com
       </a>
     </div>
   );
@@ -376,22 +376,26 @@ function PrDescribeStage({ vm }: { vm: GitFlowViewModel }) {
     <div className="space-y-3">
       {flow.prDrafting && (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Sparkles className="h-3.5 w-3.5 animate-pulse" />
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
           Drafting description from your commits…
         </p>
       )}
       <Input
         value={flow.prTitle}
         onChange={(e) => vm.setPrTitle(e.target.value)}
-        placeholder="PR title"
+        placeholder={flow.prDrafting ? "Drafting title…" : "PR title"}
         className="h-8 text-xs"
+        disabled={flow.prDrafting}
       />
       <Textarea
         value={flow.prBody}
         onChange={(e) => vm.setPrBody(e.target.value)}
-        placeholder="PR description (markdown)"
+        placeholder={
+          flow.prDrafting ? "Drafting description…" : "PR description (markdown)"
+        }
         rows={8}
         className="resize-none text-xs"
+        disabled={flow.prDrafting}
       />
       <div className="flex items-center gap-2 text-xs">
         <span className="text-muted-foreground">
@@ -401,6 +405,7 @@ function PrDescribeStage({ vm }: { vm: GitFlowViewModel }) {
           value={flow.prBase}
           onChange={vm.setPrBase}
           className="h-7 font-mono"
+          disabled={flow.prDrafting}
           options={flow.remoteBranches
             .filter((b) => b !== flow.info?.branch)
             .map((b) => ({ value: b, label: b }))}
@@ -464,7 +469,7 @@ function DoneStage({ vm }: { vm: GitFlowViewModel }) {
       {flow.error ? (
         <CircleAlert className="h-8 w-8 text-destructive/70" />
       ) : (
-        <Check className="h-8 w-8 text-emerald-500" />
+        <Check className="h-8 w-8 text-success" />
       )}
       <p className="text-sm">
         {flow.error
@@ -527,7 +532,7 @@ function FixProgress({ session }: { session: SessionVm }) {
               {action.status === "running" ? (
                 <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-primary/70" />
               ) : action.status === "done" ? (
-                <Check className="h-2.5 w-2.5 shrink-0 text-emerald-500" />
+                <Check className="h-2.5 w-2.5 shrink-0 text-success" />
               ) : (
                 <CircleAlert className="h-2.5 w-2.5 shrink-0 text-destructive" />
               )}

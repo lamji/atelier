@@ -1,5 +1,5 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { ReasoningEffort } from "@atelier/protocol";
+import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { ImageAttachment, ReasoningEffort } from "@atelier/protocol";
 import { ollamaChat } from "./ollama/client.js";
 import {
   codexModelName,
@@ -44,6 +44,13 @@ export interface OneShotOptions {
   effort?: ReasoningEffort;
   /** Caller wants strict JSON — Ollama can enforce it at the daemon. */
   json?: boolean;
+  /**
+   * Images the call should reason over. A screenshot is frequently where the
+   * whole request lives ("not live, fix it" + a picture of the broken panel),
+   * so the classifier stages need to see it too — not just the final turn.
+   * Ignored by the Codex path, which has no image channel on `exec`.
+   */
+  images?: ImageAttachment[];
 }
 
 export async function runOneShot(opts: OneShotOptions): Promise<string> {
@@ -56,6 +63,7 @@ export async function runOneShot(opts: OneShotOptions): Promise<string> {
       prompt: opts.prompt,
       signal: opts.signal,
       json: opts.json,
+      images: opts.images?.map((img) => img.data),
     });
   }
   if (isCodexModel(opts.model)) {
@@ -72,8 +80,11 @@ export async function runOneShot(opts: OneShotOptions): Promise<string> {
 }
 
 async function runClaudeOneShot(opts: OneShotOptions): Promise<string> {
+  const images = opts.images ?? [];
   const stream = query({
-    prompt: opts.prompt,
+    // With images the turn has to be a structured multimodal user message;
+    // a plain string has nowhere to put them.
+    prompt: images.length > 0 ? imagePrompt(opts.prompt, images) : opts.prompt,
     options: {
       systemPrompt: opts.system,
       model: opts.claudeFallback,
@@ -90,6 +101,33 @@ async function runClaudeOneShot(opts: OneShotOptions): Promise<string> {
     if (m.type === "result" && typeof m.result === "string") text = m.result;
   }
   return text;
+}
+
+/**
+ * One streaming-input turn carrying text plus each image as a base64 content
+ * block. The generator yields a single message and returns, so the SDK still
+ * runs exactly one turn.
+ */
+async function* imagePrompt(
+  text: string,
+  images: ImageAttachment[]
+): AsyncGenerator<SDKUserMessage> {
+  const content = [
+    { type: "text" as const, text },
+    ...images.map((img) => ({
+      type: "image" as const,
+      source: {
+        type: "base64" as const,
+        media_type: img.mediaType,
+        data: img.data,
+      },
+    })),
+  ];
+  yield {
+    type: "user",
+    parent_tool_use_id: null,
+    message: { role: "user", content },
+  } as unknown as SDKUserMessage;
 }
 
 /**

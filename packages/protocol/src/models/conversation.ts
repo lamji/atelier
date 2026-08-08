@@ -10,6 +10,8 @@ export const Conversation = z.object({
 export type Conversation = z.infer<typeof Conversation>;
 
 export const TaskStatus = z.enum([
+  /** Typed while another task held the conversation; runs when that one ends. */
+  "queued",
   "running",
   "completed",
   "cancelled",

@@ -23,6 +23,14 @@ export const terminalMethods = {
     params: z.object({ termId: z.string() }),
     result: z.object({}),
   },
+  /**
+   * Force-stops whatever the shell is running without closing the shell —
+   * the second Ctrl+C. `killed` is how many processes actually went down.
+   */
+  "terminal.interrupt": {
+    params: z.object({ termId: z.string() }),
+    result: z.object({ killed: z.number() }),
+  },
   "terminal.list": {
     params: z.object({}).optional(),
     result: z.object({ sessions: z.array(TerminalSession) }),

@@ -9,7 +9,12 @@ function initialTheme(): Theme {
 }
 
 function applyTheme(theme: Theme): void {
+  // Two signals for one theme: the `dark` class is what Tailwind's `dark:`
+  // variant and every existing `.dark ...` rule key off, and `data-theme` is
+  // what the token blocks in index.css select on. Both are set together so
+  // they can never disagree.
   document.documentElement.classList.toggle("dark", theme === "dark");
+  document.documentElement.dataset.theme = theme;
   localStorage.setItem("atelier.theme", theme);
 }
 

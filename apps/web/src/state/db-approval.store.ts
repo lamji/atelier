@@ -1,14 +1,14 @@
 import { create } from "zustand";
-import type { DbApprovalRequest } from "@atelier/protocol";
+import type { ApprovalRequest } from "@atelier/protocol";
 
 /**
- * Database operations the agent has parked, waiting for an answer. A
- * queue, not a single slot: parallel agents can each be holding one.
+ * Database and package commands the agent has parked, waiting for an answer.
+ * A queue, not a single slot: parallel agents can each be holding one.
  * The head of the queue is what the modal shows.
  */
 export interface DbApprovalStore {
-  requests: DbApprovalRequest[];
-  add: (request: DbApprovalRequest) => void;
+  requests: ApprovalRequest[];
+  add: (request: ApprovalRequest) => void;
   remove: (id: string) => void;
 }
 

@@ -1,0 +1,63 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 512 512"
+  width="512"
+  height="512"
+  role="img"
+  aria-label="Atelier"
+>
+  <title>Atelier</title>
+  <!--
+    The mark is the app's own orb: the conic mineral-teal sweep from .orb in
+    index.css, opened into a ring with the bead still travelling it. The ramp
+    runs the brand range, #224248 up through the lighter teals.
+    SVG has no conic gradient, but across a 308-degree arc a diagonal linear
+    ramp through the same three hues is indistinguishable at icon sizes and
+    renders in every rasteriser.
+  -->
+  <defs>
+    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#224248" />
+      <stop offset="38%" stop-color="#35666e" />
+      <stop offset="70%" stop-color="#68aeb8" />
+      <stop offset="100%" stop-color="#9ad2d8" />
+    </linearGradient>
+
+    <!-- Lifts the ring off the tile so it does not read as a flat decal. -->
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#68aeb8" stop-opacity="0.22" />
+      <stop offset="70%" stop-color="#68aeb8" stop-opacity="0.06" />
+      <stop offset="100%" stop-color="#68aeb8" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Tile: the dark theme background token, so the icon matches the app. -->
+  <rect width="512" height="512" rx="112" ry="112" fill="#101718" />
+  <!-- Hairline bevel keeps the tile from disappearing on a black desktop. -->
+  <rect
+    x="1"
+    y="1"
+    width="510"
+    height="510"
+    rx="111"
+    ry="111"
+    fill="none"
+    stroke="#ffffff"
+    stroke-opacity="0.07"
+    stroke-width="2"
+  />
+
+  <circle cx="256" cy="256" r="190" fill="url(#glow)" />
+
+  <!-- Open ring: gap centred on the top-right diagonal. -->
+  <path
+    d="M 378.9 213.7 A 130 130 0 1 1 298.3 133.1"
+    fill="none"
+    stroke="url(#sweep)"
+    stroke-width="52"
+    stroke-linecap="round"
+  />
+
+  <!-- The bead in the gap: what makes it a workshop in motion, not a target. -->
+  <circle cx="347.9" cy="164.1" r="27" fill="url(#sweep)" />
+</svg>

@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import * as pty from "@lydell/node-pty";
 import type { IPty } from "@lydell/node-pty";
 import type { TerminalSession } from "@atelier/protocol";
@@ -133,7 +135,27 @@ export class TerminalManager {
   }
 
   kill(termId: string): void {
-    this.get(termId).pty.kill();
+    killTree(this.get(termId).pty);
+  }
+
+  /**
+   * The second Ctrl+C: stop the running job, keep the prompt.
+   *
+   * A plain ^C is not enough on Windows. `npm run dev` becomes
+   * npm.cmd -> concurrently -> tsx/vite, npm.cmd answers ^C with its own
+   * "Terminate batch job (Y/N)?" prompt, and the grandchildren belong to no
+   * job object — so the shell returns to a prompt while vite still holds
+   * port 5173. Killing every descendant of the shell (but not the shell)
+   * is what actually frees the port and leaves the terminal usable.
+   */
+  async interrupt(termId: string): Promise<number> {
+    const managed = this.get(termId);
+    const descendants = await descendantPids(managed.pty.pid);
+    let killed = 0;
+    for (const pid of descendants) {
+      if (killPid(pid)) killed += 1;
+    }
+    return killed;
   }
 
   list(): TerminalSession[] {
@@ -182,11 +204,109 @@ export class TerminalManager {
     if (this.saveTimer) clearInterval(this.saveTimer);
     for (const managed of this.terminals.values()) {
       try {
-        managed.pty.kill();
+        killTree(managed.pty);
       } catch {
         // already dead
       }
     }
     this.terminals.clear();
   }
+}
+
+/**
+ * End the shell AND everything it started.
+ *
+ * `pty.kill()` alone terminates the shell it spawned and nothing below it.
+ * On Windows that is not a detail: a `npm run dev` expands into npm ->
+ * concurrently -> tsx/vite, and those grandchildren are in no job object, so
+ * killing the shell orphans them still holding their ports — which is what
+ * turns the next run into "port 5173 is already in use". taskkill /T walks
+ * the child tree the way the OS records it.
+ *
+ * POSIX gets the same guarantee for free: node-pty signals the pty's process
+ * group, which is the whole foreground job.
+ */
+const execFileAsync = promisify(execFile);
+
+/** Every live process as `pid ppid`, which is all a tree walk needs. */
+async function processTable(): Promise<Map<number, number[]>> {
+  const command =
+    process.platform === "win32"
+      ? execFileAsync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | " +
+              'ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+          ],
+          { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+        )
+      : execFileAsync("ps", ["-A", "-o", "pid=,ppid="], {
+          maxBuffer: 8 * 1024 * 1024,
+        });
+
+  const children = new Map<number, number[]>();
+  const { stdout } = await command;
+  for (const line of stdout.split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 2) continue;
+    const pid = Number(fields[0]);
+    const ppid = Number(fields[1]);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+  }
+  return children;
+}
+
+/**
+ * Descendants of `root`, deepest first and excluding `root` itself. Killing
+ * in that order stops a supervisor (npm, concurrently) from noticing a dead
+ * child and reacting before it is taken down too.
+ */
+async function descendantPids(root: number): Promise<number[]> {
+  const children = await processTable();
+  const ordered: number[] = [];
+  const walk = (pid: number, depth: number): void => {
+    // A malformed table could in principle cycle; depth caps the recursion.
+    if (depth > 32) return;
+    for (const child of children.get(pid) ?? []) {
+      walk(child, depth + 1);
+      ordered.push(child);
+    }
+  };
+  walk(root, 0);
+  return ordered;
+}
+
+/** SIGKILL maps to TerminateProcess on Windows, so this is cross-platform. */
+function killPid(pid: number): boolean {
+  try {
+    process.kill(pid, "SIGKILL");
+    return true;
+  } catch {
+    // Already gone, or not ours to kill.
+    return false;
+  }
+}
+
+function killTree(proc: IPty): void {
+  if (process.platform !== "win32") {
+    proc.kill();
+    return;
+  }
+  // /F because a dev server mid-request will not leave on a polite ask, and
+  // this path is only reached when the user already asked for it to stop.
+  execFile("taskkill", ["/pid", String(proc.pid), "/T", "/F"], (error) => {
+    // Racing the process's own exit is normal (it may already be gone), so a
+    // failure here is not worth surfacing — but the shell must still go.
+    if (error) {
+      try {
+        proc.kill();
+      } catch {
+        // already dead
+      }
+    }
+  });
 }

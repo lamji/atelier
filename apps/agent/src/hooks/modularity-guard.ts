@@ -1,11 +1,9 @@
 import { ParserPool } from "../knowledge/parsing/parser-pool.js";
 import type { ExtractedSymbol } from "../knowledge/parsing/extracted.js";
+import { COUNTED_KINDS } from "./modularity-convention.js";
 
 export const MODULARITY_HOOK_ID = "builtin-modularity";
 export const MODULARITY_HOOK_NAME = "Modularity: one function per file";
-
-/** Top-level symbol kinds that count against the one-per-file rule. */
-const COUNTED_KINDS = new Set(["function", "component", "hook", "class"]);
 
 export type GuardVerdict =
   | { ok: true }
@@ -20,6 +18,11 @@ export type GuardVerdict =
  * Legacy files that already violate the rule stay editable (fixes must
  * not be blocked) — but adding yet another top-level function to them is
  * refused, so the codebase converges toward modularity instead of away.
+ *
+ * Purely structural: this answers "does this content break the rule", never
+ * "does the rule apply here". Whether the rule is live at all is decided
+ * once by followsOneSymbolPerFile, at the single gate in runtime.ts that
+ * feeds both this guard and the system prompt.
  */
 export class ModularityGuard {
   private pool = new ParserPool();
@@ -64,7 +67,7 @@ export class ModularityGuard {
       const parsed = await this.pool.parseFile(relPath, content);
       if (!parsed) return null;
       return parsed.symbols.filter(
-        (s) => !s.parentQualifiedName && COUNTED_KINDS.has(s.kind)
+        (s) => !s.parentQualifiedName && COUNTED_KINDS.includes(s.kind)
       );
     } catch {
       // Never let a parser hiccup block a write.

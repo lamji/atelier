@@ -58,6 +58,13 @@ export interface SessionVm {
   taskStartedAt: number | null;
   /** A cancel was sent; the task has not stopped yet. */
   cancelling: boolean;
+  /**
+   * Follow-ups typed while this session was busy, oldest first. They are
+   * already in the transcript and already persisted by the agent; this only
+   * tracks which are still waiting, so the composer can say how many are in
+   * line and offer to drop them.
+   */
+  queuedTaskIds: string[];
   /** Messages loaded from the agent at least once. */
   hydrated: boolean;
 }
@@ -72,6 +79,9 @@ interface SessionsStore {
   upsertConversations: (conversations: Conversation[]) => void;
   addSession: (conversation: Conversation, select?: boolean) => void;
   select: (conversationId: string) => void;
+  /** Drops a chat locally; the agent delete is issued by the ViewModel. */
+  removeSession: (conversationId: string) => void;
+  renameSession: (conversationId: string, title: string) => void;
   hydrate: (conversationId: string, items: ChatItemVm[]) => void;
   mapTask: (taskId: string, conversationId: string) => void;
   conversationForTask: (taskId: string) => string | undefined;
@@ -117,6 +127,12 @@ interface SessionsStore {
   ) => void;
   setStage: (conversationId: string, stage: PipelineStage) => void;
   taskCancelling: (conversationId: string) => void;
+  /**
+   * A send the agent queued behind the running task. Deliberately does NOT
+   * touch activeTaskId or status: the running task still owns the live feed,
+   * and this turn will announce itself with task.started when it begins.
+   */
+  taskQueued: (conversationId: string, taskId: string) => void;
   taskStarted: (conversationId: string, taskId: string, title?: string) => void;
   /**
    * After a reload, restores the busy state for tasks the backend reports as
@@ -126,10 +142,16 @@ interface SessionsStore {
   restoreActiveTasks: (
     tasks: { id: string; conversationId: string; startedAt: number }[]
   ) => void;
+  /**
+   * `taskId` identifies WHICH task ended. A cancelled follow-up that never
+   * ran only leaves the queue — without the id it would tear down the live
+   * state of the task still running in the same session.
+   */
   taskEnded: (
     conversationId: string,
     outcome: "completed" | "cancelled" | "error",
-    error?: string
+    error?: string,
+    taskId?: string
   ) => void;
   setPlan: (conversationId: string, plan: Plan) => void;
   updatePlanStep: (
@@ -178,6 +200,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
             stage: null,
             taskStartedAt: null,
             cancelling: false,
+            queuedTaskIds: [],
             hydrated: false,
           };
           order.push(conversation.id);
@@ -204,6 +227,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           stage: null,
           taskStartedAt: null,
           cancelling: false,
+          queuedTaskIds: [],
           hydrated: true,
         },
       },
@@ -212,6 +236,29 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     })),
 
   select: (selectedId) => set({ selectedId }),
+
+  removeSession: (conversationId) =>
+    set((s) => {
+      const sessions = { ...s.sessions };
+      delete sessions[conversationId];
+      const order = s.order.filter((id) => id !== conversationId);
+      // Deleting the open chat must land somewhere, not on a blank pane.
+      const selectedId =
+        s.selectedId === conversationId ? (order[0] ?? null) : s.selectedId;
+      // Its tasks can no longer resolve a conversation; drop the mappings so
+      // late events from a cancelled run don't linger in the map.
+      const taskMap = Object.fromEntries(
+        Object.entries(s.taskMap).filter(([, id]) => id !== conversationId)
+      );
+      return { sessions, order, selectedId, taskMap };
+    }),
+
+  renameSession: (conversationId, title) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, (session) => ({
+        conversation: { ...session.conversation, title },
+      })),
+    })),
 
   hydrate: (conversationId, items) =>
     set((s) => ({
@@ -381,9 +428,21 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions: patch(s.sessions, conversationId, () => ({ cancelling: true })),
     })),
 
+  taskQueued: (conversationId, taskId) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, (session) =>
+        session.queuedTaskIds.includes(taskId)
+          ? {}
+          : { queuedTaskIds: [...session.queuedTaskIds, taskId] }
+      ),
+      taskMap: { ...s.taskMap, [taskId]: conversationId },
+    })),
+
   taskStarted: (conversationId, taskId, title) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
+        // Its turn came: it leaves the line and takes the live feed.
+        queuedTaskIds: session.queuedTaskIds.filter((id) => id !== taskId),
         activeTaskId: taskId,
         status: "working",
         lastError: null,
@@ -393,9 +452,13 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         stage: null,
         taskStartedAt: Date.now(),
         cancelling: false,
-        conversation: title
-          ? { ...session.conversation, title }
-          : session.conversation,
+        // Starting a run is the strongest "last active" signal there is, so
+        // stamp it here — that is what floats the chat to the top of the list.
+        conversation: {
+          ...session.conversation,
+          ...(title ? { title } : {}),
+          updatedAt: Date.now(),
+        },
       })),
       taskMap: { ...s.taskMap, [taskId]: conversationId },
     })),
@@ -423,20 +486,25 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       return { sessions, taskMap };
     }),
 
-  taskEnded: (conversationId, outcome, error) =>
+  taskEnded: (conversationId, outcome, error, taskId) =>
     set((s) => ({
-      sessions: patch(s.sessions, conversationId, () => ({
-        activeTaskId: null,
-        thinking: "",
-        stage: null,
-        taskStartedAt: null,
-        cancelling: false,
-        // Run over: drop the live copies so the (chronologically-placed)
-        // transcript diffs become the visible record again.
-        liveDiffs: [],
-        status: outcome === "error" ? "error" : "idle",
-        lastError: outcome === "error" ? (error ?? "task failed") : null,
-      })),
+      sessions: patch(s.sessions, conversationId, (session) =>
+        taskId && session.queuedTaskIds.includes(taskId)
+          ? { queuedTaskIds: session.queuedTaskIds.filter((id) => id !== taskId) }
+          : {
+              activeTaskId: null,
+              thinking: "",
+              stage: null,
+              taskStartedAt: null,
+              cancelling: false,
+              // Run over: drop the live copies so the (chronologically-placed)
+              // transcript diffs become the visible record again.
+              liveDiffs: [],
+              status: outcome === "error" ? "error" : "idle",
+              lastError:
+                outcome === "error" ? (error ?? "task failed") : null,
+            }
+      ),
     })),
 
   setPlan: (conversationId, plan) =>
@@ -461,10 +529,43 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     })),
 }));
 
+/** Below this, a freshly started sentence keeps the previous one for company. */
+const MIN_LIVE_CHARS = 24;
+
+/**
+ * Sentences that hand the turn back to the user ("exit plan mode on your
+ * side", "say the word and I'll implement it"). They are addressed to a
+ * reader, not a description of work in flight, so leaving one frozen under
+ * a spinning THINKING header is what makes a running task look stuck.
+ * Dropped from the live line; the full text still lands in the transcript.
+ */
+const HANDBACK =
+  /\b(?:exit plan mode|uncheck plan|re-?run without it|say the word|let me know (?:if|when|whether)|shall i|would you like me to|on your side)\b/i;
+
+/**
+ * The single line of live thinking under the THINKING header.
+ *
+ * Sentences end at punctuation FOLLOWED BY SPACE. Splitting on every "."
+ * made a sentence out of every file name and host the model reasoned about
+ * — "powertranz.go", "x.com" — so the panel flashed fragments like "com ."
+ * instead of the thought.
+ */
 function liveStatusLine(current: string, delta: string): string {
   const text = `${current}${delta}`.replace(/\s+/g, " ").trim();
   if (!text) return "";
-  const sentences = text.match(/[^.!?]+[.!?]?/g) ?? [text];
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => sentence && !HANDBACK.test(sentence));
+  // Nothing left means the model spent this stretch talking to the user; the
+  // block falls back to the current step, which is the honest status.
+  if (sentences.length === 0) return "";
   const latest = sentences[sentences.length - 1]?.trim() ?? text;
-  return latest.length > 180 ? latest.slice(-180).trimStart() : latest;
+  // A sentence begins life two characters long; showing that alone reads
+  // as noise, so the one before it stays until the new one has grown.
+  const previous = sentences[sentences.length - 2];
+  const line =
+    latest.length < MIN_LIVE_CHARS && previous
+      ? `${previous.trim()} ${latest}`.trim()
+      : latest;
+  return line.length > 180 ? line.slice(-180).trimStart() : line;
 }

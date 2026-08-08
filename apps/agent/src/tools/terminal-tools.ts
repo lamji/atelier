@@ -1,11 +1,16 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { execa } from "execa";
+import type pino from "pino";
 import type { PathGuard } from "../workspace/path-guard.js";
 import type { ToolRegistry } from "./registry.js";
+import { ShellSession } from "./shell-session.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 60_000;
+
+/** How much command output reaches the log for one call. */
+const MAX_LOGGED_OUTPUT = 4_000;
 
 /**
  * Best-effort workspace confinement for shell commands: rejects commands
@@ -71,14 +76,61 @@ export interface RunTerminalResult {
 export function registerTerminalTools(
   registry: ToolRegistry,
   guard: PathGuard,
-  workspaceRoot: string
+  workspaceRoot: string,
+  log: pino.Logger
 ): void {
+  const isWin = process.platform === "win32";
+  // One shell for the whole workspace, reused across calls. Non-Windows
+  // keeps the one-shot path: `bash -c` starts in single-digit milliseconds,
+  // so there is nothing to win and a session to go wrong.
+  const session = isWin ? new ShellSession(workspaceRoot, log) : null;
+
   registry.register(
     "run_terminal",
     async (input: RunTerminalInput, ctx): Promise<RunTerminalResult> => {
       assertCommandConfined(input.command, workspaceRoot);
       const cwd = input.cwd ? guard.toAbsolute(input.cwd) : workspaceRoot;
-      const isWin = process.platform === "win32";
+      const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const startedAt = Date.now();
+      // The command itself, logged before it runs: a turn that hangs must
+      // say what it hung on, not just that a terminal tool was running.
+      log.info({ command: input.command, cwd }, "run_terminal ▶");
+      // The same line opens the streamed output, so the process rail and
+      // the transcript show the command above its own output.
+      ctx.emitOutput(`$ ${input.command}\n`);
+
+      const done = (result: RunTerminalResult): RunTerminalResult => {
+        log.info(
+          {
+            command: input.command,
+            cwd,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            durationMs: Date.now() - startedAt,
+            output: clip(result.output, MAX_LOGGED_OUTPUT),
+          },
+          "run_terminal ◀"
+        );
+        return result;
+      };
+
+      if (session && ShellSession.canServe(input.command)) {
+        const run = await session.run(
+          input.command,
+          cwd,
+          timeoutMs,
+          ctx.signal,
+          (chunk) => ctx.emitOutput(chunk)
+        );
+        const truncated = run.output.length > MAX_OUTPUT;
+        return done({
+          exitCode: run.exitCode,
+          output: truncated ? run.output.slice(-MAX_OUTPUT) : run.output,
+          truncated,
+          timedOut: run.timedOut,
+        });
+      }
+
       const file = isWin ? "powershell.exe" : "bash";
       const args = isWin
         ? ["-NoProfile", "-NonInteractive", "-Command", input.command]
@@ -86,7 +138,10 @@ export function registerTerminalTools(
 
       const child = execa(file, args, {
         cwd,
-        timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        // Agent-run commands report through the process rail; a console
+        // window stealing focus mid-task is never wanted.
+        windowsHide: true,
+        timeout: timeoutMs,
         cancelSignal: ctx.signal,
         forceKillAfterDelay: 1000,
         reject: false,
@@ -116,15 +171,19 @@ export function registerTerminalTools(
       try {
         const result = await child;
         const truncated = output.length > MAX_OUTPUT;
-        return {
+        return done({
           exitCode: result.exitCode ?? null,
           output: truncated ? output.slice(-MAX_OUTPUT) : output,
           truncated,
           timedOut: result.timedOut ?? false,
-        };
+        });
       } finally {
         ctx.signal.removeEventListener("abort", killTree);
       }
     }
   );
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `…${text.slice(-max)}` : text;
 }

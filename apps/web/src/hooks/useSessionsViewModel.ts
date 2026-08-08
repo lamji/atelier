@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { bridge } from "@/services/bridge-client";
+import { replayProcessTimeline } from "@/services/event-dispatcher";
 import { useConnectionStore } from "@/state/connection.store";
 import { useSessionsStore, type SessionVm } from "@/state/sessions.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -28,11 +29,17 @@ export function useSessionsViewModel() {
   const needsHydration = useSessionsStore(pendingHydration);
   const [error, setError] = useState<string | null>(null);
 
+  // Most recently active first. `order` is arrival order (the agent's list,
+  // then anything created since), which is not what the list should read as:
+  // the chat you last worked in belongs at the top. updatedAt is stamped by
+  // the agent and re-stamped locally the moment a run starts, so a chat rises
+  // as soon as it becomes active rather than after the next refetch.
   const sessionList = useMemo(
     () =>
       order
         .map((id) => sessions[id])
-        .filter((s): s is SessionVm => s !== undefined),
+        .filter((s): s is SessionVm => s !== undefined)
+        .sort((a, b) => b.conversation.updatedAt - a.conversation.updatedAt),
     [order, sessions]
   );
 
@@ -70,6 +77,13 @@ export function useSessionsViewModel() {
               startedAt: t.startedAt,
             }))
           );
+          // Busy state alone leaves the process rail blank for a run that is
+          // still going: its plan and activity feed live only in this tab's
+          // memory, which a project switch resets. Rebuild them from the
+          // agent's timeline so returning to a workspace shows the work.
+          for (const t of tasks) {
+            void replayProcessTimeline(t.id).catch(() => undefined);
+          }
         } catch {
           // Non-fatal: the composer just won't show the running state.
         }
@@ -106,6 +120,48 @@ export function useSessionsViewModel() {
     setError(null);
   }, []);
 
+  /**
+   * Rename optimistically: the title is the row's identity in the list, and
+   * waiting a round trip to see your own edit reads as a dropped keystroke.
+   * A failed rename is put back rather than left showing a title the agent
+   * never accepted.
+   */
+  const renameSession = useCallback(
+    (conversationId: string, title: string) => {
+      const store = useSessionsStore.getState();
+      const previous = store.sessions[conversationId]?.conversation.title;
+      const next = title.trim();
+      if (!next || next === previous) return;
+      store.renameSession(conversationId, next);
+      void bridge
+        .rpc("session.renameConversation", { conversationId, title: next })
+        .catch((e) => {
+          if (previous !== undefined) {
+            useSessionsStore.getState().renameSession(conversationId, previous);
+          }
+          setError(errText(e));
+        });
+    },
+    []
+  );
+
+  /**
+   * Delete for real, then drop the row — the opposite order of rename. A chat
+   * put back after an optimistic delete would have lost its transcript from
+   * this tab's memory, so the row stays until the agent confirms.
+   */
+  const deleteSession = useCallback(async (conversationId: string) => {
+    try {
+      await bridge.rpc("session.deleteConversation", { conversationId });
+      useSessionsStore.getState().removeSession(conversationId);
+      // Deleting the last chat leaves nothing to select; give the workspace a
+      // fresh one rather than an empty pane with no way back.
+      if (useSessionsStore.getState().order.length === 0) await createSession();
+    } catch (e) {
+      setError(errText(e));
+    }
+  }, [createSession]);
+
   return {
     sessionList,
     selectedId,
@@ -115,6 +171,8 @@ export function useSessionsViewModel() {
     error,
     createSession,
     selectSession,
+    renameSession,
+    deleteSession,
   };
 }
 
