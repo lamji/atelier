@@ -16,7 +16,9 @@ import {
 import { listOllamaModels, ollamaHost, ollamaReachable } from "./ollama/client.js";
 import { listOllamaCatalog } from "./ollama/models.js";
 import { initUsage, usageWindows } from "./ollama/usage.js";
-import { isSessionProvider, probeSession, sessionCatalog } from "./roster.js";
+import { isSessionProvider, sessionCatalog } from "./roster.js";
+import { probeClaudeAuth } from "../orchestrator/models-probe.js";
+import { probeCodexAuth } from "./codex/models.js";
 
 /**
  * Provider credential handlers. Keys are stored by the agent and never
@@ -129,20 +131,19 @@ function catalogFor(
 }
 
 /**
- * Test for a signed-in CLI. There is no key to validate, so the question is
- * simply whether the CLI answers with a roster — a Codex that is not
- * installed, or an SDK that cannot be probed, comes back empty.
+ * Test the exact account boundary each provider executes through. Claude
+ * asks the Agent SDK for its authenticated account; Codex asks its CLI login
+ * status. A fallback model row is deliberately not accepted as auth proof.
  */
 async function checkSession(id: "claude" | "codex", workspaceRoot: string) {
-  const models = await probeSession(id, workspaceRoot);
-  const what = id === CLAUDE ? "Claude Code session" : "Codex CLI";
+  const status =
+    id === CLAUDE
+      ? await probeClaudeAuth(workspaceRoot)
+      : await probeCodexAuth();
   return {
-    ok: models.length > 0,
-    detail:
-      models.length > 0
-        ? `Reached your ${what} — ${models.length} model(s) available.`
-        : `No roster from your ${what}. Check that you are signed in.`,
-    modelCount: models.length,
+    ok: status.ok,
+    detail: status.detail,
+    modelCount: 0,
   };
 }
 

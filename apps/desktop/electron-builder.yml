@@ -2,6 +2,11 @@ appId: dev.atelier.desktop
 productName: Atelier
 directories:
   output: release
+# atelier:// deep links (Google OAuth callback) — the installer registers
+# the scheme; dev registration happens in protocol.ts.
+protocols:
+  - name: Atelier
+    schemes: [atelier]
 # Only the tiny main/preload bundles live in the asar; the whole backend
 # ships as plain files under resources/ so native .node/.dll binaries and
 # self-relative reads (parse-worker.mjs, schema.sql) work unchanged.
@@ -13,12 +18,19 @@ extraResources:
     to: web
   - from: build/backend/agent
     to: agent
+  # Supabase project credentials (auth.local.json is gitignored; the build
+  # stages it as resources/auth.json).
+  - from: auth.local.json
+    to: auth.json
 win:
   target: nsis
   artifactName: Atelier-Setup-${version}.exe
+  # Generated from apps/web/public/icon.svg by scripts/build-icon.mjs; the
+  # .ico for the exe and installer is derived from this PNG.
+  icon: build/icon.png
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
 # The backend is staged by scripts/build-backend.mjs for the Electron ABI;
-# nothing in node_modules needs rebuilding for the app itself.
+# the main bundle inlines its JS deps (supabase-js, ws).
 npmRebuild: false

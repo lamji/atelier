@@ -10,6 +10,13 @@ export interface BuildTaskSummaryInput {
   intentSummary: string;
   /** Exact request, retained so terse later turns can retrieve its details. */
   originalPrompt?: string;
+  /**
+   * Paths of the images that came with the request. Stored as addresses,
+   * not bytes: a later turn retrieves the path and opens it with
+   * view_image, so "what was on the screenshot?" is answered from the
+   * picture rather than from an earlier description of it.
+   */
+  attachmentPaths?: string[];
   /** Final assistant answer, including recommendations the user may refer to. */
   assistantText?: string;
   changedFiles: string[];
@@ -77,11 +84,28 @@ function buildDetails(input: BuildTaskSummaryInput): SessionDetail[] {
   const claimed = new Set<string>();
 
   const originalPrompt = clipSessionBody(input.originalPrompt);
-  if (originalPrompt) {
+  const attached = input.attachmentPaths ?? [];
+  if (originalPrompt || attached.length > 0) {
+    // The attachment lines sit INSIDE the request detail rather than in a
+    // chunk of their own: a follow-up asks about "the image" in the same
+    // breath as the request it came with, and one chunk keeps the words
+    // and the picture's address on the same retrieval hit.
+    const body = [
+      originalPrompt,
+      attached.length > 0
+        ? `Images attached to this request (open with view_image):\n` +
+          attached.map((p) => `- ${p}`).join("\n")
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     details.push({
-      title: "Original user request",
+      title:
+        attached.length > 0
+          ? "Original user request, with attached image(s)"
+          : "Original user request",
       files: [],
-      body: originalPrompt,
+      body,
     });
   }
 

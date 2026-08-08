@@ -1,5 +1,6 @@
 export * from "./version.js";
 export * from "./envelope.js";
+export * from "./native.js";
 export * from "./events.js";
 export * from "./methods/index.js";
 export * from "./models/plan.js";
@@ -16,4 +17,4 @@ export * from "./models/git.js";
 export * from "./models/conversation.js";
 export * from "./models/context.js";
 export * from "./models/fs.js";
-export { Settings } from "./methods/settings.js";
+export { Settings, UserRule } from "./methods/settings.js";

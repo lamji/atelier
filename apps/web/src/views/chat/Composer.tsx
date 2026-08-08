@@ -13,6 +13,7 @@ import {
   Folder,
   Gauge,
   ImagePlus,
+  ListPlus,
   Loader2,
   Paperclip,
   Plus,
@@ -30,6 +31,7 @@ import {
   type MentionEntry,
 } from "@/lib/mention-tree";
 import { Tooltip } from "@/components/ui/tooltip";
+import { NoProviderModal } from "./NoProviderModal";
 import { useMarkdownStore } from "@/state/markdown.store";
 import { createMarkdownFile } from "@/hooks/useMarkdownViewModel";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -69,7 +71,6 @@ function modelOptions(models: ModelOption[]): PickerOption[] {
   const order: Array<NonNullable<ModelOption["provider"]>> = [
     "claude",
     "ollama",
-    "ollama-local",
     "codex",
   ];
   for (const provider of order) {
@@ -152,6 +153,20 @@ export const Composer = memo(function Composer() {
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [providerAlert, setProviderAlert] = useState(false);
+
+  /**
+   * Send, unless there is nothing to send to. With every provider off the
+   * turn would start against an empty roster, so the composer says why
+   * instead — and keeps the draft.
+   */
+  const send = () => {
+    if (vm.noProvidersEnabled) {
+      setProviderAlert(true);
+      return;
+    }
+    vm.send();
+  };
 
   /**
    * Auto-size the composer from the value, not from keystrokes: sending,
@@ -388,12 +403,16 @@ export const Composer = memo(function Composer() {
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      vm.send();
+      send();
     }
   };
 
   return (
     <div className="px-4 pb-3">
+      <NoProviderModal
+        open={providerAlert}
+        onClose={() => setProviderAlert(false)}
+      />
       <div className="mx-auto w-full max-w-3xl">
         {vm.error && (
           <motion.p
@@ -503,10 +522,10 @@ export const Composer = memo(function Composer() {
                 value={vm.input}
                 placeholder={
                   vm.busy
-                    ? "Agent is working — you can cancel or switch sessions"
+                    ? "Agent is working — send to queue a follow-up"
                     : "Describe a task, paste or drop a screenshot…"
                 }
-                disabled={!vm.connected || vm.busy}
+                disabled={!vm.connected}
                 rows={1}
                 onChange={(e) => changeInput(e.target.value)}
                 onKeyDown={onComposerKeyDown}
@@ -520,7 +539,36 @@ export const Composer = memo(function Composer() {
                   "disabled:opacity-60"
                 )}
               />
-              {vm.busy ? (
+              {/* While the agent works, BOTH actions are offered: queue this
+                  draft behind the run, or stop the run. Sending no longer
+                  costs the task in flight, so stopping stops being the only
+                  way to say something. */}
+              <Tooltip content={vm.busy ? "Queue follow-up (Enter)" : "Send (Enter)"}>
+                <motion.button
+                  whileTap={{ scale: 0.92 }}
+                  disabled={
+                    !vm.connected ||
+                    (!vm.input.trim() &&
+                      vm.images.length === 0 &&
+                      vm.promptFile === NO_PROMPT_FILE)
+                  }
+                  onClick={send}
+                  className={cn(
+                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                    "transition-opacity hover:opacity-90 disabled:opacity-30",
+                    vm.busy
+                      ? "bg-muted text-foreground"
+                      : "bg-primary text-primary-foreground"
+                  )}
+                >
+                  {vm.busy ? (
+                    <ListPlus className="h-4 w-4" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                </motion.button>
+              </Tooltip>
+              {vm.busy && (
                 <Tooltip
                   content={
                     vm.cancelling
@@ -544,33 +592,28 @@ export const Composer = memo(function Composer() {
                     )}
                   </motion.button>
                 </Tooltip>
-              ) : (
-                <Tooltip content="Send (Enter)">
-                  <motion.button
-                    whileTap={{ scale: 0.92 }}
-                    disabled={
-                      !vm.connected ||
-                      (!vm.input.trim() &&
-                        vm.images.length === 0 &&
-                        vm.promptFile === NO_PROMPT_FILE)
-                    }
-                    onClick={vm.send}
-                    className={cn(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                      "bg-primary text-primary-foreground transition-opacity",
-                      "hover:opacity-90 disabled:opacity-30"
-                    )}
-                  >
-                    <ArrowUp className="h-4 w-4" />
-                  </motion.button>
-                </Tooltip>
               )}
             </div>
+            {vm.queuedCount > 0 && (
+              <div className="flex items-center gap-2 px-3 pb-1 text-[11px] text-muted-foreground">
+                <ListPlus className="h-3 w-3" />
+                <span>
+                  {vm.queuedCount} follow-up{vm.queuedCount > 1 ? "s" : ""} queued
+                </span>
+                <button
+                  type="button"
+                  onClick={vm.clearQueue}
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-1 px-2.5 pb-2 pt-0.5">
               <Tooltip content="Attach an image (or paste / drop a screenshot)">
                 <button
                   type="button"
-                  disabled={!vm.connected || vm.busy}
+                  disabled={!vm.connected}
                   onClick={() => fileInputRef.current?.click()}
                   className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
                 >
@@ -584,6 +627,11 @@ export const Composer = memo(function Composer() {
                 options={modelOptions(vm.models)}
                 onChange={(v) => vm.changeModel(v as ModelChoice)}
                 shortLabel={(label) => label.replace(/\s*\(recommended\)/i, "")}
+                interceptOpen={() => {
+                  if (!vm.noProvidersEnabled) return false;
+                  setProviderAlert(true);
+                  return true;
+                }}
               />
               <ComposerMenu
                 icon={Gauge}
@@ -617,12 +665,26 @@ export const Composer = memo(function Composer() {
                     : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
                 }
               />
-              <ComposerToggle
+              <ComposerChecks
                 icon={Sparkles}
-                label="Vibe"
-                active={vm.vibe}
-                onToggle={vm.changeVibe}
-                tooltip="Vibe coding: the agent owns the feature end to end — UX, edge cases, polish"
+                label="Modes"
+                tooltip="How the agent works on this project"
+                items={[
+                  {
+                    key: "vibe",
+                    label: "Vibe code",
+                    hint: "Owns the feature end to end — UX, edge cases, polish",
+                    checked: vm.vibe,
+                    onChange: vm.changeVibe,
+                  },
+                  {
+                    key: "autoReview",
+                    label: "Auto review",
+                    hint: "An independent reviewer checks the changes and can send them back for a fix",
+                    checked: vm.autoReview,
+                    onChange: vm.changeAutoReview,
+                  },
+                ]}
               />
               <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/50 min-[560px]:inline">
                 Enter ↵ · Shift+Enter newline
@@ -905,6 +967,137 @@ function ComposerToggle(props: {
   );
 }
 
+interface CheckItem {
+  key: string;
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}
+
+/**
+ * Drop-up of independent checkboxes (Vibe code / Auto review). Unlike
+ * ComposerMenu these are not one-of-N, and the menu stays open after a tick
+ * so both can be set in a single visit.
+ */
+function ComposerChecks(props: {
+  icon: typeof Brain;
+  label: string;
+  tooltip: string;
+  items: CheckItem[];
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissOnOutside(open, rootRef, () => setOpen(false));
+
+  const Icon = props.icon;
+  const onCount = props.items.filter((item) => item.checked).length;
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Tooltip content={props.tooltip}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-haspopup="true"
+          aria-expanded={open}
+          className={cn(
+            "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+            "text-[11px] font-medium transition-colors",
+            onCount > 0
+              ? "bg-primary/15 text-primary"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            open && onCount === 0 && "bg-accent text-foreground"
+          )}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          {props.label}
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </Tooltip>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full left-0 z-50 mb-1 w-64 rounded-lg",
+              "border border-border bg-card p-1 shadow-xl"
+            )}
+          >
+            {props.items.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={item.checked}
+                onClick={() => item.onChange(!item.checked)}
+                className={cn(
+                  "flex w-full items-start gap-2 rounded-md px-2 py-1.5",
+                  "text-left transition-colors hover:bg-accent/60"
+                )}
+              >
+                <span
+                  className={cn(
+                    "mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                    "rounded border transition-colors",
+                    item.checked
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border"
+                  )}
+                >
+                  {item.checked && <Check className="h-2.5 w-2.5" />}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[11px] text-foreground">
+                    {item.label}
+                  </span>
+                  <span className="block text-[10px] leading-tight text-muted-foreground">
+                    {item.hint}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** Closes a drop-up on an outside click or Escape, while it is open. */
+function useDismissOnOutside(
+  open: boolean,
+  ref: React.RefObject<HTMLElement | null>,
+  close: () => void
+): void {
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+    // `close` is a fresh arrow each render; the deps that matter are open/ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, ref]);
+}
+
 /**
  * Compact drop-up picker pill (model, reasoning effort). Replaces the
  * bordered Select in the composer row; separators become group headers.
@@ -917,6 +1110,12 @@ function ComposerMenu(props: {
   onChange: (value: string) => void;
   /** Compresses the selected label for the trigger pill. */
   shortLabel?: (label: string) => string;
+  /**
+   * Runs before the menu opens; returning true swallows the click. Lets a
+   * caller answer the click with an explanation when the list would be
+   * meaningless — e.g. no provider is enabled.
+   */
+  interceptOpen?: () => boolean;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -949,7 +1148,10 @@ function ComposerMenu(props: {
       <Tooltip content={props.tooltip}>
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            if (props.interceptOpen?.()) return;
+            setOpen((v) => !v);
+          }}
           aria-haspopup="listbox"
           aria-expanded={open}
           className={cn(

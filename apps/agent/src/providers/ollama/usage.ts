@@ -44,8 +44,18 @@ export interface UsageWindowTotals {
 let events: UsageEvent[] = [];
 let repo: SettingsRepo | null = null;
 
-/** Wires persistence and restores prior events. Call once at startup. */
+/**
+ * Wires persistence and restores prior events.
+ *
+ * Called once per workspace, and one agent process now hosts several — so
+ * the FIRST workspace to arrive owns the store and later ones are ignored.
+ * That is the honest arrangement rather than a limitation: the Ollama key
+ * is machine-wide, so its spend is machine-wide too, and letting each
+ * workspace repoint this would have split one account's meter across
+ * several databases and shown every project a fraction of the real total.
+ */
 export function initUsage(settings: SettingsRepo): void {
+  if (repo) return;
   repo = settings;
   const raw = settings.getRaw(STORAGE_KEY);
   if (!raw) return;

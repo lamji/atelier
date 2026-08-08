@@ -28,13 +28,14 @@ export const HookConfig = z.object({
 export type HookConfig = z.infer<typeof HookConfig>;
 
 /**
- * A database operation the agent is holding on, waiting for the user to
- * approve it in the UI. The tool call stays parked until the answer (or
- * the deadline) arrives.
+ * A command the agent is holding until the user answers in the UI. Database
+ * and npm-family approvals share this payload so one queue and one resolver
+ * can safely handle both kinds of human-in-the-loop work.
  */
-export const DbApprovalRequest = z.object({
+export const ApprovalRequest = z.object({
   id: z.string(),
-  /** Short label: "migration", "database client", "SQL statement", … */
+  kind: z.enum(["database", "npm"]).default("database"),
+  /** Short label: "migration", "npm run build", "SQL statement", … */
   operation: z.string(),
   /** The command the agent wants to run, as typed. */
   command: z.string(),
@@ -43,18 +44,32 @@ export const DbApprovalRequest = z.object({
   /** Epoch ms after which the request auto-denies. */
   expiresAt: z.number(),
 });
-export type DbApprovalRequest = z.infer<typeof DbApprovalRequest>;
+export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
 
-export const DbApprovalOutcome = z.enum([
+export const ApprovalOutcome = z.enum([
   "approved",
   "denied",
   "expired",
   "cancelled",
 ]);
-export type DbApprovalOutcome = z.infer<typeof DbApprovalOutcome>;
+export type ApprovalOutcome = z.infer<typeof ApprovalOutcome>;
 
-export const DbApprovalResolved = z.object({
+export const ApprovalResolved = z.object({
   id: z.string(),
-  outcome: DbApprovalOutcome,
+  outcome: ApprovalOutcome,
 });
-export type DbApprovalResolved = z.infer<typeof DbApprovalResolved>;
+export type ApprovalResolved = z.infer<typeof ApprovalResolved>;
+
+/** Backward-compatible names for the existing database approval flow. */
+export const DbApprovalRequest = ApprovalRequest;
+export type DbApprovalRequest = ApprovalRequest;
+export const DbApprovalOutcome = ApprovalOutcome;
+export type DbApprovalOutcome = ApprovalOutcome;
+export const DbApprovalResolved = ApprovalResolved;
+export type DbApprovalResolved = ApprovalResolved;
+
+/** Names used by the npm-family approval event topics. */
+export const NpmApprovalRequest = ApprovalRequest;
+export type NpmApprovalRequest = ApprovalRequest;
+export const NpmApprovalResolved = ApprovalResolved;
+export type NpmApprovalResolved = ApprovalResolved;

@@ -16,12 +16,7 @@ export type {
   TaskInfo,
 } from "@atelier/protocol";
 
-export type ConnectionState =
-  | "disconnected"
-  | "connecting"
-  | "handshaking"
-  | "connected"
-  | "unauthorized";
+export type ConnectionState = "disconnected" | "connecting" | "connected";
 
 export interface TimelineEntryVm {
   key: string;

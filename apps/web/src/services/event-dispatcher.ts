@@ -1,5 +1,6 @@
 import type {
   ContextRequestStats,
+  ApprovalRequest,
   DbApprovalRequest,
   Diff,
   EventFrame,
@@ -33,6 +34,50 @@ const NON_TIMELINE_TOPICS = new Set([
   "knowledge.indexing.progress",
   "knowledge.features.scan",
 ]);
+
+/**
+ * The events that rebuild the process rail (plan + activity feed) for a task
+ * that is still running. Deliberately narrow: the transcript is restored from
+ * the agent's own message history, so replaying chat/diff topics here would
+ * duplicate it, and `task.started` would wipe the very feed being rebuilt.
+ */
+const PROCESS_REPLAY_TOPICS = new Set([
+  "plan.created",
+  "plan.step.updated",
+  "pipeline.stage.started",
+  "tool.started",
+  "tool.completed",
+  "tool.failed",
+]);
+
+/** One page of timeline per round trip; a long run pages until it is drained. */
+const REPLAY_PAGE = 200;
+
+/**
+ * Rebuild the process rail for a task from the agent's persisted timeline.
+ *
+ * The rail's state (plan, activity feed) only ever lived in renderer memory,
+ * so leaving a workspace and coming back — which resets every workspace-scoped
+ * store — showed an empty rail for a task that was still running. The agent
+ * kept the record all along; this reads it back.
+ *
+ * Call AFTER the task is mapped to its conversation: frames carry a taskId and
+ * resolve their conversation through that map.
+ */
+export async function replayProcessTimeline(taskId: string): Promise<void> {
+  let cursor: number | undefined;
+  do {
+    const { entries, nextCursor } = await bridge.rpc("task.getTimeline", {
+      taskId,
+      cursor,
+      limit: REPLAY_PAGE,
+    });
+    for (const frame of entries) {
+      if (PROCESS_REPLAY_TOPICS.has(frame.topic)) dispatch(frame);
+    }
+    cursor = nextCursor ?? undefined;
+  } while (cursor !== undefined);
+}
 
 let started = false;
 
@@ -248,11 +293,10 @@ export function startEventDispatcher(): void {
   if (started) return;
   started = true;
 
+  // workspaceRoot is stamped by openWorkspace() from the project record;
+  // the old hello handshake (and its token) no longer exists.
   bridge.onStatus((state) => {
     useConnectionStore.getState().setState(state);
-    if (state === "connected" && bridge.hello) {
-      useConnectionStore.getState().setWorkspaceRoot(bridge.hello.workspaceRoot);
-    }
   });
 
   // Subscriptions persist on the client across reconnects; the actual
@@ -307,6 +351,13 @@ function dispatch(frame: EventFrame): void {
     case "context.stats":
       useContextStore.getState().add(frame.payload as ContextRequestStats);
       break;
+    case "task.queued":
+      // The agent accepted a follow-up behind the running task. The sender's
+      // own tab already recorded it; this is what tells every OTHER tab.
+      if (convId && frame.taskId) {
+        sessions.taskQueued(convId, frame.taskId);
+      }
+      break;
     case "task.started":
       if (convId && frame.taskId) {
         sessions.taskStarted(convId, frame.taskId);
@@ -347,15 +398,27 @@ function dispatch(frame: EventFrame): void {
       }
       break;
     }
+    // The taskId rides along on all three: a follow-up cancelled before it
+    // ever ran must leave the queue WITHOUT tearing down the live state of
+    // the task still running in the same session.
     case "task.completed":
-      if (convId) sessions.taskEnded(convId, "completed");
+      if (convId) {
+        sessions.taskEnded(convId, "completed", undefined, frame.taskId);
+      }
       break;
     case "task.cancelled":
-      if (convId) sessions.taskEnded(convId, "cancelled");
+      if (convId) {
+        sessions.taskEnded(convId, "cancelled", undefined, frame.taskId);
+      }
       break;
     case "task.error":
       if (convId) {
-        sessions.taskEnded(convId, "error", String(payload.message));
+        sessions.taskEnded(
+          convId,
+          "error",
+          String(payload.message),
+          frame.taskId
+        );
       }
       break;
     case "diff.created": {
@@ -405,6 +468,13 @@ function dispatch(frame: EventFrame): void {
       break;
     case "db.approval.resolved":
       // Answered here, or expired / cancelled agent-side — either way, go.
+      useDbApprovalStore.getState().remove(String(payload.id));
+      break;
+    case "npm.approval.requested":
+      // Package commands share the same approval queue and modal.
+      useDbApprovalStore.getState().add(frame.payload as ApprovalRequest);
+      break;
+    case "npm.approval.resolved":
       useDbApprovalStore.getState().remove(String(payload.id));
       break;
     case "git.flow.requested":
@@ -490,7 +560,14 @@ function dispatch(frame: EventFrame): void {
       const ws = useWorkspaceStore.getState();
       ws.bumpTreeVersion();
       const changedPath = String(payload.path);
-      if (ws.selectedPath === changedPath) {
+      // A deleted folder takes the open file with it, and its own path
+      // never matches selectedPath — so check containment explicitly.
+      if (
+        payload.type === "unlinkDir" &&
+        ws.selectedPath?.startsWith(`${changedPath}/`)
+      ) {
+        ws.clearSelected();
+      } else if (ws.selectedPath === changedPath) {
         void bridge
           .rpc("fs.readFile", { path: changedPath })
           .then((file) =>
@@ -506,7 +583,16 @@ function dispatch(frame: EventFrame): void {
 
   if (!NON_TIMELINE_TOPICS.has(frame.topic)) {
     useTimelineStore.getState().add({
-      key: `${frame.topic}:${frame.seq}`,
+      /*
+       * topic:seq alone was not unique. Unsequenced topics all carry seq 0, so
+       * every `scope.locked` (and `knowledge.retrieved`, `session.recalled`, …)
+       * produced the same key — React warned about duplicate keys, and the
+       * store's dedup silently dropped every occurrence after the first.
+       * `ts` separates distinct events and is carried by the frame itself, so
+       * it stays identical when a reconnect replays them — which is the one
+       * property the dedup actually depends on.
+       */
+      key: `${frame.topic}:${frame.seq}:${frame.ts}`,
       topic: frame.topic,
       ts: frame.ts,
       taskId: frame.taskId,

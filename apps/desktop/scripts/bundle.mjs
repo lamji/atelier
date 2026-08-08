@@ -16,7 +16,10 @@ const common = {
   format: "cjs",
   target: "node20",
   sourcemap: true,
-  external: ["electron"],
+  // supabase-js and ws are bundled in (pure JS; the packaged app ships no
+  // node_modules). ws's optional native accelerators are marked external —
+  // its require() calls for them are try/catch-guarded at runtime.
+  external: ["electron", "bufferutil", "utf-8-validate"],
   define: {
     "process.env.ATELIER_APP_VERSION": JSON.stringify(pkg.version),
   },

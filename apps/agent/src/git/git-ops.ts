@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { GitFlowInfo, GitOpResult } from "@atelier/protocol";
 import type { GitService } from "./git-service.js";
 
@@ -161,7 +164,16 @@ export async function mergeRun(
   );
 }
 
-/** Creates the PR via gh; head is the current branch. */
+/**
+ * Creates the PR via gh; head is the current branch.
+ *
+ * The body goes through a temp file rather than `--body`: a drafted
+ * description runs to thousands of characters, and on Windows the whole
+ * command line is capped at 32k — a long enough description would fail
+ * with a spawn error that looks nothing like "your text was too big".
+ * `--repo` pins gh to `origin` so a second remote (a fork, an `upstream`)
+ * cannot silently retarget the PR.
+ */
 export async function createPr(
   root: string,
   base: string,
@@ -170,16 +182,112 @@ export async function createPr(
   io: OpIo
 ): Promise<GitOpResult> {
   const head = await currentBranch(root);
-  const result = await runStreaming(
-    "gh",
-    ["pr", "create", "--base", base, "--head", head, "--title", title, "--body", body],
-    root,
-    io
+  const remote = await originRepo(root);
+  const bodyFile = await writeBodyFile(body);
+  const args = ["pr", "create", "--base", base, "--head", head, "--title", title];
+  if (remote) args.push("--repo", `${remote.owner}/${remote.name}`);
+  args.push("--body-file", bodyFile);
+  try {
+    let result = await runStreaming("gh", args, root, io);
+    if (!result.ok) {
+      result = await retryAsGitIdentity(root, args, result, io);
+    }
+    const url = result.output.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0];
+    if (url) return { ...result, url };
+    if (result.ok) return result;
+    return await withPrDiagnosis(root, base, head, title, body, result, io);
+  } finally {
+    await rm(bodyFile, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * gh and git reach GitHub through different credentials — gh's own token
+ * versus the SSH key — and nothing warns you when they belong to different
+ * accounts. The branch pushes fine while gh insists the repository does not
+ * exist, GitHub's honest answer for a private repo gh's account cannot see.
+ *
+ * When that is what happened AND the account git pushes as is already added
+ * to gh, switch to it and run the create once more; the previous account is
+ * restored afterwards so we don't quietly repoint the user's whole CLI.
+ * Anything else (account not added, switch fails) returns the original
+ * failure untouched, and withPrDiagnosis explains the sign-in to the user.
+ */
+async function retryAsGitIdentity(
+  root: string,
+  args: string[],
+  failure: GitOpResult,
+  io: OpIo
+): Promise<GitOpResult> {
+  if (!/could not resolve to a repository|HTTP 404|not found/i.test(failure.output)) {
+    return failure;
+  }
+  const remote = await originRepo(root).catch(() => null);
+  if (!remote?.ssh) return failure;
+
+  const [ghUser, gitUser] = await Promise.all([
+    ghLogin(root).catch(() => ""),
+    sshLogin(root, remote.host).catch(() => ""),
+  ]);
+  if (!ghUser || !gitUser || ghUser === gitUser) return failure;
+  if (!(await ghAccounts(root)).includes(gitUser)) return failure;
+
+  io.onChunk(
+    `\nAtelier: gh asked GitHub as ${ghUser}, but this repo is pushed as ` +
+      `${gitUser} — retrying as ${gitUser}.\n`
   );
-  const url = result.output.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0];
-  if (url) return { ...result, url };
-  if (result.ok) return result;
-  return withPrDiagnosis(root, base, head, result, io);
+  const switched = await capture("gh", ["auth", "switch", "-u", gitUser], root);
+  if (switched.code !== 0) return failure;
+  try {
+    const retry = await runStreaming("gh", args, root, io);
+    return retry.ok ? retry : failure;
+  } finally {
+    await capture("gh", ["auth", "switch", "-u", ghUser], root).catch(() => {});
+  }
+}
+
+/** Every account gh has credentials for, active or not. */
+async function ghAccounts(root: string): Promise<string[]> {
+  const { out } = await capture("gh", ["auth", "status"], root);
+  return [...out.matchAll(/Logged in to \S+ (?:as|account) (\S+)/g)].map(
+    (m) => m[1] ?? ""
+  );
+}
+
+/** Stages the PR body on disk so it never has to fit in a command line. */
+async function writeBodyFile(body: string): Promise<string> {
+  const file = join(tmpdir(), `atelier-pr-${process.pid}-${Date.now()}.md`);
+  await writeFile(file, body, "utf8");
+  return file;
+}
+
+/** Chars we can spend on a prefilled compare URL before browsers/GitHub balk. */
+const COMPARE_URL_LIMIT = 6000;
+
+/**
+ * The compare URL for `head` → `base`, carrying the drafted title and body
+ * as query params so the browser form opens already filled in.
+ *
+ * The body is dropped rather than truncated when it would push the URL past
+ * what a GET can carry — half a description silently pasted into a PR is
+ * worse than an empty box the user can paste into themselves.
+ */
+function compareUrlFor(
+  remote: RemoteRepo,
+  base: string,
+  head: string,
+  title: string,
+  body: string
+): string {
+  const path =
+    `https://${remote.host}/${remote.owner}/${remote.name}/compare/` +
+    `${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
+  const params = new URLSearchParams({ expand: "1" });
+  if (title) params.set("title", title);
+  const withBody = new URLSearchParams(params);
+  if (body) withBody.set("body", body);
+  const full = `${path}?${withBody.toString()}`;
+  return full.length <= COMPARE_URL_LIMIT ? full : `${path}?${params.toString()}`;
 }
 
 /**
@@ -200,20 +308,26 @@ async function withPrDiagnosis(
   root: string,
   base: string,
   head: string,
+  title: string,
+  body: string,
   result: GitOpResult,
   io: OpIo
 ): Promise<GitOpResult> {
   let remote: RemoteRepo | null = null;
-  let account = "";
+  let ghUser = "";
+  let gitUser = "";
   try {
     remote = await originRepo(root);
-    account = await ghAccount(root);
+    ghUser = await ghLogin(root);
+    if (remote?.ssh) gitUser = await sshLogin(root, remote.host);
   } catch {
     // A probe that cannot run just leaves its line out.
   }
-  const compareUrl = remote
-    ? `https://${remote.host}/${remote.owner}/${remote.name}/compare/` +
-      `${encodeURIComponent(base)}...${encodeURIComponent(head)}?expand=1`
+  // Two forms of the same link: a bare one short enough to read in the
+  // output pane, and the prefilled one behind the button in the UI.
+  const compareUrl = remote ? compareUrlFor(remote, base, head, "", "") : undefined;
+  const prefilledUrl = remote
+    ? compareUrlFor(remote, base, head, title, body)
     : undefined;
 
   const unresolved = /could not resolve to a repository|HTTP 404|not found/i.test(
@@ -225,9 +339,24 @@ async function withPrDiagnosis(
   } else {
     lines.push("origin → could not read the remote URL");
   }
-  lines.push(`gh account → ${account || "not signed in (gh auth status)"}`);
+  lines.push(`gh signed in as → ${ghUser || "nobody (gh auth status)"}`);
+  if (gitUser) lines.push(`git pushes as → ${gitUser} (ssh key)`);
   lines.push(`branch → ${head} into ${base}`);
-  if (unresolved) {
+
+  const splitIdentity = Boolean(unresolved && ghUser && gitUser && ghUser !== gitUser);
+  if (splitIdentity) {
+    lines.push(
+      "",
+      `Your push worked as ${gitUser}, but gh asked GitHub as ${ghUser} — ` +
+        `and ${ghUser} cannot see this repository, which GitHub reports as ` +
+        '"could not resolve". Nothing is wrong with the branch or the repo; ' +
+        "the two tools are signed in as different people.",
+      "",
+      `Point gh at the account that owns the access:`,
+      `  gh auth switch -u ${gitUser}   — if that account is already added`,
+      `  gh auth login                  — to add it`
+    );
+  } else if (unresolved) {
     lines.push(
       "",
       "GitHub says it cannot resolve that repository. It answers the same " +
@@ -240,14 +369,19 @@ async function withPrDiagnosis(
     );
   }
   if (compareUrl) {
-    lines.push("", "Or open the pull request in the browser:", `  ${compareUrl}`);
+    lines.push(
+      "",
+      "Or open the pull request in the browser — the title and description " +
+        "you drafted come along:",
+      `  ${compareUrl}`
+    );
   }
   const text = `${lines.join("\n")}\n`;
   io.onChunk(text);
   return {
     ...result,
     output: result.output + text,
-    ...(compareUrl ? { fallbackUrl: compareUrl } : {}),
+    ...(prefilledUrl ? { fallbackUrl: prefilledUrl } : {}),
   };
 }
 
@@ -255,6 +389,8 @@ interface RemoteRepo {
   host: string;
   owner: string;
   name: string;
+  /** True when origin is an SSH URL, so git authenticates with a key. */
+  ssh: boolean;
 }
 
 /**
@@ -279,17 +415,35 @@ async function originRepo(root: string): Promise<RemoteRepo | null> {
   const name = parts.pop();
   const owner = parts.join("/");
   if (!host || !owner || !name) return null;
-  return { host, owner, name };
+  return { host, owner, name, ssh: Boolean(scp) || /^ssh:/i.test(url) };
 }
 
-/** The account gh would act as, or "" when it cannot say. */
-async function ghAccount(root: string): Promise<string> {
+/** The login gh would act as, or "" when it cannot say. */
+async function ghLogin(root: string): Promise<string> {
   const { code, out } = await capture("gh", ["auth", "status"], root);
   if (code !== 0 && !out) return "";
   // gh has phrased this as "Logged in to github.com as NAME" and
   // "Logged in to github.com account NAME" across versions.
-  const match = out.match(/Logged in to (\S+) (?:as|account) (\S+)/);
-  return match ? `${match[2]} on ${match[1]}` : "";
+  return out.match(/Logged in to \S+ (?:as|account) (\S+)/)?.[1] ?? "";
+}
+
+/**
+ * The login `git` itself authenticates as over SSH.
+ *
+ * Worth asking because git and gh reach GitHub through different
+ * credentials — the SSH key versus gh's own token — and nothing warns you
+ * when they belong to different accounts. The branch pushes fine while gh
+ * insists the repository does not exist, which is GitHub's honest answer
+ * for a private repo the *other* account cannot see.
+ */
+async function sshLogin(root: string, host: string): Promise<string> {
+  const { out } = await capture(
+    "ssh",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", `git@${host}`],
+    root
+  );
+  // GitHub always exits non-zero here; the greeting is the answer.
+  return out.match(/^Hi ([^!\s]+)!/m)?.[1] ?? "";
 }
 
 /** Branch names on origin (no fetch of contents — refs only). */

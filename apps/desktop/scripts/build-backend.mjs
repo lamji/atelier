@@ -1,10 +1,7 @@
 // Stages the backend for the packaged desktop app into build/backend/:
-//   web/    built SPA (served by the supervisor's WebHost)
-//   agent/  esbuild bundles + native runtime deps installed for the
-//           ELECTRON ABI (the supervisor/agents run via ELECTRON_RUN_AS_NODE)
-//
-// Mirrors apps/cli/src/build.ts staging (kept byte-identical there for the
-// CLI flow); the only difference is the install target ABI and out dir.
+//   web/    built SPA (loaded over file:// by the main window)
+//   agent/  utility-main bundle + native runtime deps installed for the
+//           ELECTRON ABI (agents run as utilityProcesses)
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -78,18 +75,20 @@ const shared = {
 const agentSrc = path.join(repoRoot, "apps", "agent", "src");
 await esbuild({
   ...shared,
-  entryPoints: [path.join(agentSrc, "main.ts")],
-  outfile: path.join(agentOut, "main.mjs"),
+  entryPoints: [path.join(agentSrc, "utility-main.ts")],
+  outfile: path.join(agentOut, "utility-main.mjs"),
 });
 await esbuild({
   ...shared,
   entryPoints: [path.join(agentSrc, "knowledge", "parsing", "parse-worker.ts")],
   outfile: path.join(agentOut, "parse-worker.mjs"),
 });
+// Stdio MCP server Codex spawns; must land beside utility-main.mjs so the
+// runtime resolver finds it without pnpm or tsx.
 await esbuild({
   ...shared,
-  entryPoints: [path.join(agentSrc, "supervisor", "supervisor-main.ts")],
-  outfile: path.join(agentOut, "supervisor-main.mjs"),
+  entryPoints: [path.join(agentSrc, "providers", "codex", "mcp-main.ts")],
+  outfile: path.join(agentOut, "codex-mcp.mjs"),
 });
 fs.copyFileSync(
   path.join(agentSrc, "storage", "schema.sql"),

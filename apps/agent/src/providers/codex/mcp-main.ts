@@ -1,3 +1,8 @@
+// Stdio MCP server that Codex spawns to reach Atelier's tools.
+// It is a build entry, not a script: bundled to codex-mcp.mjs beside
+// utility-main.mjs so it runs from `process.execPath` with no pnpm/tsx in
+// the packaged app. Keep stdout clean — anything but MCP frames on stdout
+// breaks the initialize handshake.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";

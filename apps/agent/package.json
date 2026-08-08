@@ -4,9 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts",
-    "supervisor": "tsx src/supervisor/supervisor-main.ts",
     "typecheck": "tsc --noEmit",
     "smoke:native": "tsx scripts/native-smoke.ts",
     "smoke:git": "tsx scripts/git-smoke.ts",
@@ -15,8 +12,11 @@
     "smoke:modularity": "tsx scripts/modularity-smoke.ts",
     "smoke:pipeline": "tsx scripts/pipeline-smoke.ts",
     "smoke:context": "tsx scripts/context-smoke.ts",
+    "smoke:attachments": "tsx scripts/attachment-smoke.ts",
+    "smoke:references": "tsx scripts/reference-smoke.ts",
     "smoke:direct": "tsx scripts/direct-mode-smoke.ts",
     "smoke:workspace": "tsx scripts/workspace-shape-smoke.ts",
+    "smoke:gitignore": "tsx scripts/gitignore-smoke.ts",
     "smoke:scope": "tsx scripts/scope-smoke.ts",
     "smoke:plan": "tsx scripts/plan-smoke.ts",
     "smoke:note": "tsx scripts/note-smoke.ts",
@@ -26,6 +26,7 @@
     "smoke:dev-server": "tsx scripts/dev-server-smoke.ts",
     "smoke:review": "tsx scripts/review-smoke.ts",
     "smoke:skills": "tsx scripts/skill-loader-smoke.ts",
+    "smoke:explorer": "tsx scripts/explorer-fs-smoke.ts",
     "smoke:models": "tsx scripts/models-smoke.ts",
     "smoke:ollama": "tsx scripts/ollama-smoke.ts",
     "smoke:codex": "tsx scripts/codex-smoke.ts",
@@ -34,7 +35,8 @@
     "smoke:vec": "tsx scripts/vec-smoke.ts",
     "smoke:impact": "tsx scripts/impact-smoke.ts",
     "smoke:impact-first": "tsx scripts/impact-first-smoke.ts",
-    "smoke:supervisor": "tsx scripts/supervisor-smoke.ts"
+    "bundle:electron": "node scripts/bundle-electron.mjs",
+    "bundle:electron:watch": "node scripts/bundle-electron.mjs --watch"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.220",
@@ -61,6 +63,7 @@
     "@types/ws": "^8.5.0",
     "pino-pretty": "^13.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "esbuild": "^0.24.0"
   }
 }

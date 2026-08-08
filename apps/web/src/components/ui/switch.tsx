@@ -30,8 +30,7 @@ export function Switch({
       onClick={() => onChange(!checked)}
       className={cn(
         "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full",
-        "transition-colors focus-visible:outline-none focus-visible:ring-2",
-        "focus-visible:ring-primary/50 disabled:cursor-not-allowed",
+        "transition-colors disabled:cursor-not-allowed",
         "disabled:opacity-50",
         checked ? "bg-primary" : "bg-muted-foreground/30",
         className

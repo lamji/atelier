@@ -6,39 +6,47 @@ import { bridge } from "@/services/bridge-client";
 type TextModel = ReturnType<Monaco["editor"]["getModels"]>[number];
 type CursorPosition = InstanceType<Monaco["Position"]>;
 
-/** Paths move rarely mid-edit; a short cache keeps "@" typing snappy. */
-const PATHS_TTL_MS = 15_000;
-
-let cache: { paths: string[]; at: number } | null = null;
-let registered = false;
-
-async function workspacePaths(): Promise<string[]> {
-  if (cache && Date.now() - cache.at < PATHS_TTL_MS) return cache.paths;
-  const { files } = await bridge.rpc("fs.files", {});
-  cache = { paths: files, at: Date.now() };
-  return files;
-}
+/** Directory contents move rarely mid-edit; a short cache keeps "@" snappy. */
+const DIR_TTL_MS = 15_000;
 
 interface DirEntry {
   name: string;
   isDir: boolean;
 }
 
-/** One directory level of the flat path list, dirs first, alphabetical. */
-function entriesAt(paths: string[], dir: string): DirEntry[] {
-  const prefix = dir ? `${dir}/` : "";
-  const dirs = new Set<string>();
-  const files = new Set<string>();
-  for (const p of paths) {
-    if (!p.startsWith(prefix)) continue;
-    const rest = p.slice(prefix.length);
-    const slash = rest.indexOf("/");
-    if (slash === -1) files.add(rest);
-    else dirs.add(rest.slice(0, slash));
-  }
-  const sorted = (set: Set<string>, isDir: boolean) =>
-    [...set].sort().map((name) => ({ name, isDir }));
-  return [...sorted(dirs, true), ...sorted(files, false)];
+const cache = new Map<string, { entries: DirEntry[]; at: number }>();
+let registered = false;
+
+/**
+ * One directory level, straight from the agent.
+ *
+ * This used to slice a level out of the flat `fs.files` list, but that call
+ * walks depth-first and stops at 8000 paths — on a large checkout the cap
+ * can be spent inside the first subtree, so the root listing came back
+ * missing most of its own entries (and every directory that sorts after
+ * the one that ate the budget). `fs.list` answers for exactly one level,
+ * so the cap cannot apply and folders show up whatever the repo's size.
+ */
+async function entriesAt(dir: string): Promise<DirEntry[]> {
+  const hit = cache.get(dir);
+  if (hit && Date.now() - hit.at < DIR_TTL_MS) return hit.entries;
+
+  const { entries } = await bridge.rpc("fs.list", { path: dir || "." });
+  const mapped: DirEntry[] = entries.map((entry) => ({
+    name: entry.name,
+    isDir: entry.type === "dir",
+  }));
+  // Dirs first, then files, each alphabetical.
+  mapped.sort((a, b) =>
+    a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1
+  );
+  cache.set(dir, { entries: mapped, at: Date.now() });
+  return mapped;
+}
+
+/** Switching projects makes every cached listing wrong. */
+export function clearMentionCache(): void {
+  cache.clear();
 }
 
 /**
@@ -69,7 +77,16 @@ export function registerMarkdownMentions(monaco: Monaco): void {
       const dir = lastSlash === -1 ? "" : token.slice(0, lastSlash);
       const prefix = dir ? `${dir}/` : "";
 
-      const entries = entriesAt(await workspacePaths(), dir);
+      // A listing that fails (deleted folder, agent mid-restart) must close
+      // the menu quietly — a rejected provider makes Monaco drop the whole
+      // suggest session, so "@" looks broken until the editor is remounted.
+      let entries: DirEntry[];
+      try {
+        entries = await entriesAt(dir);
+      } catch {
+        return { suggestions: [] };
+      }
+
       // Replace from the "@" itself, so the marker disappears on pick.
       const range = new monaco.Range(
         position.lineNumber,

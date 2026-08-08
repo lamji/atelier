@@ -40,7 +40,7 @@ export function useEditorViewModel() {
     fileContent,
     rightTab,
     language,
-    monacoTheme: theme === "dark" ? "vs-dark" : "light",
+    monacoTheme: theme === "dark" ? "atelier-dark" : "atelier-light",
     setRightTab,
   };
 }

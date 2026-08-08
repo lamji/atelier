@@ -43,6 +43,30 @@ export const fsMethods = {
     }),
     result: z.object({ diff: Diff }),
   },
+  /** Explorer authoring: create an empty file, refusing to clobber. */
+  "fs.createFile": {
+    params: z.object({ path: z.string() }),
+    result: z.object({ path: z.string() }),
+  },
+  "fs.createDir": {
+    params: z.object({ path: z.string() }),
+    result: z.object({ path: z.string() }),
+  },
+  /** Rename or move; also the drag-and-drop move in the tree. */
+  "fs.rename": {
+    params: z.object({ from: z.string(), to: z.string() }),
+    result: z.object({ path: z.string() }),
+  },
+  /** Copy a file or a whole directory (explorer copy/paste, duplicate). */
+  "fs.copy": {
+    params: z.object({ from: z.string(), to: z.string() }),
+    result: z.object({ path: z.string() }),
+  },
+  /** Delete a file or a directory tree. */
+  "fs.delete": {
+    params: z.object({ path: z.string() }),
+    result: z.object({ path: z.string() }),
+  },
   "fs.search": {
     params: z.object({
       query: z.string(),

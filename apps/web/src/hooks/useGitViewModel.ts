@@ -79,6 +79,17 @@ export function useGitViewModel() {
     useGitStore.getState().bumpStateVersion();
   }, []);
 
+  /**
+   * Create the repository this workspace does not have. Clearing the error
+   * is what takes the panel off its empty state — the refetch that follows
+   * lands on a real repo.
+   */
+  const initRepo = useCallback(async () => {
+    await bridge.rpc("git.init", {});
+    useGitStore.getState().setError(null);
+    useGitStore.getState().bumpStateVersion();
+  }, []);
+
   const stage = useCallback(async (paths: string[]) => {
     await bridge.rpc("git.stage", { paths });
   }, []);
@@ -143,6 +154,7 @@ export function useGitViewModel() {
     activeRepo,
     selectRepo,
     refresh,
+    initRepo,
     stage,
     unstage,
     discard,

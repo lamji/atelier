@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { ReasoningEffort } from "@atelier/protocol";
 
 const VIBE_KEY = "atelier.vibe";
+const AUTO_REVIEW_KEY = "atelier.autoReview";
 const DEFAULTS_KEY = "atelier.composer.defaults";
 const PER_CHAT_KEY = "atelier.composer.byChat";
 /** Keys from when the picks were one global setting; read once, then dead. */
@@ -24,6 +25,15 @@ export interface ComposerPrefs {
    * Claude/Codex turn: no retrieval, impact, plan, review or memory.
    */
   systemKnowledge: boolean;
+  /**
+   * Path of the markdown file used as this chat's prompt, or "" for none.
+   *
+   * It belongs to the CHAT and survives sending: a prompt file is the
+   * instructions the conversation runs under, not a one-off attachment, so
+   * clearing it after each message meant a pick made mid-session silently
+   * stopped applying on the very next turn.
+   */
+  promptFile: string;
 }
 
 /**
@@ -52,6 +62,12 @@ function readVibe(): boolean {
   return (own ?? localStorage.getItem(VIBE_KEY)) === "1";
 }
 
+/** Reviewing your own changes is the default; only "0" turns it off. */
+function readAutoReview(): boolean {
+  const own = localStorage.getItem(scoped(AUTO_REVIEW_KEY));
+  return (own ?? localStorage.getItem(AUTO_REVIEW_KEY)) !== "0";
+}
+
 /** What a chat with no pick of its own gets — your last choice here. */
 function readDefaults(): ComposerPrefs {
   const stored =
@@ -66,6 +82,9 @@ function readDefaults(): ComposerPrefs {
         "default"),
     // Plan mode is a per-task decision; a new chat never inherits it.
     planMode: false,
+    // Nor does a new chat inherit a prompt file: it sticks where it was
+    // chosen, rather than quietly governing every conversation after it.
+    promptFile: "",
     // The pipeline is what Atelier is; bypassing it is the deliberate act.
     systemKnowledge: stored.systemKnowledge ?? true,
   };
@@ -103,6 +122,9 @@ interface PreferencesStore {
   /** Vibe Coding Mode: the agent owns the feature end to end. */
   vibe: boolean;
   setVibe: (value: boolean) => void;
+  /** Independent review pass after the changes land. */
+  autoReview: boolean;
+  setAutoReview: (value: boolean) => void;
   /** Applied to a chat that has never had a pick of its own. */
   defaults: ComposerPrefs;
   /**
@@ -130,6 +152,12 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
     set({ vibe: value });
   },
 
+  autoReview: readAutoReview(),
+  setAutoReview: (value) => {
+    localStorage.setItem(scoped(AUTO_REVIEW_KEY), value ? "1" : "0");
+    set({ autoReview: value });
+  },
+
   defaults: readDefaults(),
   byChat: readByChat(),
 
@@ -137,7 +165,12 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
     const next = projectId ?? "";
     if (next === projectScope) return;
     projectScope = next;
-    set({ vibe: readVibe(), defaults: readDefaults(), byChat: readByChat() });
+    set({
+      vibe: readVibe(),
+      autoReview: readAutoReview(),
+      defaults: readDefaults(),
+      byChat: readByChat(),
+    });
   },
 
   setComposer: (conversationId, patch) =>
@@ -145,7 +178,12 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
       // The pick also becomes the starting point for the next new chat, so
       // choosing a model still feels sticky — it just stops leaking sideways
       // into chats you already set.
-      const defaults: ComposerPrefs = { ...s.defaults, ...patch, planMode: false };
+      const defaults: ComposerPrefs = {
+        ...s.defaults,
+        ...patch,
+        planMode: false,
+        promptFile: "",
+      };
       localStorage.setItem(scoped(DEFAULTS_KEY), JSON.stringify(defaults));
       if (!conversationId) return { defaults };
       const byChat = prune({

@@ -3,7 +3,7 @@ import path from "node:path";
 import { toPosix } from "@atelier/shared";
 import type { Db } from "../../storage/db.js";
 import type { WorkspaceProfile } from "../profile/types.js";
-import { parseMentions } from "./mentions.js";
+import { parseMentions, parseTypedPaths } from "./mentions.js";
 
 /** Anchors kept per conversation — enough to re-focus, not a full history. */
 const MAX_ANCHORS = 40;
@@ -14,6 +14,14 @@ export interface SessionScope {
   roots: string[];
   /** Files this conversation has already read or edited, newest first. */
   anchors: string[];
+  /**
+   * Paths named in THIS turn that the lock would otherwise refuse. Pointing
+   * at a file is the clearest instruction a user can give, and it has to
+   * beat a lock inherited from an earlier turn — the alternative is the
+   * agent refusing to open the file the request is about. Per-turn and never
+   * persisted: it grants exactly what was named, and does not widen the lock.
+   */
+  allowed: string[];
   /** How the current roots were decided. */
   source: "mention" | "explicit" | "inherited" | "none";
   /** True when this turn's mentions changed the lock. */
@@ -23,9 +31,19 @@ export interface SessionScope {
 export const EMPTY_SCOPE: SessionScope = {
   roots: [],
   anchors: [],
+  allowed: [],
   source: "none",
   changed: false,
 };
+
+/**
+ * Atelier's own notes. They are never part of a project and so never inside
+ * a lock, which meant a locked conversation could not read — let alone
+ * update — the note that was driving it. The app writes its task reports
+ * here itself; refusing the model the same folder was never a safety
+ * property, only a way to strand the note-driven flow.
+ */
+const ALWAYS_IN_SCOPE = ".atelier/";
 
 interface ScopeRow {
   roots: string;
@@ -49,7 +67,9 @@ interface ScopeRow {
 export class SessionScopeStore {
   constructor(
     private db: Db,
-    private workspaceRoot: string
+    private workspaceRoot: string,
+    /** Grants reads for "@" mentions that land outside the workspace. */
+    private guard?: { allowRead(absPath: string): boolean }
   ) {}
 
   /**
@@ -64,12 +84,25 @@ export class SessionScopeStore {
   ): SessionScope {
     const stored = this.read(conversationId);
     const mentions = parseMentions(prompt, this.workspaceRoot);
+    // Typed without an "@": a reference grant for this turn, not a lock.
+    const allowed = parseTypedPaths(prompt, this.workspaceRoot);
 
     const mentionedRoots = new Set<string>();
     const mentionedFiles: string[] = [];
+    /** Mentioned directories the profile does not know as projects. */
+    const unownedDirs: string[] = [];
     for (const mention of mentions) {
+      // A path outside the workspace becomes a readable reference and
+      // nothing more: it is not a project, so it must never join the lock
+      // (which routes git and the directory map) or the retrieval anchors,
+      // both of which assume workspace-relative paths.
+      if (mention.outside) {
+        this.guard?.allowRead(mention.path);
+        continue;
+      }
       const owner = projectFor(mention.path, profile);
       if (owner) mentionedRoots.add(owner);
+      else if (mention.isDir) unownedDirs.push(mention.path);
       if (!mention.isDir) mentionedFiles.push(mention.path);
     }
 
@@ -77,18 +110,32 @@ export class SessionScopeStore {
     // a path at the root) is a real mention but not a lock: there is no
     // narrower world to lock to, and locking to "src" would be wrong.
     if (mentionedRoots.size > 0) {
+      // ...but once a lock IS being built, every folder named in the same
+      // breath has to be inside it. Detection is not perfect — a folder
+      // with no manifest of its own is not a "project" — and a mentioned
+      // folder falling outside the lock its own siblings created is the
+      // worst outcome available: the agent refuses to read what it was
+      // just pointed at.
+      for (const dir of unownedDirs) {
+        const covered = [...mentionedRoots].some(
+          (root) => dir === root || dir.startsWith(`${root}/`)
+        );
+        if (!covered) mentionedRoots.add(dir);
+      }
       const roots = [...mentionedRoots].sort();
       const changed = !sameRoots(roots, stored?.roots ?? []);
       const anchors = capAnchors([...mentionedFiles, ...(stored?.anchors ?? [])]);
       this.write(conversationId, roots, anchors);
-      return { roots, anchors, source: "mention", changed };
+      return { roots, anchors, allowed, source: "mention", changed };
     }
 
     if (!stored) {
-      if (mentionedFiles.length === 0) return EMPTY_SCOPE;
+      if (mentionedFiles.length === 0 && allowed.length === 0) {
+        return EMPTY_SCOPE;
+      }
       const anchors = capAnchors(mentionedFiles);
       this.write(conversationId, [], anchors);
-      return { roots: [], anchors, source: "none", changed: false };
+      return { roots: [], anchors, allowed, source: "none", changed: false };
     }
 
     const anchors = capAnchors([...mentionedFiles, ...stored.anchors]);
@@ -98,6 +145,7 @@ export class SessionScopeStore {
     return {
       roots: stored.roots,
       anchors,
+      allowed,
       source: stored.roots.length > 0 ? "inherited" : "none",
       changed: false,
     };
@@ -137,7 +185,7 @@ export class SessionScopeStore {
     const anchors = capAnchors(stored?.anchors ?? []);
     const changed = !sameRoots(roots, stored?.roots ?? []);
     this.write(conversationId, roots, anchors);
-    return { roots, anchors, source: "explicit", changed };
+    return { roots, anchors, allowed: [], source: "explicit", changed };
   }
 
   /** Records a file the agent actually touched, so follow-ups anchor to it. */
@@ -155,6 +203,8 @@ export class SessionScopeStore {
     return {
       roots: stored.roots,
       anchors: stored.anchors,
+      // A read of the stored lock, with no prompt to read grants out of.
+      allowed: [],
       source: stored.roots.length > 0 ? "inherited" : "none",
       changed: false,
     };
@@ -232,6 +282,8 @@ export function scopeGlob(scope: SessionScope): string | undefined {
 export function inScope(scope: SessionScope, relPath: string): boolean {
   if (scope.roots.length === 0) return true;
   const rel = toPosix(relPath);
+  if (rel.startsWith(ALWAYS_IN_SCOPE)) return true;
+  if (scope.allowed.includes(rel)) return true;
   return scope.roots.some(
     (root) => rel === root || rel.startsWith(`${root}/`)
   );

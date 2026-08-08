@@ -10,15 +10,6 @@ import { bridge } from "@/services/bridge-client";
 import { useConnectionStore } from "@/state/connection.store";
 import { useProvidersStore } from "@/state/providers.store";
 
-/** Providers the user can add. */
-export const ADDABLE_PROVIDERS = [
-  {
-    id: "ollama-cloud" as const,
-    label: "Ollama Cloud",
-    hint: "API key from ollama.com/settings/keys",
-  },
-];
-
 export interface ProvidersVm {
   connected: boolean;
   providers: ProviderCredential[];
@@ -78,6 +69,9 @@ export function useProvidersViewModel(): ProvidersVm {
         .rpc("providers.save", { id: id as ProviderId, ...update })
         .then(({ providers }) => {
           setProviders(providers);
+          setCatalog((prev) => without(prev, id));
+          setUsage((prev) => without(prev, id));
+          setChecks((prev) => without(prev, id));
           // New credentials mean a different model roster — tell the picker.
           useProvidersStore.getState().bump();
         })
@@ -94,11 +88,9 @@ export function useProvidersViewModel(): ProvidersVm {
       .then(({ providers }) => {
         setProviders(providers);
         useProvidersStore.getState().bump();
-        setChecks((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
+        setChecks((prev) => without(prev, id));
+        setCatalog((prev) => without(prev, id));
+        setUsage((prev) => without(prev, id));
       })
       .catch((e) => setError(errText(e)))
       .finally(() => setSaving(false));
@@ -197,4 +189,10 @@ export function useProvidersViewModel(): ProvidersVm {
 
 function errText(e: unknown): string {
   return String((e as { message?: string } | undefined)?.message ?? e);
+}
+
+function without<T>(record: Record<string, T>, id: string): Record<string, T> {
+  const next = { ...record };
+  delete next[id];
+  return next;
 }

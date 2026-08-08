@@ -2,7 +2,12 @@ import { z } from "zod";
 import { Plan, PlanStepStatus } from "./models/plan.js";
 import { Diff } from "./models/diff.js";
 import { GitFlowRequest } from "./models/git.js";
-import { DbApprovalRequest, DbApprovalResolved } from "./models/hooks.js";
+import {
+  DbApprovalRequest,
+  DbApprovalResolved,
+  NpmApprovalRequest,
+  NpmApprovalResolved,
+} from "./models/hooks.js";
 import { UsageSnapshot } from "./models/usage.js";
 import { EditImpact, ImpactRadius } from "./models/impact.js";
 import { Feature, GraphNode, Lesson, RetrievalResult } from "./models/knowledge.js";
@@ -185,6 +190,9 @@ export const eventPayloads = {
   /** A database operation is parked until the user answers in the UI. */
   "db.approval.requested": DbApprovalRequest,
   "db.approval.resolved": DbApprovalResolved,
+  /** An npm-family command is parked until the user chooses run or skip. */
+  "npm.approval.requested": NpmApprovalRequest,
+  "npm.approval.resolved": NpmApprovalResolved,
 
   // tools
   "tool.started": z.object({
@@ -209,7 +217,7 @@ export const eventPayloads = {
   // files / diffs
   "file.changed": z.object({
     path: z.string(),
-    type: z.enum(["add", "change", "unlink"]),
+    type: z.enum(["add", "change", "unlink", "addDir", "unlinkDir"]),
     source: z.enum(["user", "agent"]),
   }),
   "diff.created": Diff,
@@ -263,6 +271,16 @@ export const eventPayloads = {
   }),
 
   // task lifecycle
+  /**
+   * A send that arrived while the conversation was busy. It is already in
+   * the transcript and will start on its own when the running task ends —
+   * `position` is how many are ahead of it (1 = next).
+   */
+  "task.queued": z.object({
+    conversationId: z.string(),
+    prompt: z.string(),
+    position: z.number(),
+  }),
   "task.started": z.object({ conversationId: z.string(), prompt: z.string() }),
   "task.completed": z.object({
     conversationId: z.string(),

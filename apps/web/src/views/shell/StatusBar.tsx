@@ -39,9 +39,7 @@ export interface StatusBarProps {
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
   disconnected: "Disconnected",
   connecting: "Connecting…",
-  handshaking: "Handshaking…",
   connected: "Connected",
-  unauthorized: "Unauthorized",
 };
 
 export function StatusBar(props: StatusBarProps) {
@@ -54,23 +52,29 @@ export function StatusBar(props: StatusBarProps) {
         : "text-muted-foreground";
 
   return (
-    <div className="flex h-full items-center gap-4 px-3 text-[11px]">
+    <div
+      role="status"
+      aria-label="Workspace status"
+      className="flex h-full items-center gap-3 px-2 text-[11px]"
+    >
+      <Tooltip content={`Agent bridge: ${CONNECTION_LABEL[props.connection]}`}>
+        <span
+          className={cn(
+            "flex shrink-0 items-center gap-1.5 font-medium",
+            connOk ? "text-success" : "text-destructive"
+          )}
+        >
+          {connOk ? (
+            <PlugZap className="h-3.5 w-3.5" />
+          ) : (
+            <Plug className="h-3.5 w-3.5" />
+          )}
+          {CONNECTION_LABEL[props.connection]}
+        </span>
+      </Tooltip>
       <span
         className={cn(
-          "flex items-center gap-1.5 font-medium",
-          connOk ? "text-success" : "text-destructive"
-        )}
-      >
-        {connOk ? (
-          <PlugZap className="h-3.5 w-3.5" />
-        ) : (
-          <Plug className="h-3.5 w-3.5" />
-        )}
-        {CONNECTION_LABEL[props.connection]}
-      </span>
-      <span
-        className={cn(
-          "flex items-center gap-1.5 whitespace-nowrap font-medium",
+          "flex shrink-0 items-center gap-1.5 whitespace-nowrap font-medium",
           agentTone
         )}
       >
@@ -82,15 +86,23 @@ export function StatusBar(props: StatusBarProps) {
         />
         agent {props.agentStatus}
       </span>
+      {/*
+        Priority shedding. Everything here is real state and all of it is
+        useful, but the bar is one line and at 900px it wants more than the
+        window has. So the least durable items give way first — the transient
+        detail text, then the context pill, then the usage countdowns — which
+        keeps connection, agent state, branch and workspace visible at every
+        width instead of letting the right-hand end clip away silently.
+      */}
       {props.agentStatusDetail && (
-        <span className="truncate text-muted-foreground">
+        <span className="hidden min-w-0 truncate text-muted-foreground md:inline">
           {props.agentStatusDetail}
         </span>
       )}
       {props.branch && (
         <Tooltip content="Current branch">
-          <span className="flex min-w-0 items-center gap-1.5 font-medium text-muted-foreground">
-            <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+          <span className="flex min-w-0 shrink-0 items-center gap-1.5 font-medium text-muted-foreground">
+            <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary" />
             <span className="max-w-[160px] truncate">{props.branch}</span>
           </span>
         </Tooltip>
@@ -109,17 +121,27 @@ export function StatusBar(props: StatusBarProps) {
                 lastIndexedAt={props.lastIndexedAt}
               />
             )}
-            <span
-              className={cn(
-                "flex min-w-0 items-center gap-1.5 text-muted-foreground",
-                !showSync && "ml-auto"
-              )}
-            >
-              <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">
-                {props.workspaceRoot ?? "no workspace"}
+            {/*
+              shrink-0 with a capped width, not the flexible item: in a narrow
+              window the flexible item is squeezed first, and this one used to
+              be it — the workspace you are in vanished from the bar while the
+              transient agent-status text kept its space. The detail text is
+              the one that gives way now.
+            */}
+            <Tooltip content={props.workspaceRoot ?? "No workspace attached"}>
+              <span
+                className={cn(
+                  "flex shrink-0 items-center gap-1.5 text-muted-foreground",
+                  !showSync && "ml-auto"
+                )}
+              >
+                <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                {/* Tail-truncated: the deep end of a path identifies it. */}
+                <span className="max-w-[220px] truncate [direction:rtl] [text-align:left]">
+                  {props.workspaceRoot ?? "no workspace"}
+                </span>
               </span>
-            </span>
+            </Tooltip>
           </>
         );
       })()}
@@ -237,7 +259,7 @@ function UsagePill({ usage }: { usage: UsageVm }) {
 
   if (!usage.available || usage.windows.length === 0) return null;
   return (
-    <span className="flex shrink-0 items-center gap-3">
+    <span className="hidden shrink-0 items-center gap-3 md:flex">
       <GaugeCircle className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       {usage.windows.map((w) => (
         <UsageBar key={w.kind} window={w} now={now} />
@@ -260,8 +282,10 @@ function UsagePill({ usage }: { usage: UsageVm }) {
 /** One window: label, a fill bar of % used, the %, and a live countdown. */
 function UsageBar({ window: w, now }: { window: UsageWindow; now: number }) {
   const used = Math.round(w.utilization);
+  // Semantic, not decorative: the bar changes meaning at these thresholds, so
+  // it uses the shared danger/warning tokens rather than a one-off amber.
   const fill =
-    used >= 90 ? "bg-destructive" : used >= 70 ? "bg-amber-500" : "bg-primary";
+    used >= 90 ? "bg-destructive" : used >= 70 ? "bg-warning" : "bg-primary";
   const remaining = w.resetsAt != null ? w.resetsAt - now : null;
   return (
     <Tooltip
@@ -279,7 +303,7 @@ function UsageBar({ window: w, now }: { window: UsageWindow; now: number }) {
         </span>
         <span className="tabular-nums text-muted-foreground">{used}%</span>
         {remaining != null && (
-          <span className="tabular-nums text-muted-foreground/60">
+          <span className="hidden tabular-nums text-muted-foreground/60 xl:inline">
             · {formatCountdown(remaining)}
           </span>
         )}
@@ -323,8 +347,8 @@ function ContextPill({ stats }: { stats: ContextStatsVm }) {
     (cacheShare !== null ? ` · session cache share ${cacheShare}%` : "");
   return (
     <Tooltip content={tip}>
-      <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
-        <Layers className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+      <span className="hidden shrink-0 items-center gap-1.5 text-muted-foreground lg:flex">
+        <Layers className="h-3.5 w-3.5 shrink-0 text-primary" />
         <span className="tabular-nums">
           ctx {fmtTokens(last.appendTokens)}
         </span>

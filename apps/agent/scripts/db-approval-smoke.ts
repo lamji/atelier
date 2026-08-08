@@ -15,6 +15,8 @@ import {
   DbApprovalGuard,
   DB_APPROVAL_HOOK_ID,
   DB_APPROVAL_HOOK_NAME,
+  NPM_APPROVAL_HOOK_ID,
+  NPM_APPROVAL_HOOK_NAME,
 } from "../src/hooks/db-approval-guard.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 
@@ -29,9 +31,15 @@ const DB_COMMANDS = [
   'sqlite3 app.db "DROP TABLE sessions"',
 ];
 
-const SAFE_COMMANDS = [
+const NPM_COMMANDS = [
   "pnpm build",
-  "pnpm typecheck",
+  "npm test",
+  "yarn lint",
+  "bun install",
+  "npm install && npm run build",
+];
+
+const SAFE_COMMANDS = [
   'rg "DELETE FROM users" src',
   "git status --short",
   "node scripts/report.mjs",
@@ -41,13 +49,21 @@ async function main(): Promise<void> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-dbsmoke-"));
   const db = openDb(dataDir);
   const bus = new EventBus();
-  const requested: Array<{ id: string; operation: string }> = [];
+  const requested: Array<{ id: string; operation: string; kind: string }> = [];
   const resolved: Array<{ id: string; outcome: string }> = [];
   bus.subscribe((e) => {
-    if (e.topic === "db.approval.requested") {
-      requested.push(e.payload as { id: string; operation: string });
+    if (
+      e.topic === "db.approval.requested" ||
+      e.topic === "npm.approval.requested"
+    ) {
+      requested.push(
+        e.payload as { id: string; operation: string; kind: string }
+      );
     }
-    if (e.topic === "db.approval.resolved") {
+    if (
+      e.topic === "db.approval.resolved" ||
+      e.topic === "npm.approval.resolved"
+    ) {
       resolved.push(e.payload as { id: string; outcome: string });
     }
   });
@@ -64,6 +80,16 @@ async function main(): Promise<void> {
   });
   const guard = new DbApprovalGuard(bus);
   hooks.registerGuard(DB_APPROVAL_HOOK_ID, (ctx) => guard.check(ctx));
+  hooks.ensureBuiltin({
+    id: NPM_APPROVAL_HOOK_ID,
+    name: NPM_APPROVAL_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "run_terminal",
+    action: "block",
+    argument: "Package commands need the user's approval",
+  });
+  hooks.registerGuard(NPM_APPROVAL_HOOK_ID, (ctx) => guard.check(ctx));
 
   const registry = new ToolRegistry(bus);
   registry.setGate(hooks);
@@ -112,7 +138,18 @@ async function main(): Promise<void> {
     );
   }
 
-  // 2. Ordinary commands are never held.
+  // 2. Every npm-family command parks and runs only once approved.
+  for (const command of NPM_COMMANDS) {
+    const before = ran;
+    const { parked, blocked } = await runWithAnswer(command, true, abort.signal);
+    check(
+      `parks + approves npm: ${command.slice(0, 46)}`,
+      parked && !blocked && ran === before + 1,
+      `parked=${parked} blocked=${blocked}`
+    );
+  }
+
+  // 3. Ordinary commands are never held.
   for (const command of SAFE_COMMANDS) {
     const before = ran;
     const { parked, blocked } = await runWithAnswer(command, null, abort.signal);
@@ -123,7 +160,7 @@ async function main(): Promise<void> {
     );
   }
 
-  // 3. Deny refuses the call and the command never runs.
+  // 4. Deny refuses the call and the command never runs.
   const beforeDenied = ran;
   const denied = await runWithAnswer("psql -c 'drop table users'", false, abort.signal);
   check(
@@ -132,7 +169,7 @@ async function main(): Promise<void> {
     `blocked=${denied.blocked} ran=${ran - beforeDenied}`
   );
 
-  // 4. Cancelling the task stops the wait and refuses.
+  // 5. Cancelling the task stops the wait and refuses.
   const cancel = new AbortController();
   const cancelled = registry
     .run("run_terminal", { command: "pnpm prisma migrate dev" }, "t-db", cancel.signal)
@@ -147,15 +184,15 @@ async function main(): Promise<void> {
     resolved.map((r) => r.outcome).join(",")
   );
 
-  // 5. Answering twice is a no-op the UI can report.
+  // 6. Answering twice is a no-op the UI can report.
   const stale = guard.resolve("dbapp-does-not-exist", true);
   check("resolving an unknown id returns false", stale === false);
 
-  // 6. Disabling the hook in the panel restores unattended DB work.
+  // 7. Disabling the hook in the panel restores unattended DB work.
   const builtin = hooks.list().find((h) => h.id === DB_APPROVAL_HOOK_ID);
   if (builtin) hooks.save({ ...builtin, enabled: false });
   const beforeOff = ran;
-  const off = await runWithAnswer("pnpm prisma migrate deploy", null, abort.signal);
+  const off = await runWithAnswer("psql -c 'select 1'", null, abort.signal);
   check(
     "disabled hook no longer parks",
     !off.parked && !off.blocked && ran === beforeOff + 1

@@ -10,8 +10,12 @@ export type RightTab =
   | "graph"
   | "rag";
 
-/** Tabs of the collapsible bottom dock (terminal + execution timeline). */
-export type BottomTab = "terminal" | "timeline";
+/*
+ * The bottom dock hosts the integrated terminal and nothing else. The
+ * execution timeline used to be a second tab down there; it is a full-height
+ * feed rather than a terminal, so it lives in the editor area's Activity pane
+ * and the dock's bar is free to be the terminal tab strip.
+ */
 
 interface WorkspaceStore {
   /** Which left panel the activity rail shows. Lives here (not in
@@ -24,6 +28,8 @@ interface WorkspaceStore {
   fileContent: string | null;
   fileMtime: number | null;
   rightTab: RightTab;
+  /** The header's Chat / Editor / Terminal / Activity workbench. */
+  workbenchVisible: boolean;
   /**
    * Bumped every time the app re-points at a different project. Anything
    * holding workspace-scoped state OUTSIDE a store (React local state, refs)
@@ -31,20 +37,23 @@ interface WorkspaceStore {
    * workspace must never reach the new one.
    */
   workspaceEpoch: number;
-  /** Whether the bottom dock (terminal / timeline) is expanded. */
+  /** Whether the bottom dock (the integrated terminal) is expanded. */
   bottomPanel: boolean;
-  bottomTab: BottomTab;
   skillDetail: { command: SlashCommand; content: string } | null;
   setActivityView: (view: ActivityView) => void;
   setBottomPanel: (open: boolean) => void;
-  openBottom: (tab: BottomTab) => void;
+  openBottom: () => void;
   setTree: (tree: FileTreeNode) => void;
   bumpTreeVersion: () => void;
   toggleExpanded: (path: string) => void;
+  /** Expands a directory and every ancestor of it. */
+  expandPath: (path: string) => void;
+  collapseAll: () => void;
   setSelectedFile: (path: string, content: string, mtime: number) => void;
   refreshSelectedFile: (content: string, mtime: number) => void;
   clearSelected: () => void;
   setRightTab: (tab: RightTab) => void;
+  setWorkbenchVisible: (visible: boolean) => void;
   openSkillDetail: (detail: { command: SlashCommand; content: string }) => void;
   closeSkillDetail: () => void;
 }
@@ -58,14 +67,14 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   fileContent: null,
   fileMtime: null,
   rightTab: "chat",
+  workbenchVisible: false,
   workspaceEpoch: 0,
   bottomPanel: false,
-  bottomTab: "terminal",
   skillDetail: null,
 
   setActivityView: (activityView) => set({ activityView }),
   setBottomPanel: (bottomPanel) => set({ bottomPanel }),
-  openBottom: (bottomTab) => set({ bottomPanel: true, bottomTab }),
+  openBottom: () => set({ bottomPanel: true }),
   setTree: (tree) => set({ tree }),
   bumpTreeVersion: () => set((s) => ({ treeVersion: s.treeVersion + 1 })),
   toggleExpanded: (path) =>
@@ -75,6 +84,16 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
       else expanded.add(path);
       return { expanded };
     }),
+  expandPath: (path) =>
+    set((s) => {
+      const expanded = new Set(s.expanded);
+      const segments = path.split("/").filter(Boolean);
+      for (let i = 1; i <= segments.length; i++) {
+        expanded.add(segments.slice(0, i).join("/"));
+      }
+      return { expanded };
+    }),
+  collapseAll: () => set({ expanded: new Set<string>() }),
   setSelectedFile: (selectedPath, fileContent, fileMtime) =>
     set({ selectedPath, fileContent, fileMtime, rightTab: "editor" }),
   refreshSelectedFile: (fileContent, fileMtime) =>
@@ -82,6 +101,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   clearSelected: () =>
     set({ selectedPath: null, fileContent: null, fileMtime: null }),
   setRightTab: (rightTab) => set({ rightTab }),
+  setWorkbenchVisible: (workbenchVisible) => set({ workbenchVisible }),
   openSkillDetail: (skillDetail) => set({ skillDetail, rightTab: "chat" }),
   closeSkillDetail: () => set({ skillDetail: null, rightTab: "chat" }),
 }));

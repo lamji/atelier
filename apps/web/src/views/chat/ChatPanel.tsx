@@ -2,7 +2,7 @@ import { memo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { DiffEditor } from "@monaco-editor/react";
+import { MonacoDiff } from "@/components/MonacoDiff";
 import {
   BrainCircuit,
   Check,
@@ -607,7 +607,7 @@ const DiffCard = memo(function DiffCard({
           {diff.path}
         </span>
         <span className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
-          {added > 0 && <span className="text-emerald-500">+{added}</span>}
+          {added > 0 && <span className="text-success">+{added}</span>}
           {removed > 0 && <span className="text-destructive">−{removed}</span>}
         </span>
         <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/60">
@@ -619,7 +619,7 @@ const DiffCard = memo(function DiffCard({
           className="mt-2 overflow-hidden rounded-xl border border-white/10"
           style={{ height: diffHeight(diff.before, diff.after) }}
         >
-          <DiffEditor
+          <MonacoDiff
             original={diff.before}
             modified={diff.after}
             language={languageForPath(diff.path)}

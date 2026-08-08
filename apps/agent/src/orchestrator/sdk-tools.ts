@@ -4,6 +4,7 @@ import {
   type McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import type { ImageAttachment } from "@atelier/protocol";
 import type { ToolRegistry } from "../tools/registry.js";
 import { shapeToolOutput } from "../context/tool-output/index.js";
 
@@ -32,7 +33,9 @@ function asText(
  */
 export function createAtelierMcpServer(
   registry: ToolRegistry,
-  getContext: () => SdkToolContext
+  getContext: () => SdkToolContext,
+  /** Reads back an image this conversation attached, for `view_image`. */
+  loadImage?: (path: string) => ImageAttachment | null
 ): McpSdkServerConfigWithInstance {
   const run = async (name: string, input: unknown) => {
     const ctx = getContext();
@@ -369,6 +372,44 @@ export function createAtelierMcpServer(
         timeoutMs: z.number().optional(),
       },
       (input) => run("run_terminal", input)
+    ),
+    tool(
+      "view_image",
+      "Look at an image attached earlier in this conversation, by the path " +
+        "given in the context or in session memory. Returns the picture " +
+        "itself. Call it whenever the request refers to something that was " +
+        "shown rather than written — a screenshot, a mockup, a diagram, " +
+        "'the image', 'the error above' — instead of answering from an " +
+        "earlier description of it. If the picture carries a drawn mark " +
+        "(box, arrow, circle, highlight), that mark is the subject of the " +
+        "request: say in one line what you read it as pointing at.",
+      { path: z.string().describe("Path of the attachment, as given to you") },
+      async (input: { path: string }) => {
+        const image = loadImage?.(input.path) ?? null;
+        if (!image) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `No attachment at ${input.path}. Use a path exactly as ` +
+                  "given in the context; do not guess one.",
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            {
+              type: "image" as const,
+              data: image.data,
+              mimeType: image.mediaType,
+            },
+          ],
+        };
+      },
+      { annotations: { readOnlyHint: true } }
     ),
   ];
 

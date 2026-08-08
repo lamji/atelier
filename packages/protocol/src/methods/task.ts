@@ -23,6 +23,11 @@ export const taskMethods = {
       /** Vibe coding: autonomous product-builder mode for this task. */
       vibe: z.boolean().optional(),
       /**
+       * Independent review stage after the changes land. Omitted means yes;
+       * `false` skips review (and its repair rounds) for this task.
+       */
+      autoReview: z.boolean().optional(),
+      /**
        * Run this task through Atelier's knowledge engine — retrieval,
        * impact, plan, review, session memory. Omitted means yes; `false`
        * bypasses the pipeline for a plain Claude/Codex turn.
@@ -39,7 +44,16 @@ export const taskMethods = {
        *  the task, and the run's report is appended to it when it ends. */
       promptFile: z.string().optional(),
     }),
-    result: z.object({ taskId: z.string() }),
+    result: z.object({
+      taskId: z.string(),
+      /**
+       * The conversation was busy, so this turn is queued behind the
+       * running one rather than started. It is persisted and will emit
+       * task.started by itself; the composer must not mark the session
+       * busy on this id.
+       */
+      queued: z.boolean().default(false),
+    }),
   },
   "task.cancel": {
     params: z.object({ taskId: z.string() }),

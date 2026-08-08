@@ -24,6 +24,10 @@ export function registerTerminalHandlers(
     return {};
   });
 
+  router.register("terminal.interrupt", async (params) => ({
+    killed: await terminals.interrupt(params.termId),
+  }));
+
   router.register("terminal.list", () => ({ sessions: terminals.list() }));
 
   router.register("terminal.getHistory", (params) => ({

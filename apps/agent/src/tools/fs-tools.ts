@@ -32,16 +32,36 @@ export function registerFsTools(
       }
     ) => {
       const requested = input.files.slice(0, 20);
+      // One bad path must not throw away the other nineteen reads. It used
+      // to: a single rejection failed the whole Promise.all, the model got
+      // an error instead of the files that were there, and it re-read the
+      // entire batch. Each file now reports its own outcome.
+      const results = await Promise.all(
+        requested.map(async (file) => {
+          try {
+            return {
+              path: file.path,
+              ...(await files.readFile(file.path, {
+                offset: file.offset,
+                limit: file.limit,
+              })),
+            };
+          } catch (error) {
+            return {
+              path: file.path,
+              error: String(await withSiblings(files, file.path, error)),
+            };
+          }
+        })
+      );
+      const failed = results.filter((entry) => "error" in entry).length;
       return {
-        files: await Promise.all(
-          requested.map(async (file) => ({
-            path: file.path,
-            ...(await files.readFile(file.path, {
-              offset: file.offset,
-              limit: file.limit,
-            })),
-          }))
-        ),
+        files: results,
+        // Stated outright so the model reads the successes rather than
+        // treating a partial batch as a failed call.
+        ...(failed > 0
+          ? { note: `${results.length - failed} read, ${failed} failed` }
+          : {}),
       };
     }
   );

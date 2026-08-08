@@ -1,5 +1,8 @@
-import { BookOpen, Loader2, Plus } from "lucide-react";
+import { useState } from "react";
+import { BookOpen, FileDown, Loader2, Plus } from "lucide-react";
 import type { MarkdownStatus } from "@atelier/protocol";
+import { bridge } from "@/services/bridge-client";
+import { exportMarkdownToPdf } from "@/lib/markdown-pdf";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -17,9 +20,9 @@ const STATUS_OPTIONS = [
 /** Badge tint per status; /15 backgrounds hold up in both themes. */
 const STATUS_BADGE: Record<MarkdownStatus, string> = {
   todo: "bg-muted-foreground/15 text-muted-foreground",
-  "in-progress": "bg-blue-500/15 text-blue-500",
-  review: "bg-amber-500/15 text-amber-500",
-  done: "bg-emerald-500/15 text-emerald-500",
+  "in-progress": "bg-cyan/15 text-cyan",
+  review: "bg-warning/15 text-warning",
+  done: "bg-success/15 text-success",
 };
 
 export interface MarkdownPanelProps {
@@ -33,9 +36,30 @@ export interface MarkdownPanelProps {
  * composer's prompt-file dropdown.
  */
 export function MarkdownPanel({ vm, onOpenFile }: MarkdownPanelProps) {
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
   const submit = async () => {
     const created = await vm.create();
     if (created) onOpenFile(created);
+  };
+
+  /**
+   * Exports the file as a PDF. The content is read at click time rather
+   * than held in the list: the catalog carries titles and blurbs, and the
+   * body may have changed in the editor since it was listed.
+   */
+  const exportPdf = async (path: string, title: string) => {
+    setExporting(path);
+    setExportError(null);
+    try {
+      const file = await bridge.rpc("fs.readFile", { path });
+      await exportMarkdownToPdf(file.content, title || path);
+    } catch (e) {
+      setExportError(String((e as { message?: string })?.message ?? e));
+    } finally {
+      setExporting(null);
+    }
   };
 
   return (
@@ -82,6 +106,12 @@ export function MarkdownPanel({ vm, onOpenFile }: MarkdownPanelProps) {
         </div>
       )}
 
+      {exportError && (
+        <p className="rounded-lg bg-destructive/10 px-2.5 py-2 text-[11px] text-destructive">
+          {exportError}
+        </p>
+      )}
+
       <div className="min-h-0 flex-1">
         {vm.files.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/60">
@@ -111,6 +141,21 @@ export function MarkdownPanel({ vm, onOpenFile }: MarkdownPanelProps) {
                       {file.path}
                     </span>
                   </button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    title="Export as PDF"
+                    disabled={!vm.connected || exporting === file.path}
+                    onClick={() => void exportPdf(file.path, file.title)}
+                    className="!h-5 !w-5 shrink-0 text-muted-foreground hover:text-foreground"
+                  >
+                    {exporting === file.path ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <FileDown className="h-3 w-3" />
+                    )}
+                  </Button>
                   <Select
                     value={file.status}
                     onChange={(v) =>

@@ -187,6 +187,7 @@ export class HooksEngine {
         );
         const result = await execa(hook.argument, {
           shell: true,
+          windowsHide: true,
           cwd: this.workspaceRoot,
           timeout: RUN_COMMAND_TIMEOUT_MS,
           reject: false,

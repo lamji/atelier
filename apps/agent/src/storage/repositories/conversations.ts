@@ -34,6 +34,43 @@ export class ConversationRepo {
       .run(title, Date.now(), id);
   }
 
+  /**
+   * Delete a conversation and everything hanging off it.
+   *
+   * Order matters: foreign_keys is ON and the child tables declare plain
+   * REFERENCES with no ON DELETE CASCADE, so the parent row can only go
+   * once its children are gone. The context tables carry no FK but are
+   * keyed by conversation, and leaving their rows behind would let a
+   * deleted chat keep suppressing chunks (dedup) in a later one.
+   */
+  remove(id: string): boolean {
+    const drop = this.db.transaction((convId: string) => {
+      const taskIds = (
+        this.db
+          .prepare("SELECT id FROM tasks WHERE conversation_id = ?")
+          .all(convId) as Array<{ id: string }>
+      ).map((r) => r.id);
+      const dropTimeline = this.db.prepare(
+        "DELETE FROM timeline WHERE task_id = ?"
+      );
+      for (const taskId of taskIds) dropTimeline.run(taskId);
+      this.db
+        .prepare("DELETE FROM chat_messages WHERE conversation_id = ?")
+        .run(convId);
+      this.db.prepare("DELETE FROM tasks WHERE conversation_id = ?").run(convId);
+      this.db
+        .prepare("DELETE FROM context_requests WHERE conversation_id = ?")
+        .run(convId);
+      this.db
+        .prepare("DELETE FROM context_sent_chunks WHERE conversation_id = ?")
+        .run(convId);
+      return this.db
+        .prepare("DELETE FROM conversations WHERE id = ?")
+        .run(convId).changes;
+    });
+    return drop(id) > 0;
+  }
+
   setSdkSessionId(id: string, sdkSessionId: string): void {
     this.db
       .prepare(
@@ -100,6 +137,16 @@ export class ConversationRepo {
           "VALUES(?, ?, ?, ?, ?, ?)"
       )
       .run(task.id, task.conversationId, task.prompt, task.status, task.startedAt, task.endedAt);
+  }
+
+  /**
+   * Moves a queued task into `running` and re-stamps its start time, so the
+   * elapsed counter measures the run and not how long it waited in line.
+   */
+  startTask(taskId: string, startedAt: number): void {
+    this.db
+      .prepare("UPDATE tasks SET status = 'running', started_at = ? WHERE id = ?")
+      .run(startedAt, taskId);
   }
 
   updateTaskStatus(taskId: string, status: TaskStatus, endedAt?: number): void {

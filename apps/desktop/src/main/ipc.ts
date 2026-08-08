@@ -1,4 +1,5 @@
 import { BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { writeFile } from "node:fs/promises";
 import { IPC_CHANNELS } from "../shared/ipc-contract";
 
 const EXTERNAL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
@@ -28,6 +29,27 @@ export function registerIpcHandlers(): void {
     await shell.openExternal(url);
   });
 
+  ipcMain.handle(
+    IPC_CHANNELS.exportPdf,
+    async (event, html: unknown, suggestedName: unknown) => {
+      if (typeof html !== "string") return null;
+      const parent = BrowserWindow.fromWebContents(event.sender);
+      const name =
+        typeof suggestedName === "string" && suggestedName ? suggestedName : "export";
+      const options = {
+        title: "Export PDF",
+        defaultPath: `${name}.pdf`,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      };
+      const target = parent
+        ? await dialog.showSaveDialog(parent, options)
+        : await dialog.showSaveDialog(options);
+      if (target.canceled || !target.filePath) return null;
+      await writePdf(html, target.filePath);
+      return target.filePath;
+    }
+  );
+
   ipcMain.on(IPC_CHANNELS.windowMinimize, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
   });
@@ -48,6 +70,36 @@ export function registerIpcHandlers(): void {
       BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
     );
   });
+}
+
+/**
+ * Prints an HTML document to a PDF file through an offscreen window.
+ *
+ * The window is hidden, sandboxed, and loaded from a data: URL with no
+ * node integration: the HTML is rendered markdown, and rendering it in
+ * the app's own window would give document content a foothold there.
+ */
+async function writePdf(html: string, filePath: string): Promise<void> {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      offscreen: true,
+      sandbox: true,
+      nodeIntegration: false,
+      contextIsolation: true,
+      javascript: false,
+    },
+  });
+  try {
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const pdf = await win.webContents.printToPDF({
+      printBackground: true,
+      margins: { top: 0.6, bottom: 0.6, left: 0.6, right: 0.6 },
+    });
+    await writeFile(filePath, pdf);
+  } finally {
+    win.destroy();
+  }
 }
 
 /** Forward maximize/unmaximize to the renderer for the titlebar icon. */

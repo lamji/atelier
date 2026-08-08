@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence } from "framer-motion";
 import {
   Panel,
@@ -10,9 +10,9 @@ import { HeaderBar } from "./HeaderBar";
 import { TitleBar } from "./TitleBar";
 import { BottomPanel } from "./BottomPanel";
 import { ActivityBar, type ActivityView } from "./ActivityBar";
+import { CommandPalette } from "./CommandPalette";
+import { EditorTabBar } from "./EditorTabBar";
 import { StatusBar } from "./StatusBar";
-import { ConnectionGate } from "./ConnectionGate";
-import { WelcomeScreen } from "./WelcomeScreen";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
@@ -29,7 +29,6 @@ import { RightDock } from "@/views/right/RightDock";
 import { useTerminalViewModel } from "@/hooks/useTerminalViewModel";
 import { useSessionsViewModel } from "@/hooks/useSessionsViewModel";
 import { useConnectionViewModel } from "@/hooks/useConnectionViewModel";
-import { useConnectionGateViewModel } from "@/hooks/useConnectionGateViewModel";
 import { useTimelineViewModel } from "@/hooks/useTimelineViewModel";
 import { useFileExplorerViewModel } from "@/hooks/useFileExplorerViewModel";
 import { useEditorViewModel } from "@/hooks/useEditorViewModel";
@@ -41,6 +40,7 @@ import { useMarkdownViewModel } from "@/hooks/useMarkdownViewModel";
 import { useDbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
 import { useUsageViewModel } from "@/hooks/useUsageViewModel";
 import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
+import { useCommandRegistry } from "@/hooks/useCommandRegistry";
 import { bridge } from "@/services/bridge-client";
 import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
@@ -59,7 +59,6 @@ export function AppShell() {
   const setActiveView = useWorkspaceStore((s) => s.setActivityView);
   const { theme, toggle } = useThemeStore();
   const connection = useConnectionViewModel();
-  const gate = useConnectionGateViewModel();
   const sessions = useSessionsViewModel();
   const timeline = useTimelineViewModel();
   const explorer = useFileExplorerViewModel();
@@ -76,11 +75,23 @@ export function AppShell() {
   const skillDetail = useWorkspaceStore((s) => s.skillDetail);
   const closeSkillDetail = useWorkspaceStore((s) => s.closeSkillDetail);
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
+  // Same live git state the status bar reads, badged onto the Source Control
+  // rail icon so pending changes are visible without opening the view.
+  const changedCount = useGitStore(
+    (s) => s.live?.changedFiles ?? s.status?.files.length ?? 0
+  );
   const bottomOpen = useWorkspaceStore((s) => s.bottomPanel);
-  const bottomTab = useWorkspaceStore((s) => s.bottomTab);
   const setBottomPanel = useWorkspaceStore((s) => s.setBottomPanel);
   const openBottom = useWorkspaceStore((s) => s.openBottom);
+  const workbenchVisible = useWorkspaceStore((s) => s.workbenchVisible);
+  const setWorkbenchVisible = useWorkspaceStore(
+    (s) => s.setWorkbenchVisible
+  );
   const bottomRef = useRef<ImperativePanelHandle>(null);
+  const [palette, setPalette] = useState<{ open: boolean; query: string }>({
+    open: false,
+    query: "",
+  });
 
   // The panel is the source of truth for its size; the store drives
   // expand/collapse so anything (header tab, Ctrl+`) can toggle it.
@@ -95,26 +106,39 @@ export function AppShell() {
     if (!bottomOpen && !panel.isCollapsed()) panel.collapse();
   }, [bottomOpen]);
 
-  // Ctrl+` toggles the bottom dock, VS Code style.
+  // Ctrl+` toggles the bottom dock; Ctrl+P / Ctrl+Shift+P open the palette in
+  // its file and command modes. All VS Code conventions.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.key === "`") {
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && event.key === "`") {
         event.preventDefault();
         useWorkspaceStore.setState((s) => ({ bottomPanel: !s.bottomPanel }));
+        return;
+      }
+      // Ctrl+P is the browser print dialog until we claim it, and inside
+      // Electron it is ours to claim — EXCEPT over the terminal, where
+      // Ctrl+P is readline's "previous command" and belongs to the shell.
+      if (mod && (event.key === "p" || event.key === "P")) {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest?.(".xterm")) return;
+        event.preventDefault();
+        setPalette({ open: true, query: event.shiftKey ? ">" : "" });
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Header Terminal/Activity tabs drive the bottom dock; clicking the
-  // already-active one collapses it. Other tabs switch the main view as
-  // before.
+  /*
+   * "terminal" toggles the bottom dock; everything else is an editor-area
+   * pane, Activity (the execution timeline) included — it moved out of the
+   * bottom dock so that dock's bar could become the terminal tab strip.
+   */
   const selectHeaderTab = (tab: Parameters<typeof editor.setRightTab>[0]) => {
-    if (tab === "terminal" || tab === "activity") {
-      const target = tab === "terminal" ? "terminal" : "timeline";
-      if (bottomOpen && bottomTab === target) setBottomPanel(false);
-      else openBottom(target);
+    if (tab === "terminal") {
+      if (bottomOpen) setBottomPanel(false);
+      else openBottom();
       return;
     }
     editor.setRightTab(tab);
@@ -149,15 +173,11 @@ export function AppShell() {
         selectedId={sessions.selectedId}
         onSelect={sessions.selectSession}
         onCreate={() => void sessions.createSession()}
+        onRename={sessions.renameSession}
+        onDelete={(id) => void sessions.deleteSession(id)}
       />
     ) : activeView === "explorer" ? (
-      <FileTreePanel
-        tree={explorer.tree}
-        expanded={explorer.expanded}
-        selectedPath={explorer.selectedPath}
-        onToggleDir={explorer.toggleDir}
-        onOpenFile={(path) => void explorer.openFile(path)}
-      />
+      <FileTreePanel vm={explorer} />
     ) : activeView === "markdown" ? (
       <MarkdownPanel
         vm={markdownVm}
@@ -190,44 +210,102 @@ export function AppShell() {
     [sessions.error]
   );
 
+  /*
+   * Command sources. Every entry is the SAME callback the corresponding button
+   * already invokes, so the palette can never drift from the UI: memoized
+   * because useCommandRegistry keys its list off this object's identity.
+   */
+  const commandSources = useMemo(
+    () => ({
+      createSession: () => void sessions.createSession(),
+      createTerminal: () => {
+        // Open the dock first, or the new terminal is created into a panel
+        // the user cannot see.
+        openBottom();
+        void terminal.create();
+      },
+      openTerminalPanel: () => openBottom(),
+      refreshExplorer: explorer.refresh,
+      collapseFolders: explorer.collapseAll,
+      refreshGit: git.refresh,
+      openFile: (path: string) => void explorer.openFile(path),
+    }),
+    [
+      explorer.collapseAll,
+      explorer.openFile,
+      explorer.refresh,
+      git.refresh,
+      openBottom,
+      sessions,
+      terminal,
+    ]
+  );
+  const commands = useCommandRegistry(commandSources);
+
   const headerBar = (
     <HeaderBar
       workingCount={sessions.workingCount}
       rightTab={editor.rightTab}
       terminalCount={terminal.sessions.length}
+      workbenchVisible={workbenchVisible}
+      bottomOpen={bottomOpen}
       onSelectTab={selectHeaderTab}
+      onToggleWorkbench={() => setWorkbenchVisible(!workbenchVisible)}
+      onOpenCommands={(query) => setPalette({ open: true, query })}
     />
   );
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="flex h-full flex-col overflow-hidden bg-background">
       {isDesktop() ? (
         <TitleBar>{headerBar}</TitleBar>
       ) : (
-        <div className="h-[var(--titlebar-h)] shrink-0 border-b border-border bg-card">
+        <div className="h-[var(--titlebar-h)] shrink-0 border-b border-border bg-titlebar">
           {headerBar}
         </div>
       )}
       <div className="flex min-h-0 flex-1">
-        <div className="w-[var(--activitybar-w)] shrink-0 border-r border-border bg-card">
+        <div className="w-[var(--activitybar-w)] shrink-0 border-r border-border bg-activity">
           <ActivityBar
             active={activeView}
             theme={theme}
+            workingCount={sessions.workingCount}
+            changedCount={changedCount}
             onSelect={setActiveView}
             onToggleTheme={toggle}
           />
         </div>
         <PanelGroup direction="horizontal" className="min-w-0 flex-1">
-          <Panel defaultSize={22} minSize={15}>
-            <div className="h-full border-r border-border bg-card">
+          {/*
+           * Primary sidebar. `minSize` in percent would let the sidebar be
+           * squeezed to unreadable at small window widths, so it is floored in
+           * pixels too — below ~190px the tree indentation and the header
+           * actions stop fitting.
+           */}
+          <Panel
+            defaultSize={22}
+            minSize={14}
+            maxSize={40}
+            className="min-w-[190px]"
+          >
+            <div className="h-full overflow-hidden border-r border-border bg-sidebar">
               {leftPanel}
             </div>
           </Panel>
-          <PanelResizeHandle className="w-[3px] bg-transparent transition-colors hover:bg-primary/40 data-[resize-handle-active]:bg-primary/60" />
-          <Panel defaultSize={78} minSize={40}>
+          <PanelResizeHandle className="resize-handle w-[3px]" />
+          <Panel defaultSize={78} minSize={35} className="min-w-[360px]">
             <PanelGroup direction="vertical">
-              <Panel defaultSize={72} minSize={30}>
-                <div className={cn("relative h-full", busy && "glow-working")}>
+              {/* 100, not 72: the bottom dock starts collapsed at 0, so the
+                  editor owns the whole column until the dock is opened. The
+                  old 72/0 pair summed to 72% and react-resizable-panels
+                  normalised it away with a console warning on every mount. */}
+              <Panel defaultSize={100} minSize={25}>
+                <div
+                  className={cn(
+                    "relative flex h-full flex-col bg-editor",
+                    busy && "glow-working"
+                  )}
+                >
                   <AnimatePresence>
                     {showIndexingWelcome && (
                       <IndexingWelcome
@@ -236,24 +314,35 @@ export function AppShell() {
                       />
                     )}
                   </AnimatePresence>
-                  <RightDock
-                    rightTab={editor.rightTab}
-                    chatPane={chatPane}
-                    skillDetail={skillDetail}
-                    onCloseSkillDetail={closeSkillDetail}
-                    selectedPath={editor.selectedPath}
-                    fileContent={editor.fileContent}
-                    language={editor.language}
-                    monacoTheme={editor.monacoTheme}
-                    gitDiff={git.gitDiff}
-                    onCloseGitDiff={git.closeDiff}
-                    knowledgeVm={knowledge}
-                    ragVm={rag}
-                    appTheme={theme}
-                  />
+                  {workbenchVisible && (
+                    <EditorTabBar
+                      rightTab={editor.rightTab}
+                      selectedPath={editor.selectedPath}
+                      diffPath={git.gitDiff?.path ?? null}
+                      onSelectTab={selectHeaderTab}
+                    />
+                  )}
+                  <div className="relative min-h-0 flex-1">
+                    <RightDock
+                      rightTab={editor.rightTab}
+                      chatPane={chatPane}
+                      skillDetail={skillDetail}
+                      onCloseSkillDetail={closeSkillDetail}
+                      selectedPath={editor.selectedPath}
+                      fileContent={editor.fileContent}
+                      language={editor.language}
+                      monacoTheme={editor.monacoTheme}
+                      gitDiff={git.gitDiff}
+                      onCloseGitDiff={git.closeDiff}
+                      knowledgeVm={knowledge}
+                      ragVm={rag}
+                      appTheme={theme}
+                      timelineEntries={timeline.entries}
+                    />
+                  </div>
                 </div>
               </Panel>
-              <PanelResizeHandle className="h-[3px] bg-transparent transition-colors hover:bg-primary/40 data-[resize-handle-active]:bg-primary/60" />
+              <PanelResizeHandle className="resize-handle h-[3px]" />
               <Panel
                 ref={bottomRef}
                 defaultSize={0}
@@ -265,33 +354,43 @@ export function AppShell() {
               >
                 <BottomPanel
                   open={bottomOpen}
-                  tab={bottomTab}
-                  onSelectTab={(tab) => openBottom(tab)}
                   onClose={() => setBottomPanel(false)}
                   terminalSessions={terminal.sessions}
                   activeTermId={terminal.activeTermId}
                   onSelectTerm={terminal.setActive}
                   onCreateTerm={() => void terminal.create()}
                   onKillTerm={(id) => void terminal.kill(id)}
+                  onRenameTerm={terminal.rename}
                   onMountTerm={terminal.mount}
                   onRefitTerm={terminal.refit}
-                  timelineEntries={timeline.entries}
+                  termSearchOpen={terminal.searchOpen}
+                  onOpenTermSearch={terminal.openSearch}
+                  onCloseTermSearch={terminal.closeSearch}
                 />
               </Panel>
             </PanelGroup>
           </Panel>
         </PanelGroup>
       </div>
+      {/* Shell-level: the palette overlays every region, so it cannot live
+          inside one of them. */}
+      <CommandPalette
+        open={palette.open}
+        initialQuery={palette.query}
+        commands={commands}
+        onOpenFile={(path) => void explorer.openFile(path)}
+        onClose={() => setPalette((p) => ({ ...p, open: false }))}
+      />
       {/* Shell-level: raised by the git panel or by the git-flow hook. */}
       <GitFlowHost />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />
-      {/* Desktop-only: instant open/import screen while no workspace is
-          selected. Sits under the gate so real failures still win. */}
-      <WelcomeScreen />
-      {/* Blocks the whole viewport while there is no live agent behind it. */}
-      <ConnectionGate vm={gate} />
-      <div className="h-[var(--statusbar-h)] shrink-0 border-t border-border bg-card">
+      <div
+        className={cn(
+          "h-[var(--statusbar-h)] shrink-0 overflow-hidden border-t",
+          "border-border bg-titlebar"
+        )}
+      >
         <StatusBar
           connection={connection.state}
           agentStatus={connection.agentStatus}

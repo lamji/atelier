@@ -60,9 +60,23 @@ export class WorkspaceWatcher {
       this.bus.publish("file.changed", { path: relPath, type, source });
       for (const listener of this.listeners) listener(relPath, type);
     };
+    const emitDirOnly =
+      (type: "addDir" | "unlinkDir") => (absPath: string) => {
+        try {
+          const relPath = this.guard.toRelative(absPath);
+          if (!relPath) return; // the root itself
+          this.bus.publish("file.changed", { path: relPath, type, source: "user" });
+        } catch {
+          // outside the workspace — nothing to report
+        }
+      };
     this.watcher.on("add", emit("add"));
     this.watcher.on("change", emit("change"));
     this.watcher.on("unlink", emit("unlink"));
+    // Folders go to the bus only: the file listeners are the git refresher
+    // and the indexer, and neither has anything to do with a directory.
+    this.watcher.on("addDir", emitDirOnly("addDir"));
+    this.watcher.on("unlinkDir", emitDirOnly("unlinkDir"));
   }
 
   private consumeAgentWrite(relPath: string): boolean {

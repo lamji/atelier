@@ -68,7 +68,6 @@ export function RepoSwitcher({ repos, active, onSelect }: RepoSwitcherProps) {
         className={cn(
           "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left",
           "outline-none transition-colors hover:bg-accent/60",
-          "focus-visible:ring-2 focus-visible:ring-primary/50",
           open && "bg-accent/60"
         )}
       >
@@ -116,7 +115,6 @@ export function RepoSwitcher({ repos, active, onSelect }: RepoSwitcherProps) {
                     className={cn(
                       "flex w-full items-center gap-2 rounded-md px-2 py-1.5",
                       "text-left outline-none transition-colors",
-                      "focus-visible:ring-2 focus-visible:ring-primary/50",
                       selected
                         ? "bg-primary/10 text-primary"
                         : "text-foreground hover:bg-accent/60"

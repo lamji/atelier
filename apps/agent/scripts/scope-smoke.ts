@@ -250,6 +250,30 @@ async function main(): Promise<void> {
       "multi-root search is left wide, not broken",
       (untouched as { glob?: string }).glob === "**/*.tsx"
     );
+    // A folder the profile does not recognise as a project — no manifest of
+    // its own — must still land inside the lock its siblings create, or the
+    // agent refuses to read a folder the user just pointed at.
+    const partial = {
+      ...profile,
+      projects: profile.projects.filter(
+        (entry) => path.basename(entry.path) !== second
+      ),
+    };
+    const mixed = store.resolve(
+      "conv6",
+      `compare @${project}/ with @${second}/`,
+      partial
+    );
+    check(
+      "an unrecognised mentioned folder is still locked",
+      mixed.roots.includes(second),
+      JSON.stringify(mixed.roots)
+    );
+    check(
+      "and it is readable under that lock",
+      inScope(mixed, `${second}/src/x.ts`)
+    );
+
     guard.release("task2");
   }
 

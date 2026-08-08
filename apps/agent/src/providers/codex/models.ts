@@ -17,10 +17,46 @@ interface CodexCatalogModel {
   additional_speed_tiers?: string[];
 }
 
+export interface CodexAuthStatus {
+  ok: boolean;
+  detail: string;
+}
+
+/** Honest account check for Settings; model fallbacks are not auth proof. */
+export async function probeCodexAuth(): Promise<CodexAuthStatus> {
+  try {
+    const result = await execa("codex", ["login", "status"], {
+      // Runs at session start; without this it flashes a console window.
+      windowsHide: true,
+      reject: false,
+      timeout: 30_000,
+      env: { ...process.env, FORCE_COLOR: "0" },
+    });
+    const output = [result.stdout, result.stderr]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    const ok = result.exitCode === 0 && /logged in/i.test(output);
+    return {
+      ok,
+      detail: ok
+        ? output || "Signed in to Codex."
+        : output || "Codex CLI is not signed in. Run `codex login`.",
+    };
+  } catch {
+    return {
+      ok: false,
+      detail: "Codex CLI is unavailable. Install it and run `codex login`.",
+    };
+  }
+}
+
 /** Codex CLI route. Runs through the user's signed-in ChatGPT/Codex session. */
 export async function probeCodexModels(): Promise<ModelOption[]> {
   try {
+    if (!(await probeCodexAuth()).ok) return [];
     const result = await execa("codex", ["debug", "models"], {
+      windowsHide: true,
       reject: false,
       timeout: 30_000,
       env: { ...process.env, FORCE_COLOR: "0" },

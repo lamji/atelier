@@ -53,6 +53,8 @@ export class ValidationRunners {
     const pm = this.packageManager();
     const result = await execa(pm, ["run", script], {
       cwd: this.workspaceRoot,
+      // npm/pnpm are .cmd shims on Windows — hide the console they open.
+      windowsHide: true,
       timeout: RUN_TIMEOUT_MS,
       reject: false,
       all: true,
