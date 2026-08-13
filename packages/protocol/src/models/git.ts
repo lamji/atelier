@@ -4,6 +4,15 @@ export const GitFileStatus = z.object({
   path: z.string(),
   index: z.string(),
   workingDir: z.string(),
+  /**
+   * Opaque "has the file on disk moved" mark (size + mtime), or absent when
+   * the file cannot be stat'd. Status marks alone cannot answer that — a
+   * file stays " M" no matter how many times it is rewritten — so this is
+   * what lets a caller tell one session's edits from the dirt that was
+   * already there. Compare for equality only; the encoding is not a
+   * contract. Optional: an older agent simply does not send it.
+   */
+  mark: z.string().optional(),
 });
 export type GitFileStatus = z.infer<typeof GitFileStatus>;
 

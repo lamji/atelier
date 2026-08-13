@@ -1,51 +1,38 @@
-import { memo, useState } from "react";
+import { memo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { MonacoDiff } from "@/components/MonacoDiff";
 import {
   BrainCircuit,
-  Check,
-  ClipboardList,
-  FileDiff,
   FolderLock,
   History,
-  Loader2,
   MessageSquareDashed,
   Network,
   Radar,
   Sparkles,
-  XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { STAGE_LABELS } from "@/lib/stage-labels";
-import {
-  diffHeight,
-  INLINE_DIFF_EDITOR_OPTIONS,
-  languageForPath,
-  lineStat,
-} from "@/lib/diff-view";
+import { liveHeadline } from "@/lib/live-headline";
 import { useChatViewModel } from "@/hooks/useChatViewModel";
-import { useElapsed } from "@/hooks/useElapsed";
+import { useChangesRailViewModel } from "@/hooks/useChangesRailViewModel";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
-import { Tooltip } from "@/components/ui/tooltip";
+import { ChangesRail } from "./ChangesRail";
+import { ProcessCard } from "./ProcessCard";
 import { Composer } from "./Composer";
 import type { ChatItemVm } from "@/types";
-import type { PipelineStage, Plan, PlanStep } from "@atelier/protocol";
-import type { AgentAction, LiveDiff } from "@/state/sessions.store";
 
 export interface ChatPanelProps {
   /** Shell-level failure (creating a session), not a task failure. */
   shellError?: string | null;
 }
 
-/** Drag-resize bounds for the process rail (plan + activity + diffs). */
-const PROCESS_MIN_WIDTH = 260;
-const PROCESS_MAX_WIDTH = 720;
-
 /**
- * The chat surface: transcript in the centre, live process rail on the
- * right, composer at the bottom.
+ * The chat surface: transcript in the centre, changes rail on the right,
+ * composer at the bottom.
+ *
+ * The turn reads left to right, once each: the conversation and the process
+ * card in the stream, every file the agent touched in the rail beside it.
+ * A diff is never rendered twice.
  *
  * Reads its own data (see {@link useChatViewModel}) instead of taking it as
  * props, and is memoized on the one prop it does take — so a shell re-render
@@ -54,55 +41,32 @@ const PROCESS_MAX_WIDTH = 720;
  */
 export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
   const vm = useChatViewModel();
-  const [processWidth, setProcessWidth] = useState(320);
-  const [resizingProcess, setResizingProcess] = useState(false);
+  const changes = useChangesRailViewModel(vm.items, vm.liveDiffs);
 
   // Follows the stream only while you're at the bottom; scroll up to read
-  // and it stops yanking you back down. The center only carries the summary
-  // now, so it no longer jumps when the process rail ticks.
+  // and it stops yanking you back down. The process card lives in the stream
+  // now, so its rows are one more thing that grows the scroll height.
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>([
     vm.items,
     vm.thinking,
-    // The live block is part of the centre's stream: it appears when the
-    // run starts and its status line moves with the stage.
     vm.busy,
     vm.stage,
+    vm.actions,
+    vm.plan,
   ]);
 
-  // The process rail (plan + activity + diffs) auto-follows its own stream.
-  const { ref: procRef, onScroll: onProcScroll } =
-    useStickToBottom<HTMLDivElement>([vm.actions, vm.liveDiffs, vm.plan]);
-
-  // Diffs from the running task render inside the live feed (near the edit
-  // that produced them), so hide their transcript copies until the run ends.
-  const liveDiffIds = new Set(vm.liveDiffs.map((d) => d.id));
-
-  // The right rail holds the process: the live plan persists after a run so
-  // it stays available; the activity feed shows only while the task runs.
-  const hasPlan = vm.plan !== null && vm.plan.steps.length > 1;
+  // The plan persists after a run so the turn's shape stays available; the
+  // action rows only while it is live.
+  // Any plan that exists is now a real one the model committed to via
+  // set_plan. The old `> 1` test was working around the pipeline seeding a
+  // one-step placeholder on every single turn — with that gone, a genuine
+  // one-step plan is just a short task and deserves to show.
+  const hasPlan = vm.plan !== null && vm.plan.steps.length > 0;
   const showProcess = vm.busy || hasPlan;
+  const status = vm.busy
+    ? liveHeadline(vm.actions, vm.stage, vm.cancelling)
+    : null;
   const error = props.shellError ?? vm.lastError;
-
-  /** Drag the rail's left edge to widen it — handy for reading a wide diff. */
-  const onProcessResizeStart = (e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = processWidth;
-    setResizingProcess(true);
-    const onMove = (ev: PointerEvent) => {
-      const next = startWidth + (startX - ev.clientX);
-      setProcessWidth(
-        Math.min(PROCESS_MAX_WIDTH, Math.max(PROCESS_MIN_WIDTH, next))
-      );
-    };
-    const onUp = () => {
-      setResizingProcess(false);
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
 
   return (
     <div className="flex h-full flex-col">
@@ -127,7 +91,13 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-h-0 flex-1 flex-col">
+        {/*
+          min-w-0: a flex item's default min-width is its content, so without
+          it a wide code block in the transcript refuses to shrink, the row
+          grows past the window, and the rail is pushed off the right edge.
+          This column is the one that gives — the rail's width is fixed.
+        */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/*
             overflow-x-hidden is load-bearing: setting only overflow-y makes
             the other axis compute to auto, so one wide child puts a
@@ -144,21 +114,33 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
                 <EmptyState connected={vm.connected} />
               )}
               <AnimatePresence initial={false}>
+                {/*
+                  Diff items are skipped: every edit in this conversation is
+                  in the rail, one tab per file. The streaming assistant is
+                  skipped while the run is live — ThinkingBlock carries it.
+                */}
                 {vm.items.map((item) =>
-                  liveDiffIds.has(item.id) ||
+                  item.role === "diff" ||
                   (vm.busy && item.role === "assistant" && item.streaming) ? null : (
-                    <ChatMessage
-                      key={item.id}
-                      item={item}
-                      monacoTheme={vm.monacoTheme}
-                    />
+                    <ChatMessage key={item.id} item={item} />
                   )
+                )}
+                {showProcess && (
+                  <ProcessCard
+                    key="process"
+                    plan={hasPlan ? vm.plan : null}
+                    busy={vm.busy}
+                    actions={vm.actions}
+                    stage={vm.stage}
+                    startedAt={vm.taskStartedAt}
+                    cancelling={vm.cancelling}
+                  />
                 )}
                 {vm.busy && (
                   <ThinkingBlock
                     key="thinking"
                     text={vm.thinking}
-                    status={liveHeadline(vm.actions, vm.stage, vm.cancelling)}
+                    status={status ?? ""}
                   />
                 )}
               </AnimatePresence>
@@ -182,287 +164,21 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           <Composer />
         </div>
 
-        <AnimatePresence>
-          {showProcess && (
-            <ProcessPanel
-              scrollRef={procRef}
-              onScroll={onProcScroll}
-              plan={hasPlan ? vm.plan : null}
-              busy={vm.busy}
-              actions={vm.actions}
-              diffs={vm.liveDiffs}
-              stage={vm.stage}
-              startedAt={vm.taskStartedAt}
-              cancelling={vm.cancelling}
-              monacoTheme={vm.monacoTheme}
-              width={processWidth}
-              resizing={resizingProcess}
-              onResizeStart={onProcessResizeStart}
-            />
-          )}
-        </AnimatePresence>
+        {/* Always mounted, never animated. A 420px column that arrives with
+            the first edit reflows the transcript at exactly the frame the
+            edit lands in, and framer-motion's layout projection on the
+            messages does not survive that. Holding the width from the start
+            costs the transcript nothing it wasn't going to give up anyway,
+            and the empty state carries the current step until a diff lands. */}
+        <ChangesRail vm={changes} status={status} />
       </div>
     </div>
   );
 });
 
-/**
- * Right-side rail that carries the *process* — the live plan, the activity
- * feed, and this run's diffs. Splitting it out keeps the model's summary
- * pinned in the center so it can be tracked without scrolling the transcript.
- */
-function ProcessPanel(props: {
-  scrollRef: React.RefObject<HTMLDivElement | null>;
-  onScroll: () => void;
-  plan: Plan | null;
-  busy: boolean;
-  actions: AgentAction[];
-  diffs: LiveDiff[];
-  stage: PipelineStage | null;
-  startedAt: number | null;
-  cancelling: boolean;
-  monacoTheme: string;
-  width: number;
-  resizing: boolean;
-  onResizeStart: (e: React.PointerEvent) => void;
-}) {
-  return (
-    <motion.aside
-      initial={{ opacity: 0, width: 0 }}
-      animate={{ opacity: 1, width: props.width }}
-      exit={{ opacity: 0, width: 0 }}
-      transition={{
-        opacity: { duration: 0.2 },
-        width: props.resizing
-          ? { duration: 0 }
-          : { type: "spring", stiffness: 260, damping: 30 },
-      }}
-      className="relative flex shrink-0 overflow-hidden border-l border-white/10"
-    >
-      {/* Drag handle: widen the rail to read a diff without cropping it. */}
-      <div
-        onPointerDown={props.onResizeStart}
-        className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize touch-none hover:bg-primary/40"
-      />
-      <div
-        ref={props.scrollRef}
-        onScroll={props.onScroll}
-        style={{ width: props.width }}
-        className={cn(
-          "flex h-full flex-col gap-3 overflow-y-auto",
-          "px-3 py-4 [scrollbar-gutter:stable]"
-        )}
-      >
-        <div className="flex items-center gap-1.5 px-1">
-          <Radar className="h-3.5 w-3.5 text-primary/70" />
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Process
-          </span>
-        </div>
-        {props.plan && <PlanCard plan={props.plan} />}
-        {props.busy && (
-          <ActivityFeed
-            actions={props.actions}
-            diffs={props.diffs}
-            stage={props.stage}
-            startedAt={props.startedAt}
-            cancelling={props.cancelling}
-            monacoTheme={props.monacoTheme}
-          />
-        )}
-      </div>
-    </motion.aside>
-  );
-}
-
-/** The live task plan checklist (pipeline stage 4, updated by the model). */
-const PlanCard = memo(function PlanCard({ plan }: { plan: Plan }) {
-  const done = plan.steps.filter((s) => s.status === "done").length;
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0 }}
-      className="rounded-xl bg-muted/50 px-3 py-2"
-    >
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <ClipboardList className="h-3.5 w-3.5 text-primary" />
-        <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Plan · {done}/{plan.steps.length}
-        </span>
-      </div>
-      <div className="space-y-1">
-        {plan.steps.map((step) => (
-          <Tooltip key={step.id} content={step.detail} disabled={!step.detail}>
-            <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-              <PlanStepIcon status={step.status} />
-              <span
-                className={cn(
-                  "min-w-0 flex-1",
-                  step.status === "done" && "line-through opacity-60",
-                  step.status === "in-progress" && "text-foreground"
-                )}
-              >
-                <span className="block break-words">{step.title}</span>
-                {/*
-                 * Same treatment as the action rail: these are file paths
-                 * with no spaces to break at, so min-w-0 alone does not
-                 * hold them — the flex item stops stretching but the text
-                 * still runs past the card. break-all is what wraps them.
-                 * Their own line, because a path reads as one unit rather
-                 * than a tail on the sentence above it.
-                 */}
-                {step.files.length > 0 && (
-                  <span className="mt-0.5 block break-all font-mono text-[10px] opacity-60">
-                    {step.files.join(", ")}
-                  </span>
-                )}
-              </span>
-            </div>
-          </Tooltip>
-        ))}
-      </div>
-    </motion.div>
-  );
-});
-
-function PlanStepIcon({ status }: { status: PlanStep["status"] }) {
-  if (status === "done") {
-    return <Check className="mt-0.5 h-3 w-3 shrink-0 text-success" />;
-  }
-  if (status === "in-progress") {
-    return (
-      <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary" />
-    );
-  }
-  if (status === "failed" || status === "cancelled") {
-    return <XCircle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />;
-  }
-  return (
-    <span className="mt-1 ml-0.5 mr-0.5 h-2 w-2 shrink-0 rounded-full border border-muted-foreground/40" />
-  );
-}
-
-/**
- * Live progress while a task runs. The header always moves — stage, then
- * the current tool — so long stretches between the model's own messages
- * never read as a stall.
- */
-const ActivityFeed = memo(function ActivityFeed({
-  actions,
-  diffs,
-  stage,
-  startedAt,
-  cancelling,
-  monacoTheme,
-}: {
-  actions: AgentAction[];
-  diffs: LiveDiff[];
-  stage: PipelineStage | null;
-  startedAt: number | null;
-  cancelling: boolean;
-  monacoTheme: string;
-}) {
-  const recent = actions.slice(-6);
-  const elapsed = useElapsed(startedAt);
-  const running = recent.find((a) => a.status === "running");
-  const headline = liveHeadline(actions, stage, cancelling);
-
-  // One chronological stream: the recent actions plus every diff from this
-  // run (a diff is the record of an edit — never drop it, even after its
-  // action scrolls out of the window), ordered by the shared feed clock so
-  // each diff lands right under the "Editing" action that produced it.
-  const rows = [
-    ...recent.map((a) => ({ kind: "action" as const, seq: a.seq, action: a })),
-    ...diffs.map((d) => ({ kind: "diff" as const, seq: d.seq, diff: d })),
-  ].sort((a, b) => a.seq - b.seq);
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0 }}
-      className="rounded-xl bg-muted/50 px-3 py-2"
-    >
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-        <span className="text-shimmer min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider">
-          {headline}
-        </span>
-        {startedAt !== null && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
-            {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
-          </span>
-        )}
-      </div>
-      {stage && running && (
-        <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">
-          {STAGE_LABELS[stage]}
-        </p>
-      )}
-      {rows.length > 0 && (
-        <div className="space-y-1.5">
-          <AnimatePresence initial={false}>
-            {rows.map((row) =>
-              row.kind === "action" ? (
-                <motion.div
-                  key={row.action.id}
-                  initial={{ opacity: 0, x: -6 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="flex items-start gap-1.5 text-[11px] text-muted-foreground"
-                >
-                  {row.action.status === "running" ? (
-                    <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary/70" />
-                  ) : row.action.status === "done" ? (
-                    <Check className="mt-0.5 h-3 w-3 shrink-0 text-success" />
-                  ) : (
-                    <XCircle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />
-                  )}
-                  {/*
-                   * Wrap instead of truncate: these labels are file paths, and
-                   * the part that identifies the file is the tail — exactly
-                   * what an ellipsis eats. break-all keeps long unbroken paths
-                   * inside the rail instead of stretching it.
-                   */}
-                  <span className="min-w-0 flex-1">
-                    <span className="block break-all font-mono">
-                      {row.action.label}
-                    </span>
-                    {row.action.status === "failed" && row.action.error && (
-                      <span className="mt-0.5 block break-all font-mono text-[10px] text-destructive">
-                        {row.action.error}
-                      </span>
-                    )}
-                  </span>
-                </motion.div>
-              ) : (
-                <DiffCard
-                  key={row.diff.id}
-                  diff={row.diff}
-                  monacoTheme={monacoTheme}
-                  defaultOpen
-                />
-              )
-            )}
-          </AnimatePresence>
-        </div>
-      )}
-    </motion.div>
-  );
-});
-
-const ChatMessage = memo(function ChatMessage({
-  item,
-  monacoTheme,
-}: {
-  item: ChatItemVm;
-  monacoTheme: string;
-}) {
+const ChatMessage = memo(function ChatMessage({ item }: { item: ChatItemVm }) {
   const isUser = item.role === "user";
   if (item.role === "log") return <LogLine item={item} />;
-  if (item.role === "diff") {
-    return <DiffMessage item={item} monacoTheme={monacoTheme} />;
-  }
   return (
     <motion.div
       layout="position"
@@ -554,104 +270,10 @@ const LogLine = memo(function LogLine({ item }: { item: ChatItemVm }) {
 });
 
 /**
- * A file edit, shown inline in the transcript as a VS Code-style diff:
- * just the path and the change, themed to match the app's dark/light mode.
- */
-const DiffMessage = memo(function DiffMessage({
-  item,
-  monacoTheme,
-}: {
-  item: ChatItemVm;
-  monacoTheme: string;
-}) {
-  if (!item.diff) return null;
-  return <DiffCard diff={item.diff} monacoTheme={monacoTheme} />;
-});
-
-/**
- * The diff card itself — path header, +/− line stat, and the Monaco diff.
- * Shared by the transcript ({@link DiffMessage}) and the live activity feed,
- * so an edit looks the same whether it's happening now or scrolled-back history.
- *
- * Monaco is mounted lazily, on demand: a long session can produce dozens of
- * edits, and dozens of live diff editors is what turned scrolling the
- * transcript into a slideshow. Collapsed cards render the stat line only.
- */
-const DiffCard = memo(function DiffCard({
-  diff,
-  monacoTheme,
-  defaultOpen = false,
-}: {
-  diff: NonNullable<ChatItemVm["diff"]>;
-  monacoTheme: string;
-  /** The live feed opens its diffs; scrolled-back history starts collapsed. */
-  defaultOpen?: boolean;
-}) {
-  const { added, removed } = lineStat(diff.before, diff.after);
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <motion.div
-      layout="position"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-      className="w-full max-w-full"
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 text-left"
-      >
-        <FileDiff className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-        <span className="truncate font-mono text-xs font-medium">
-          {diff.path}
-        </span>
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
-          {added > 0 && <span className="text-success">+{added}</span>}
-          {removed > 0 && <span className="text-destructive">−{removed}</span>}
-        </span>
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/60">
-          {open ? "hide" : "show"}
-        </span>
-      </button>
-      {open && (
-        <div
-          className="mt-2 overflow-hidden rounded-xl border border-white/10"
-          style={{ height: diffHeight(diff.before, diff.after) }}
-        >
-          <MonacoDiff
-            original={diff.before}
-            modified={diff.after}
-            language={languageForPath(diff.path)}
-            theme={monacoTheme}
-            options={INLINE_DIFF_EDITOR_OPTIONS}
-          />
-        </div>
-      )}
-    </motion.div>
-  );
-});
-
-/**
- * What the agent is doing right now, in one line: the running tool, else
- * the pipeline stage. Shared by the process rail and the centre's live
- * block so the two never disagree about the current step.
- */
-function liveHeadline(
-  actions: AgentAction[],
-  stage: PipelineStage | null,
-  cancelling: boolean
-): string {
-  if (cancelling) return "stopping — finishing the current step";
-  const running = actions.slice(-6).find((a) => a.status === "running");
-  return running?.label ?? (stage ? STAGE_LABELS[stage] : "starting…");
-}
-
-/**
  * The centre's live block. Present for the WHOLE run, not only while the
  * model happens to be emitting thought: the transcript goes quiet during
  * retrieval, planning, and long tool stretches, and a blank centre next to
- * a ticking process rail reads as a stall. Thinking text wins when there
+ * a ticking process card reads as a stall. Thinking text wins when there
  * is any; otherwise the block carries the current step.
  */
 function ThinkingBlock({ text, status }: { text: string; status: string }) {

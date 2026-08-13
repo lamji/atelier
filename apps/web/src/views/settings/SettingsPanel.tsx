@@ -4,28 +4,32 @@ import {
   ChevronRight,
   Cloud,
   Gauge,
+  HardDrive,
   HelpCircle,
   Loader2,
+  Orbit,
   Plug,
   RefreshCw,
   Scale,
   Sparkles,
   Terminal,
   Trash2,
-  UserRound,
   Wand2,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { RulesTab } from "./RulesTab";
 import { McpTab } from "./McpTab";
 import { SkillsTab } from "./SkillsTab";
-import { AccountTab } from "./AccountTab";
 import { ProviderHelpModal } from "./ProviderHelpModal";
 import { useProvidersViewModel, type ProvidersVm } from "@/hooks/useProvidersViewModel";
+import { usePreferencesStore } from "@/state/preferences.store";
+import { useConnectionStore } from "@/state/connection.store";
+import { bridge } from "@/services/bridge-client";
 import type {
   ProviderCredential,
   ProviderId,
@@ -82,30 +86,29 @@ export function SettingsPanel() {
           >
             <Scale className="h-3.5 w-3.5" />
           </TabButton>
-          <span className="mx-0.5 h-4 w-px bg-border" />
-          {/* Last, and behind its own divider: this is about you, not about
-              the workspace's model plumbing. */}
-          <TabButton
-            active={tab === "account"}
-            onClick={() => setTab("account")}
-            title="Account"
-          >
-            <UserRound className="h-3.5 w-3.5" />
-          </TabButton>
         </div>
       </div>
+
+      {/* Above the tab content, not inside a tab: it changes what the whole
+          main console IS, so it should be visible whichever tab is open. */}
+      <CliModeCheck />
+      <GlobalSessionKnowledgeToggle />
 
       {tab === "providers" && <ProvidersTab />}
       {tab === "mcp" && <McpTab />}
       {tab === "skills" && <SkillsTab />}
       {tab === "rules" && <RulesTab />}
-      {tab === "account" && <AccountTab />}
     </div>
   );
 }
 
-type ProviderTab = "ollama-cloud" | "codex" | "claude";
-type Tab = "providers" | "mcp" | "skills" | "rules" | "account";
+type ProviderTab =
+  | "ollama-cloud"
+  | "ollama-local"
+  | "grok"
+  | "codex"
+  | "claude";
+type Tab = "providers" | "mcp" | "skills" | "rules";
 
 interface ProviderDef {
   id: ProviderTab;
@@ -119,8 +122,7 @@ interface ProviderDef {
 /**
  * Every model provider, rendered as one stacked list under a single tab.
  * The connect copy is per-provider: Ollama Cloud takes an API key, while
- * Codex and Claude are CLIs you sign in to, so telling all three to paste an
- * Ollama key (as one shared string used to) was simply wrong for two of them.
+ * Grok and Ollama take separate API keys; Codex and Claude use signed-in CLIs.
  */
 const PROVIDER_DEFS: ProviderDef[] = [
   {
@@ -131,6 +133,24 @@ const PROVIDER_DEFS: ProviderDef[] = [
     connectHint:
       "Use an API key from ollama.com/settings/keys. Atelier stores it " +
       "locally and never sends it back to the UI.",
+  },
+  {
+    id: "ollama-local",
+    title: "Ollama Local",
+    icon: HardDrive,
+    connectLabel: "Ollama Local",
+    connectHint:
+      "Uses the Ollama daemon on this machine at 127.0.0.1:11434. " +
+      "No API key is required.",
+  },
+  {
+    id: "grok",
+    title: "Grok",
+    icon: Orbit,
+    connectLabel: "Connect Grok",
+    connectHint:
+      "Use an API key from console.x.ai. Atelier stores it locally, " +
+      "discovers the models available to the key, and never returns it to the UI.",
   },
   {
     id: "codex",
@@ -151,6 +171,125 @@ const PROVIDER_DEFS: ProviderDef[] = [
       "claude CLI, then use Test to pick it up — no key is stored here.",
   },
 ];
+
+/**
+ * CLI mode: swap the chat console for a real provider CLI. A themed checkbox
+ * (same chrome as the composer's check menu) rather than a Switch — this is
+ * an opt-in you tick, not a live toggle you flip back and forth.
+ */
+function CliModeCheck() {
+  const cliMode = usePreferencesStore((s) => s.cliMode);
+  const setCliMode = usePreferencesStore((s) => s.setCliMode);
+
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={cliMode}
+      onClick={() => setCliMode(!cliMode)}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-xl bg-muted/40 p-2.5",
+        "text-left transition-colors hover:bg-muted/60"
+      )}
+    >
+      <span
+        className={cn(
+          "mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+          "rounded border transition-colors",
+          cliMode
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-border"
+        )}
+      >
+        {cliMode && <Check className="h-2.5 w-2.5" />}
+      </span>
+      <span className="min-w-0">
+        <span className="flex items-center gap-1.5 text-[11px] font-medium">
+          <Terminal className="h-3 w-3 text-muted-foreground/60" />
+          CLI mode
+        </span>
+        <span className="mt-0.5 block text-[10px] leading-relaxed text-muted-foreground/70">
+          Replace the main console with Codex or Claude CLI — each uses its
+          own session flow, with no system knowledge. Codex opens by default;
+          new sessions ask which CLI to use. Chat sessions return when you
+          untick this.
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/** Explicit opt-in: promoted transcripts never enter another chat silently. */
+function GlobalSessionKnowledgeToggle() {
+  const connected = useConnectionStore((s) => s.state === "connected");
+  const [enabled, setEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!connected) return;
+    setLoading(true);
+    void bridge
+      .rpc("settings.get", {})
+      .then(({ settings }) => {
+        setEnabled(settings.globalSessionKnowledge);
+        setError(null);
+      })
+      .catch((reason) =>
+        setError(String((reason as { message?: string })?.message ?? reason))
+      )
+      .finally(() => setLoading(false));
+  }, [connected]);
+
+  const toggle = (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
+    setError(null);
+    void bridge
+      .rpc("settings.save", {
+        settings: { globalSessionKnowledge: next },
+      })
+      .then(({ settings }) => setEnabled(settings.globalSessionKnowledge))
+      .catch((reason) => {
+        setEnabled(previous);
+        setError(String((reason as { message?: string })?.message ?? reason));
+      });
+  };
+
+  return (
+    <section className="rounded-xl bg-muted/40 p-2.5">
+      <div className="flex items-start gap-2">
+        <Orbit className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-medium">
+              Global session knowledge
+            </span>
+            <Badge variant="outline" className="h-4 px-1 text-[8px] uppercase">
+              Experimental
+            </Badge>
+          </div>
+          <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground/70">
+            Include sessions promoted with <span className="font-mono">/global-session</span> in knowledge retrieval for new chats. The selected AI creates the alias from the session; promoting it again updates the same memory.
+          </p>
+        </div>
+        {loading ? (
+          <Loader2 className="mt-0.5 h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        ) : (
+          <Switch
+            checked={enabled}
+            disabled={!connected}
+            onChange={toggle}
+            label="Include global session memories in knowledge retrieval"
+          />
+        )}
+      </div>
+      {error && (
+        <p className="mt-2 text-[10px] text-destructive">{error}</p>
+      )}
+    </section>
+  );
+}
 
 /** Icon-only tab: the title is the tooltip and the accessible name. */
 function TabButton({
@@ -218,19 +357,10 @@ function ProvidersTab() {
               <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] text-muted-foreground/70">
                 Loading provider…
               </p>
-            ) : provider.configured ? (
-              <ProviderCard provider={provider} vm={vm} />
-            ) : provider.hostless ? (
-              // No key to take and no endpoint to set: the only way in is to
-              // sign in to the CLI, so a key form here would be a dead end.
-              <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] leading-relaxed text-muted-foreground/70">
-                {definition.connectHint}
-              </p>
             ) : (
-              <ProviderForm
-                id={provider.id}
-                label={definition.connectLabel}
-                hint={definition.connectHint}
+              <ProviderCard
+                provider={provider}
+                definition={definition}
                 vm={vm}
               />
             )}
@@ -244,9 +374,11 @@ function ProvidersTab() {
 /** A stored provider: status, its models, the connection check, removal. */
 function ProviderCard({
   provider,
+  definition,
   vm,
 }: {
   provider: ProviderCredential;
+  definition: ProviderDef;
   vm: ProvidersVm;
 }) {
   const [editing, setEditing] = useState(false);
@@ -261,23 +393,22 @@ function ProviderCard({
   // Pull the catalog once the provider is on screen; the toggles are the
   // point of this card, so they shouldn't wait for a click to appear.
   useEffect(() => {
-    if (vm.connected && models === undefined) loadCatalog(provider.id);
-  }, [vm.connected, models, loadCatalog, provider.id]);
+    if (vm.connected && provider.configured && models === undefined) {
+      loadCatalog(provider.id);
+    }
+  }, [vm.connected, provider.configured, models, loadCatalog, provider.id]);
 
   // Usage is only rendered inside the accordion, so it is fetched when the
   // accordion opens — and refetched each time, since it moves with every call.
   const { loadUsage } = vm;
   useEffect(() => {
-    if (vm.connected && showModels) loadUsage(provider.id);
-  }, [vm.connected, showModels, loadUsage, provider.id]);
+    if (vm.connected && provider.configured && showModels) {
+      loadUsage(provider.id);
+    }
+  }, [vm.connected, provider.configured, showModels, loadUsage, provider.id]);
 
   const enabledCount = models?.filter((m) => m.enabled).length ?? 0;
-  const Icon =
-    provider.id === "claude"
-      ? Sparkles
-      : provider.id === "codex"
-        ? Terminal
-        : Cloud;
+  const Icon = definition.icon;
 
   return (
     <div className="overflow-hidden rounded-xl bg-muted/40">
@@ -300,10 +431,15 @@ function ProviderCard({
           <p className="text-xs font-medium">{provider.label}</p>
           {/* A hostless provider has nothing to say here — it signs in
               through its own session, so there is no key or host to show. */}
-          {!provider.hostless && (
+          {!provider.keyless && provider.configured && (
             <p className="mt-0.5 break-all font-mono text-[10px] text-muted-foreground/70">
               key {provider.keyHint ?? "stored"}
               {provider.host ? ` · ${provider.host}` : ""}
+            </p>
+          )}
+          {provider.id === "ollama-local" && (
+            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground/70">
+              127.0.0.1:11434
             </p>
           )}
         </div>
@@ -322,7 +458,7 @@ function ProviderCard({
             type="button"
             variant="outline"
             size="sm"
-            disabled={busy || !vm.connected}
+            disabled={busy || !vm.connected || !provider.configured}
             onClick={() => vm.check(provider.id)}
             className="!h-5 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
           >
@@ -341,7 +477,7 @@ function ProviderCard({
                   ? "Reset host and model choices"
                   : "Remove"
             }
-            disabled={vm.saving}
+            disabled={vm.saving || !provider.configured}
             onClick={() => vm.remove(provider.id)}
             className="!h-6 !w-6 text-muted-foreground hover:text-destructive"
           >
@@ -352,7 +488,7 @@ function ProviderCard({
               anything at all. Model choices survive being switched off. */}
           <Switch
             checked={provider.enabled}
-            disabled={!vm.connected}
+            disabled={!vm.connected || !provider.configured}
             // Switching on is the moment the user expects models to appear;
             // if this provider needs a CLI sign-in or a key, that is the
             // moment to say so rather than let the list come back empty.
@@ -388,7 +524,7 @@ function ProviderCard({
       <div
         className={cn(
           "border-t border-border/60 transition-opacity",
-          !provider.enabled && "opacity-50"
+          (!provider.enabled || !provider.configured) && "opacity-50"
         )}
       >
         {/* Collapsed by default: a provider can offer dozens of models and
@@ -411,14 +547,18 @@ function ProviderCard({
               Models
             </span>
             <span className="text-[10px] text-muted-foreground/50">
-              {provider.enabled ? `${enabledCount} in chat` : "none in chat"}
+              {!provider.configured
+                ? "connect to load"
+                : provider.enabled
+                  ? `${enabledCount} in chat`
+                  : "none in chat"}
             </span>
           </Button>
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            disabled={loadingModels || !vm.connected}
+            disabled={loadingModels || !vm.connected || !provider.configured}
             onClick={() => loadCatalog(provider.id)}
             className="!h-6 !w-6 shrink-0 text-muted-foreground hover:text-foreground"
             title="Refresh model list"
@@ -429,9 +569,15 @@ function ProviderCard({
           </Button>
         </div>
 
-        {showModels && <UsageBlock usage={vm.usage[provider.id]} />}
+        {showModels && (
+          <UsageBlock usage={vm.usage[provider.id]} provider={provider.label} />
+        )}
 
-        {!showModels ? null : loadingModels && models === undefined ? (
+        {!showModels ? null : !provider.configured ? (
+          <p className="px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/60">
+            Connect {provider.label} to discover the models available to this API key.
+          </p>
+        ) : loadingModels && models === undefined ? (
           <p className="px-2.5 py-2 text-[10px] text-muted-foreground/60">
             Loading models…
           </p>
@@ -458,6 +604,14 @@ function ProviderCard({
                       <span className="block break-all font-mono text-[11px]">
                         {model.name}
                       </span>
+                      {model.subscriptionRequired && (
+                        <Badge
+                          variant="destructive"
+                          className="mt-1 px-1.5 py-0 text-[9px]"
+                        >
+                          Subscription required
+                        </Badge>
+                      )}
                       {model.detail && (
                         <span className="block text-[10px] text-muted-foreground/60">
                           {model.detail}
@@ -480,18 +634,29 @@ function ProviderCard({
           <p className="px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/60">
             {provider.hostless
               ? "No models returned. Run Test to check you are signed in to this CLI."
-              : "No models returned. Run Test to check the Ollama Cloud API key."}
+              : provider.keyless
+                ? "No models returned. Run Test to check the local Ollama daemon."
+                : `No models returned. Run Test to check the ${provider.label} API key.`}
           </p>
         )}
       </div>
 
       {/* Nothing to edit on a signed-in CLI: no key of ours, no endpoint. */}
-      {provider.hostless ? null : editing ? (
+      {provider.keyless ? null : !provider.configured ? (
+        <div className="border-t border-border/60 p-2">
+          <ProviderForm
+            id={provider.id}
+            label={definition.connectLabel}
+            hint={definition.connectHint}
+            vm={vm}
+          />
+        </div>
+      ) : editing ? (
         <div className="space-y-1.5 border-t border-border/60 p-2">
           <ProviderForm
             id={provider.id}
             label={provider.label}
-            hint="Enter a replacement Ollama Cloud API key."
+            hint={`Enter a replacement ${provider.label} API key.`}
             vm={vm}
             onDone={() => setEditing(false)}
           />
@@ -511,12 +676,16 @@ function ProviderCard({
 }
 
 /**
- * What Atelier has spent on this provider. Counts, not percentages: Ollama
- * Cloud publishes no quota endpoint, so there is no denominator — and other
- * clients on the same key spend limit we cannot see. The link out goes to
- * the dashboard, which is where the real plan figure lives.
+ * What Atelier has spent on this provider. Counts, not percentages: local
+ * response totals cannot see calls made by other apps on the same key.
  */
-function UsageBlock({ usage }: { usage?: ProviderUsage }) {
+function UsageBlock({
+  usage,
+  provider,
+}: {
+  usage?: ProviderUsage;
+  provider: string;
+}) {
   if (!usage || usage.windows.length === 0) return null;
 
   return (
@@ -546,8 +715,8 @@ function UsageBlock({ usage }: { usage?: ProviderUsage }) {
         ))}
       </div>
       <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground/50">
-        Measured here — Ollama has no quota API, so this is what Atelier
-        spent, not your plan total.{" "}
+        Measured here from {provider} responses — this is what Atelier spent,
+        not your account total.{" "}
         {usage.dashboardUrl && (
           <a
             href={usage.dashboardUrl}
@@ -575,7 +744,7 @@ function duration(seconds: number): string {
   return `${seconds}s`;
 }
 
-/** Ollama Cloud key entry. The key is never rendered back. */
+/** Hosted-provider key entry. The key is never rendered back. */
 function ProviderForm({
   id,
   label,
@@ -612,7 +781,7 @@ function ProviderForm({
         value={apiKey}
         autoComplete="off"
         spellCheck={false}
-        placeholder="Ollama Cloud API key"
+        placeholder={id === "grok" ? "xAI API key" : "Ollama Cloud API key"}
         onChange={(e) => setApiKey(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
         className="!h-7 px-2 py-1 font-mono text-[11px]"

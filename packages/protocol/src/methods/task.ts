@@ -23,10 +23,20 @@ export const taskMethods = {
       /** Vibe coding: autonomous product-builder mode for this task. */
       vibe: z.boolean().optional(),
       /**
-       * Independent review stage after the changes land. Omitted means yes;
-       * `false` skips review (and its repair rounds) for this task.
+       * Independent review stage after the changes land. Omitted means NO —
+       * only an explicit `true` runs review and its repair rounds. It costs
+       * a fresh SDK session per attempt, entirely after the answer has
+       * finished streaming, so an interactive send does not pay for it.
        */
       autoReview: z.boolean().optional(),
+      /**
+       * Run the validators (typecheck, lint, test) over what the task
+       * changed. Omitted means NO — only an explicit `true` runs them.
+       * They are package scripts on a whole monorepo, they run entirely
+       * after the answer has finished streaming, and they block the turn
+       * from ending, so an interactive send does not pay for them.
+       */
+      autoValidate: z.boolean().optional(),
       /**
        * Run this task through Atelier's knowledge engine — retrieval,
        * impact, plan, review, session memory. Omitted means yes; `false`

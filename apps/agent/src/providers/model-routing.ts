@@ -14,6 +14,7 @@ export const OLLAMA_PREFIX = "ollama/";
  */
 export const OLLAMA_LOCAL_PREFIX = "ollama-local/";
 export const CODEX_PREFIX = "codex/";
+export const GROK_PREFIX = "grok/";
 
 /** Which Ollama endpoint a model id belongs to; matches the provider ids. */
 export type OllamaTarget = "ollama-cloud" | "ollama-local";
@@ -35,6 +36,14 @@ export function isCodexModel(value: string | undefined | null): boolean {
   return typeof value === "string" && value.startsWith(CODEX_PREFIX);
 }
 
+export function isGrokModel(value: string | undefined | null): boolean {
+  return typeof value === "string" && value.startsWith(GROK_PREFIX);
+}
+
+export function grokModelName(value: string): string {
+  return value.slice(GROK_PREFIX.length);
+}
+
 /** "ollama/qwen2.5-coder:7b" -> "qwen2.5-coder:7b" (the tag Ollama knows). */
 export function ollamaModelName(value: string): string {
   return value.startsWith(OLLAMA_LOCAL_PREFIX)
@@ -54,6 +63,8 @@ export function codexModelName(value: string): string | undefined {
  * branch before invoking Claude; this helper is only for the Claude path.
  */
 export function sdkModel(value: string | undefined): string | undefined {
-  if (!value || isOllamaModel(value) || isCodexModel(value)) return undefined;
+  if (!value || isOllamaModel(value) || isCodexModel(value) || isGrokModel(value)) {
+    return undefined;
+  }
   return value;
 }

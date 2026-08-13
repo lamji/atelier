@@ -120,6 +120,11 @@
   --statusbar-h: 22px;
   --activitybar-w: 44px;
   --tabbar-h: 32px;
+  /* The chat's changes rail. Fixed, like every other piece of chrome here:
+     an animated or draggable width re-lays out the transcript underneath it,
+     and framer-motion's layout projection on the messages does not survive
+     that cleanly — the run's diffs are not worth a shifting transcript. */
+  --changes-rail-w: 420px;
   --panel-header-h: 30px;
 
   /* Motion: short enough to read as feedback, never as choreography. */

@@ -5,20 +5,34 @@ import {
   allowlistImpliesAll,
   CLAUDE,
   enabledModelsFor,
+  GROK,
   listProviders,
+  OLLAMA_CLOUD,
   migrateProjectCredentials,
   OLLAMA_LOCAL,
   removeProvider,
   saveProvider,
   setModelEnabled,
+  setModelSubscriptionRequired,
   setProviderEnabled,
 } from "./credentials.js";
-import { listOllamaModels, ollamaHost, ollamaReachable } from "./ollama/client.js";
+import {
+  listOllamaModels,
+  ollamaHost,
+  ollamaReachable,
+  probeOllamaModelAccess,
+} from "./ollama/client.js";
 import { listOllamaCatalog } from "./ollama/models.js";
 import { initUsage, usageWindows } from "./ollama/usage.js";
 import { isSessionProvider, sessionCatalog } from "./roster.js";
 import { probeClaudeAuth } from "../orchestrator/models-probe.js";
 import { probeCodexAuth } from "./codex/models.js";
+import { grokHost, listGrokModels } from "./grok/client.js";
+import { listGrokCatalog } from "./grok/models.js";
+import {
+  grokUsageWindows,
+  initGrokUsage,
+} from "./grok/usage.js";
 
 /**
  * Provider credential handlers. Keys are stored by the agent and never
@@ -39,6 +53,7 @@ export function registerProviderHandlers(
 ): void {
   migrateProjectCredentials(settings);
   initUsage(settings);
+  initGrokUsage(settings);
 
   router.register("providers.list", () => ({ providers: listProviders() }));
 
@@ -62,11 +77,16 @@ export function registerProviderHandlers(
   }));
 
   router.register("providers.usage", (params) => ({
-    // Only Ollama calls are metered: the signed-in CLIs bill against the
-    // user's plan through their own process, and inventing a counter here
-    // would read as an authoritative figure it is not.
+    // Hosted API calls are metered from response token counts. Signed-in
+    // CLIs bill through their own process, so Atelier has no honest counter.
     usage: isSessionProvider(params.id)
       ? { windows: [], updatedAt: Date.now() }
+      : params.id === GROK
+        ? {
+            windows: grokUsageWindows(Date.now()),
+            dashboardUrl: "https://console.x.ai/",
+            updatedAt: Date.now(),
+          }
       : {
           windows: usageWindows(Date.now()),
           // Local inference has no account and no bill, so there is nowhere
@@ -88,6 +108,25 @@ export function registerProviderHandlers(
   router.register("providers.check", async (params) => {
     if (isSessionProvider(params.id)) {
       return { check: await checkSession(params.id, workspaceRoot) };
+    }
+    if (params.id === GROK) {
+      try {
+        const models = await listGrokModels();
+        return {
+          check: {
+            ok: models.length > 0,
+            detail:
+              models.length > 0
+                ? `Connected to ${grokHost()} — ${models.length} language model(s) available.`
+                : `Reached ${grokHost()}, but no language models are available to this key.`,
+            modelCount: models.length,
+          },
+        };
+      } catch (error) {
+        return {
+          check: { ok: false, detail: String(error), modelCount: 0 },
+        };
+      }
     }
     const local = params.id === OLLAMA_LOCAL;
     const host = ollamaHost(params.id);
@@ -125,9 +164,9 @@ function catalogFor(
   id: ProviderId,
   workspaceRoot: string
 ): Promise<ProviderModel[]> {
-  return isSessionProvider(id)
-    ? sessionCatalog(id, workspaceRoot)
-    : listOllamaCatalog(id);
+  if (isSessionProvider(id)) return sessionCatalog(id, workspaceRoot);
+  if (id === GROK) return listGrokCatalog();
+  return listOllamaCatalog(id);
 }
 
 /**
@@ -161,6 +200,16 @@ async function applyModelToggle(
   enabled: boolean,
   workspaceRoot: string
 ): Promise<void> {
+  if (id === OLLAMA_CLOUD && enabled) {
+    const access = await probeOllamaModelAccess(name, OLLAMA_CLOUD);
+    if (access === "subscription-required") {
+      setModelSubscriptionRequired(id, name, true);
+      return;
+    }
+    if (access === "available") {
+      setModelSubscriptionRequired(id, name, false);
+    }
+  }
   if (allowlistImpliesAll(id) && !enabled && enabledModelsFor(id).length === 0) {
     const catalog = await catalogFor(id, workspaceRoot);
     for (const model of catalog) {

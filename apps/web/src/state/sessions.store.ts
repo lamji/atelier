@@ -7,6 +7,21 @@ export type SessionStatus = "idle" | "working" | "error";
 export interface AgentAction {
   id: string;
   label: string;
+  /**
+   * The tool's own name (`replace_code`, `Grep`, `Task`, …), kept unflattened
+   * beside the prose label. The label answers "what is it doing"; this
+   * answers "with what", which is what you need when a run goes wrong and
+   * every row reads like a sentence.
+   */
+  name: string;
+  /**
+   * The identifying part of the tool's input — a path, a query, a command —
+   * rendered short. Shown under the label, so a row says which file rather
+   * than just "Editing".
+   */
+  detail?: string;
+  /** Wall time once it finished, straight from tool.completed. */
+  durationMs?: number;
   status: "running" | "done" | "failed";
   /**
    * Why it failed, straight from the tool.failed event. Kept on the action
@@ -38,6 +53,14 @@ export interface LiveDiff {
  * React never needs to see it.
  */
 let feedSeq = 0;
+
+/**
+ * How many tool rows a conversation keeps. A single turn can easily run a
+ * hundred reads and searches now that the SDK's own tools report too, and
+ * being able to scroll back over what the agent actually did is the point
+ * of the rail.
+ */
+const MAX_ACTIONS = 200;
 
 export interface SessionVm {
   conversation: Conversation;
@@ -118,12 +141,19 @@ interface SessionsStore {
     text: string
   ) => void;
   appendThinking: (conversationId: string, delta: string) => void;
-  actionStarted: (conversationId: string, id: string, label: string) => void;
+  actionStarted: (
+    conversationId: string,
+    id: string,
+    label: string,
+    name: string,
+    detail?: string
+  ) => void;
   actionFinished: (
     conversationId: string,
     id: string,
     status: "done" | "failed",
-    error?: string
+    error?: string,
+    durationMs?: number
   ) => void;
   setStage: (conversationId: string, stage: PipelineStage) => void;
   taskCancelling: (conversationId: string) => void;
@@ -398,21 +428,24 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
     })),
 
-  actionStarted: (conversationId, id, label) =>
+  actionStarted: (conversationId, id, label, name, detail) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         actions: [
-          ...session.actions.slice(-19),
-          { id, label, status: "running", seq: feedSeq++ },
+          // A busy turn now reports the SDK's own searches too, so 20 rows
+          // covered barely the tail of one. This is a per-conversation
+          // in-memory list of small objects; the render decides what to show.
+          ...session.actions.slice(-(MAX_ACTIONS - 1)),
+          { id, label, name, detail, status: "running", seq: feedSeq++ },
         ],
       })),
     })),
 
-  actionFinished: (conversationId, id, status, error) =>
+  actionFinished: (conversationId, id, status, error, durationMs) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         actions: session.actions.map((a) =>
-          a.id === id ? { ...a, status, error } : a
+          a.id === id ? { ...a, status, error, durationMs } : a
         ),
       })),
     })),

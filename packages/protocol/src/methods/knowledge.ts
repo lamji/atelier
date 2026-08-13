@@ -21,6 +21,7 @@ export const knowledgeMethods = {
         .object({
           pathGlob: z.string().optional(),
           kinds: z.array(z.string()).optional(),
+          includeGlobalSessions: z.boolean().optional(),
         })
         .optional(),
     }),

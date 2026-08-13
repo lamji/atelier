@@ -15,6 +15,16 @@ import { ContextRequestStats } from "./models/context.js";
 import { ValidationKind, ValidationResult } from "./models/validation.js";
 import { ProjectInfo } from "./methods/projects.js";
 
+/**
+ * The stages a task can report.
+ *
+ * NINE of these are live. `impact` is not: the blast-radius walk moved into
+ * the pre-write `impact_of_edit` hook, where it runs against the files
+ * actually being changed rather than against whatever retrieval happened to
+ * return. It is kept in the enum on purpose — persisted timelines from
+ * before that change still carry it, and a replayed run must not fail to
+ * parse or render a blank stage label.
+ */
 export const PipelineStage = z.enum([
   "understand",
   "retrieve",
@@ -29,10 +39,15 @@ export const PipelineStage = z.enum([
 ]);
 export type PipelineStage = z.infer<typeof PipelineStage>;
 
+/**
+ * The stages a task actually runs, in order. `impact` is absent because
+ * nothing publishes it; the previous version of this list included it, so
+ * anything driving a progress rail from it showed a step that could never
+ * light up.
+ */
 export const PIPELINE_STAGES: PipelineStage[] = [
   "understand",
   "retrieve",
-  "impact",
   "plan",
   "hooks",
   "execute",
@@ -240,6 +255,9 @@ export const eventPayloads = {
 
   // validation
   "validation.started": z.object({ kind: ValidationKind }),
+  // Validators are the longest silent stretch of a task; their output is
+  // streamed so a run that is grinding can be told from one that is stuck.
+  "validation.output": z.object({ kind: ValidationKind, chunk: z.string() }),
   "validation.result": ValidationResult,
 
   // knowledge engine

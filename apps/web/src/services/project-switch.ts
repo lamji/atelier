@@ -1,4 +1,5 @@
 import { bridge } from "./bridge-client.js";
+import { useCliConsoleStore } from "./cli-console.js";
 import { attachProject } from "./desktop-port.js";
 import { terminalRegistry } from "./terminal-registry.js";
 import { setRosterScope } from "./terminal-roster.js";
@@ -116,6 +117,9 @@ async function attach(id: string): Promise<void> {
 function applyWorkspace(id: string): void {
   resetWorkspaceStores();
   terminalRegistry.disposeAll();
+  // The CLI session ptys belong to the agent we just left; the pane
+  // re-acquires (or opens) this workspace's own from its agent.
+  useCliConsoleStore.getState().reset();
   // Each workspace keeps its own composer picks (model, effort, knowledge,
   // vibe); load this project's before anything can read them.
   usePreferencesStore.getState().setProjectScope(id);

@@ -1,5 +1,16 @@
-import type { Plan, PlanStepStatus } from "@atelier/protocol";
+import type { Plan, PlanStep, PlanStepStatus } from "@atelier/protocol";
+import { newId } from "@atelier/shared";
 import type { EventBus } from "../events/event-bus.js";
+
+/** A step as the model states it, before ids exist. */
+export interface DraftStep {
+  title: string;
+  detail?: string;
+  files?: string[];
+}
+
+/** Steps past this are a task that should have been split, not a checklist. */
+const MAX_STEPS = 12;
 
 /**
  * Holds the active Plan per task and publishes step updates. The model
@@ -13,6 +24,41 @@ export class PlanTracker {
 
   setPlan(plan: Plan): void {
     this.plans.set(plan.taskId, plan);
+  }
+
+  /**
+   * Replaces the placeholder plan with the one the model actually committed
+   * to, mints the step ids and announces it.
+   *
+   * The pipeline seeds a single-step plan before the model has read a line
+   * of code, because the rail needs something at t=0 — but that placeholder
+   * is all the UI ever had, which is why a plan never appeared. This is the
+   * real one, and it costs no extra model call: the model calls `set_plan`
+   * partway through the turn it was already having.
+   *
+   * Returns the minted steps so the tool result can hand the model the ids
+   * it needs for `update_plan_step`.
+   */
+  adopt(taskId: string, goal: string, drafts: DraftStep[]): Plan {
+    const steps: PlanStep[] = drafts.slice(0, MAX_STEPS).map((draft) => ({
+      id: newId("step"),
+      title: draft.title,
+      ...(typeof draft.detail === "string" && draft.detail
+        ? { detail: draft.detail }
+        : {}),
+      files: Array.isArray(draft.files) ? draft.files.map(String) : [],
+      status: "pending" as const,
+    }));
+    const plan: Plan = {
+      id: newId("plan"),
+      taskId,
+      goal,
+      steps,
+      createdAt: Date.now(),
+    };
+    this.plans.set(taskId, plan);
+    this.bus.publish("plan.created", plan, taskId);
+    return plan;
   }
 
   get(taskId: string): Plan | undefined {

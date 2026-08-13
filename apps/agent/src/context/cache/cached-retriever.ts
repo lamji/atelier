@@ -8,6 +8,8 @@ export interface RetrieveFilters {
   kinds?: string[];
   /** Restricts provider-neutral session-memory chunks to one conversation. */
   conversationId?: string;
+  /** Opt-in access to user-promoted memories from other conversations. */
+  includeGlobalSessions?: boolean;
 }
 
 /** The retrieval surface the pipeline and tools actually depend on. */

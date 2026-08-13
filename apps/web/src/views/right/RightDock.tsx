@@ -21,6 +21,7 @@ const GraphPane = lazy(() =>
 );
 import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { TimelinePanel } from "@/views/timeline/TimelinePanel";
+import { ProcessConsolePanel } from "@/views/console/ProcessConsolePanel";
 import { languageForPath } from "@/lib/diff-view";
 import {
   clearMentionCache,
@@ -34,6 +35,7 @@ import type { GitDiffView } from "@/state/git.store";
 import type { TimelineEntryVm } from "@/types";
 import type { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
 import type { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
+import type { ProcessConsoleVm } from "@/hooks/useProcessConsoleViewModel";
 
 export interface RightDockProps {
   /** Which pane is visible; the tab bar itself lives in the app header. */
@@ -56,6 +58,8 @@ export interface RightDockProps {
   appTheme: "dark" | "light";
   /** Execution timeline, shown as the Activity pane. */
   timelineEntries: TimelineEntryVm[];
+  /** Streamed process output, shown as the Output pane. */
+  processConsoleVm: ProcessConsoleVm;
 }
 
 /**
@@ -88,9 +92,11 @@ const GIT_DIFF_EDITOR_OPTIONS = {
   renderOverviewRuler: false,
   minimap: { enabled: false },
   fontSize: 13,
-  // See INLINE_DIFF_EDITOR_OPTIONS in diff-view.ts: inline diff mode
-  // packs both original+modified line numbers into one gutter, so
-  // 3 chars is too narrow once line numbers hit 4 digits.
+  // Inline diff mode packs BOTH original and modified line numbers into one
+  // gutter column. 3 chars only fits one 3-digit number — past line 999 the
+  // two run together (e.g. "2968" + "2968" -> "29682968"). This pane is full
+  // width, so it can afford the 6 the pair needs; the changes rail cannot,
+  // and turns line numbers off instead.
   lineNumbersMinChars: 6,
   glyphMargin: false,
   folding: false,
@@ -165,6 +171,13 @@ export function RightDock(props: RightDockProps) {
             freed the dock's bar to become the terminal tab strip. */}
         <Pane active={rightTab === "activity"} mountWhenHidden={false}>
           <TimelinePanel entries={props.timelineEntries} />
+        </Pane>
+
+        {/* Stays mounted: its scroll position is the one piece of state a
+            reader is in the middle of using, and remounting would drop them
+            back at the bottom of a suite they had scrolled up to read. */}
+        <Pane active={rightTab === "output"}>
+          <ProcessConsolePanel vm={props.processConsoleVm} />
         </Pane>
       </div>
     </div>

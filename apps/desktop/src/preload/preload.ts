@@ -2,7 +2,6 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { IPC_CHANNELS, PORT_MESSAGE_TYPE } from "../shared/ipc-contract";
 import type {
   AtelierDesktopApi,
-  AuthUser,
   DesktopProjectInfo,
 } from "../shared/ipc-contract";
 
@@ -19,22 +18,6 @@ ipcRenderer.on(IPC_CHANNELS.workspacePort, (event, attachId: string) => {
 const api: AtelierDesktopApi = {
   platform: process.platform as AtelierDesktopApi["platform"],
   version: process.env.ATELIER_APP_VERSION ?? "dev",
-
-  auth: {
-    getSession: () => ipcRenderer.invoke(IPC_CHANNELS.authSession),
-    startLogin: () => ipcRenderer.invoke(IPC_CHANNELS.authLoginStart),
-    logout: () => ipcRenderer.invoke(IPC_CHANNELS.authLogout),
-    onChanged: (cb: (user: AuthUser | null, error?: string) => void) => {
-      const listener = (
-        _e: unknown,
-        payload: { user: AuthUser | null; error?: string }
-      ): void => cb(payload.user, payload.error);
-      ipcRenderer.on(IPC_CHANNELS.authChanged, listener);
-      return () => {
-        ipcRenderer.removeListener(IPC_CHANNELS.authChanged, listener);
-      };
-    },
-  },
 
   projects: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.projectsList),

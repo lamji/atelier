@@ -53,14 +53,24 @@ export interface TaskOptions {
   /** Vibe coding: autonomous product-builder mode for this task. */
   vibe?: boolean;
   /**
-   * Independent review after the changes land. Absent means ON: only an
-   * explicit `false` skips the review stage and its repair rounds.
+   * Independent review after the changes land. Absent means OFF: only an
+   * explicit `true` runs the review stage and its repair rounds. It is the
+   * most expensive thing a turn can do after the answer is already on
+   * screen, so an interactive send does not pay for it by default.
    */
   autoReview?: boolean;
   /**
-   * System knowledge — the full 10-stage pipeline (retrieval, impact,
-   * plan, review, session memory). Absent means ON: only an explicit
-   * `false` drops the task to a plain Claude/Codex agent loop.
+   * Run the validators over what the task changed. Absent means OFF: only
+   * an explicit `true` runs typecheck/lint/test. They are package scripts
+   * over the whole project, they start after the answer has finished
+   * streaming, and the turn cannot end until they return — minutes spent
+   * where the user is already reading the result.
+   */
+  autoValidate?: boolean;
+  /**
+   * System knowledge — the full pipeline (retrieval, plan, validation,
+   * review, session memory). Absent means ON: only an explicit `false`
+   * drops the task to a plain Claude/Codex agent loop.
    */
   systemKnowledge?: boolean;
   /**

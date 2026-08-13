@@ -1,7 +1,7 @@
 {
   "name": "atelier",
   "private": true,
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Local-first agentic AI software engineering platform",
   "packageManager": "pnpm@10.32.1",
   "engines": {
@@ -13,7 +13,8 @@
     "dev:web": "pnpm --filter @atelier/web dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "lint": "pnpm -r --if-present lint"
+    "lint": "pnpm -r --if-present lint",
+    "bench:chat": "node scripts/bench-chat.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

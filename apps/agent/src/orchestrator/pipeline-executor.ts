@@ -20,6 +20,7 @@ import type { AgentConfig } from "../config/agent-config.js";
 import type { AttachmentStore } from "../context/attachments/attachment-store.js";
 import type { Db } from "../storage/db.js";
 import type { EventBus } from "../events/event-bus.js";
+import type { FileService } from "../workspace/file-service.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { SymbolGraph } from "../knowledge/graph/symbol-graph.js";
 import type { CloneHit, CloneScanner } from "../knowledge/impact/clone-scan.js";
@@ -34,12 +35,15 @@ import { runOneShot } from "../providers/one-shot.js";
 import {
   codexModelName,
   isCodexModel,
+  isGrokModel,
+  grokModelName,
   isOllamaModel,
   ollamaModelName,
   ollamaTargetOf,
   sdkModel,
 } from "../providers/model-routing.js";
 import { runOllamaAgentLoop } from "../providers/ollama/agent-loop.js";
+import { runGrokAgentLoop } from "../providers/grok/agent-loop.js";
 import { runCodexExec } from "../providers/codex/client.js";
 import type { CodexToolBridge } from "../providers/codex/tool-bridge.js";
 import type { PlanTracker } from "./plan-tracker.js";
@@ -56,7 +60,13 @@ import {
   isDirectMode,
   renderPriorTurns,
 } from "./direct-mode.js";
+import { trace } from "./trace.js";
 import { effortFor, isTrivialChat } from "./trivial-chat.js";
+import {
+  CLAUDE_FAST_BUILTINS,
+  claudeEffort,
+  claudeTurnBudget,
+} from "./claude-budget.js";
 import { userRulesPrompt } from "./user-rules.js";
 import { VIBE_RULES } from "./vibe-rules.js";
 import type { UsageMonitor } from "./usage-monitor.js";
@@ -71,6 +81,11 @@ import type {
   SharedSessionContext,
   SharedSessionContextBuilder,
 } from "../context/session/index.js";
+import {
+  isGlobalSessionCommand,
+  parseGeneratedGlobalAlias,
+  type GlobalSessionStore,
+} from "../context/global-session/index.js";
 import { rankCandidates } from "../context/rank/index.js";
 import {
   detectWorkspaceProfile,
@@ -89,7 +104,7 @@ import {
 import type { WorkspaceIgnore } from "../workspace/ignore.js";
 import type { GitService } from "../git/git-service.js";
 import type { ScopeGuard } from "../tools/scope-guard.js";
-import { touchesCode } from "./change-scale/index.js";
+import { testOnlyPaths, touchesCode } from "./change-scale/index.js";
 import type { SkillLoader } from "./skill-loader.js";
 
 /** Built-in SDK tools stay disabled: everything flows through Atelier. */
@@ -110,17 +125,6 @@ const DISABLED_BUILTINS = [
   "TodoWrite",
   "NotebookEdit",
 ];
-
-/**
- * Builtins kept ON, because nothing in Atelier is faster at their job.
- *
- * Grep and Glob are ripgrep — milliseconds against a semantic index query,
- * and a turn spends most of its tool calls looking for things. Task is
- * fan-out: one subagent per angle, in parallel, instead of the main loop
- * walking candidates one at a time. None of the three can mutate the
- * workspace, so the guards above lose nothing.
- */
-const FAST_BUILTINS = ["Grep", "Glob", "Task"];
 
 /**
  * The read-only tool surface, shared by the two phases that must look
@@ -210,6 +214,8 @@ export interface PipelineDeps {
   db: Db;
   bus: EventBus;
   tools: ToolRegistry;
+  /** Workspace file access, for the Ollama path's edit-repair pass. */
+  files: FileService;
   retriever: RetrieverLike;
   graph: SymbolGraph;
   clones: CloneScanner;
@@ -232,6 +238,7 @@ export interface PipelineDeps {
   assembler: PromptAssembler;
   summaries: TaskSummaryStore;
   sharedSessions: SharedSessionContextBuilder;
+  globalSessions: GlobalSessionStore;
   codexTools: CodexToolBridge;
   skillLoader: SkillLoader;
   /** Per-conversation working-set lock, seeded by "@folder" mentions. */
@@ -322,10 +329,17 @@ export interface PipelineOutcome {
 }
 
 /**
- * The mandatory 9-stage pipeline. Every task runs understand -> retrieve
- * -> impact -> plan -> hooks -> execute -> validate -> knowledge ->
- * summary, in order, with stage events published around each — the SDK is
- * only ever invoked inside stages, never free-running.
+ * The 9-stage pipeline: understand -> retrieve -> plan -> hooks -> execute
+ * -> validate -> knowledge -> review -> summary, in order, with stage
+ * events published around each. The SDK is only ever invoked inside a
+ * stage, never free-running.
+ *
+ * Only ONE of those stages costs a model call on the happy path: `execute`.
+ * `understand` and `plan` are regex and bookkeeping (the two classifier
+ * round-trips and the planning round-trip are gone); `retrieve` is local;
+ * `validate` and `review` are both opt-in and skipped by default. `impact`
+ * is not in the list at all — the blast radius is computed at the edit site
+ * by the pre-write hook instead.
  */
 export class PipelineExecutor {
   /**
@@ -338,6 +352,9 @@ export class PipelineExecutor {
 
   /** Cached workspace profile — the scope lock maps mentions onto it. */
   private profile?: Promise<WorkspaceProfile>;
+
+  /** The rule block for the task in flight; see userRules(). */
+  private userRuleBlock?: { taskId: string; text: Promise<string> };
 
   /**
    * Directory maps, cached per locked root. Each is byte-stable for the
@@ -463,7 +480,61 @@ export class PipelineExecutor {
     return this.workspaceBlock;
   }
 
+  /**
+   * The user's own rule files, read once per TASK rather than once per
+   * provider call. A turn that nudges, validates and repairs used to walk
+   * `.atelier/rules` again for each of them.
+   *
+   * Keyed on taskId on purpose: cached across a task, never across turns, so
+   * a rule the user just edited still applies to the very next send. Two
+   * conversations running at once trade the slot and simply re-read, which
+   * is the behaviour this replaced — never a stale block.
+   */
+  private userRules(ctx: TaskContext): Promise<string> {
+    if (this.userRuleBlock?.taskId !== ctx.taskId) {
+      this.userRuleBlock = {
+        taskId: ctx.taskId,
+        text: userRulesPrompt(this.deps.config.workspaceRoot).catch((error) => {
+          this.deps.log.warn({ error }, "user rules unreadable");
+          return "";
+        }),
+      };
+    }
+    return this.userRuleBlock.text;
+  }
+
   async run(ctx: TaskContext): Promise<PipelineOutcome> {
+    if (isGlobalSessionCommand(ctx.prompt)) {
+      const aliasContext = this.deps.globalSessions.aliasContext(ctx.conversationId);
+      const alias =
+        aliasContext.existingAlias ??
+        parseGeneratedGlobalAlias(
+          await this.shortSdkCall(
+            ctx,
+            "Name a durable cross-session memory from its conversation. " +
+              "Return strict JSON only: {\"alias\":\"three-to-six-lowercase-words\"}. " +
+              "Choose an existing alias only when this is clearly the same continuing flow; " +
+              "otherwise create a distinct concise alias. Do not add commentary.",
+            `SESSION TITLE:\n${aliasContext.title}\n\n` +
+              `EXISTING GLOBAL ALIASES:\n${aliasContext.knownAliases.join("\n") || "(none)"}\n\n` +
+              `SESSION TRANSCRIPT:\n${aliasContext.transcript}`,
+            false,
+            3
+          )
+        );
+      const result = await this.deps.globalSessions.promote(
+        ctx.conversationId,
+        alias
+      );
+      const action = result.updated ? "Updated" : "Created";
+      return {
+        assistantText:
+          `${action} global session \"${result.alias}\" (${result.id}) with ` +
+          `${result.chunks} detailed RAG chunk(s). Cross-session retrieval ` +
+          `uses it only while Experimental global session knowledge is enabled in Settings.`,
+        sdkSessionId: null,
+      };
+    }
     // The user unticked "System knowledge": nothing below this line runs.
     if (isDirectMode(ctx.opts)) return this.runDirect(ctx);
     // Lives on the context, not this frame: the orchestrator needs it to
@@ -482,8 +553,24 @@ export class PipelineExecutor {
       }
     });
 
+    // The code guards (impact, modularity, whole-file rewrite) stand down for
+    // chat turns, the same way they do for a direct one. They exist to make
+    // the knowledge engine's rules stick, and their prompt clauses are no
+    // longer carried — a hook that blocks on a rule the model was never told
+    // is a turn that fails and retries. The CONSENT gates are untouched: git
+    // flow, database approval and dev-server still stop and ask the user.
+    this.deps.directTasks.mark(ctx.taskId);
+
     try {
       await this.applyScope(ctx);
+      // Nothing below reads these, and every one of them is memoised — so
+      // starting them here means the workspace layout, the locked project's
+      // directory map and the user's rule files resolve DURING retrieval
+      // instead of after it, on the far side of the only stage that waits on
+      // I/O. Failures are already swallowed inside each.
+      void this.workspaceLayout();
+      void this.scopeContext(ctx);
+      void this.userRules(ctx);
       // Intent WITHOUT a model call. Two classifier round-trips used to run
       // here — each one a provider process spawn — before a single token of
       // the answer existed. What they bought (a kind label, a summary, the
@@ -518,13 +605,17 @@ export class PipelineExecutor {
         const raw = await this.deps.retriever.retrieve(queryText, 24, {
           conversationId: ctx.conversationId,
           pathGlob: scopeGlob(ctx.scope),
+          includeGlobalSessions:
+            this.deps.settings.get().globalSessionKnowledge,
         });
         // The glob prunes at the source for a single-root lock; this is
         // what makes a two-folder lock exact, and it also catches chunk
         // kinds the glob arm does not reach.
         const scoped = raw.chunks.filter(
           (chunk) =>
-            chunk.kind === "session-memory" || inScope(ctx.scope, chunk.path)
+            chunk.kind === "session-memory" ||
+            chunk.kind === "global-session-memory" ||
+            inScope(ctx.scope, chunk.path)
         );
         const result = {
           ...raw,
@@ -572,16 +663,25 @@ export class PipelineExecutor {
       };
       const radius = emptyRadius([]);
 
-      // The checklist, not a planning model call. The rail still shows the
-      // work as the model reports it via update_plan_step; what is gone is
-      // the round-trip that wrote a plan before any file had been read.
+      // No planning model call, and — deliberately — no published plan yet.
+      //
+      // This used to seed a one-step "Respond" placeholder into the tracker
+      // and announce it, which is why a plan never appeared: that stub WAS
+      // the plan, every time, and the UI (reasonably) hides a checklist of
+      // one. The real plan now arrives mid-turn from `set_plan`, once the
+      // model has read enough to commit to one, at the cost of no extra
+      // round-trip. Until then the rail has the stage and the live tool
+      // rows, which is honestly what is known at this point.
+      //
+      // The stub survives only as a local value: the assembler wants a plan
+      // section and the summary wants a goal, and neither is worth a branch.
+      // It is never registered with the tracker, so nothing publishes step
+      // updates against a plan the UI was never given.
       const plan = await this.stage(ctx, "plan", async () => {
         const result = this.trivialPlan(ctx, intent);
-        this.deps.planTracker.setPlan(result);
-        this.deps.bus.publish("plan.created", result, ctx.taskId);
         ctx.record.planGoal = result.goal;
         ctx.record.steps = recordSteps(result.steps);
-        return { value: result, detail: "direct — the model plans as it works" };
+        return { value: result, detail: "the model plans as it works" };
       });
 
       await this.stage(ctx, "hooks", async () => {
@@ -636,7 +736,24 @@ export class PipelineExecutor {
         );
         // A turn that asked to implement and changed nothing has, in
         // practice, ended by offering to implement instead. Push it once.
-        if (!isReadOnly(intent) && changedFiles.size === 0) {
+        //
+        // "Changed nothing" is necessary but nowhere near sufficient: an
+        // imperative prompt that was always going to be answered in prose
+        // ("compare these two approaches") also changes nothing, and the
+        // nudge then bought a second full model turn to be told the same
+        // thing again. The offer itself is the signal the nudge is named
+        // for, and it is right there in the text.
+        //
+        // Trivial chat is excluded outright: a greeting classifies as
+        // `work` (it is imperative in form), and a reply that happens to
+        // end "what would you like to do?" reads as an offer — so without
+        // this guard, saying hello could cost a second full model turn.
+        if (
+          !isReadOnly(intent) &&
+          !isTrivialChat(ctx.prompt, ctx.images.length > 0) &&
+          changedFiles.size === 0 &&
+          endsWithAnOffer(result.text)
+        ) {
           result.text += await this.nudgeToImplement(ctx, appendContext);
         }
         return {
@@ -647,6 +764,19 @@ export class PipelineExecutor {
       let assistantText = exec.text;
 
       const validation = await this.stage(ctx, "validate", async () => {
+        // Opt-IN, for the same reason review is. These are package scripts
+        // over the whole project — a `test` script here is the full suite —
+        // and they run sequentially AFTER the answer has finished streaming,
+        // with the turn unable to end until they return. On a send the user
+        // is watching, that is minutes of the run refusing to finish over a
+        // verdict they can get from their own terminal. Callers that want
+        // it — a long unattended run — pass autoValidate: true.
+        if (ctx.opts.autoValidate !== true) {
+          return {
+            value: [] as ValidationResult[],
+            detail: "validation off — skipped",
+          };
+        }
         if (changedFiles.size === 0) {
           return {
             value: [] as ValidationResult[],
@@ -662,7 +792,9 @@ export class PipelineExecutor {
             detail: "no code changed — validators skipped",
           };
         }
-        const { results, extraText } = await this.validateWithFixLoop(ctx);
+        const { results, extraText } = await this.validateWithFixLoop(ctx, [
+          ...changedFiles,
+        ]);
         assistantText += extraText;
         const failed = results.filter((r) => !r.ok).length;
         return {
@@ -677,8 +809,28 @@ export class PipelineExecutor {
       });
       ctx.record.validation = validation;
 
+      // Review is the ONLY thing downstream that needs the index current —
+      // it probes the code as it is now, so a stale index would have it
+      // judging the version it replaced. Everything else that reads the
+      // index is a LATER task, and `drainFor` is itself the barrier those
+      // take. So the wait happens only when review is actually going to
+      // run; otherwise the parse + embed of the changed files continues in
+      // the background and the turn ends on the answer, not on the indexer.
+      const reviewWillRun = ctx.opts.autoReview === true && changedFiles.size > 0;
       await this.stage(ctx, "knowledge", async () => {
-        await this.deps.indexer.drainFor([...changedFiles]);
+        const drained = this.deps.indexer.drainFor([...changedFiles]);
+        if (!reviewWillRun) {
+          // Nothing awaits this, so nothing would surface a rejection.
+          void drained.catch(() => undefined);
+          return {
+            value: undefined,
+            detail:
+              changedFiles.size === 0
+                ? "nothing to index"
+                : `indexing ${changedFiles.size} file(s) in background`,
+          };
+        }
+        await drained;
         return {
           value: undefined,
           detail: `index current for ${changedFiles.size} file(s)`,
@@ -691,9 +843,12 @@ export class PipelineExecutor {
       // it and can send it back for a fix + re-review before passing.
       let reviewVerdict: "pass" | "fail" | null = null;
       await this.stage(ctx, "review", async () => {
-        // Auto review off is a deliberate choice, not a failure: the stage
-        // reports why it did nothing and the run carries on to the summary.
-        if (ctx.opts.autoReview === false) {
+        // Opt-IN, not opt-out. A single review pass costs 30-45% of the
+        // execute stage and each attempt is a fresh SDK session; on a turn
+        // the user is watching, that lands entirely after the answer has
+        // finished streaming and reads as the run refusing to end. Callers
+        // that want it — a long unattended run — pass autoReview: true.
+        if (ctx.opts.autoReview !== true) {
           return { value: undefined, detail: "auto review off — skipped" };
         }
         if (changedFiles.size === 0) {
@@ -734,7 +889,12 @@ export class PipelineExecutor {
         ctx.record.steps = recordSteps(
           this.deps.planTracker.get(ctx.taskId)?.steps ?? plan.steps
         );
-        await this.deps.summaries.save(
+        // Not awaited. Every SQL write inside `save` runs synchronously
+        // before its first await, so the memory row and its chunks exist by
+        // the time this returns — only the embedding is still outstanding,
+        // and nothing in THIS turn reads it. Waiting for the model to embed
+        // a summary the user has already finished reading is pure tail.
+        const saved = this.deps.summaries.save(
           buildTaskSummary({
             taskId: ctx.taskId,
             conversationId: ctx.conversationId,
@@ -753,6 +913,8 @@ export class PipelineExecutor {
             status: "completed",
           })
         );
+        // Nothing awaits it, so nothing would surface a rejection.
+        void saved.catch(() => undefined);
         return { value: undefined, detail: clip(text, 100) };
       });
 
@@ -762,6 +924,7 @@ export class PipelineExecutor {
       // The lock is stored per conversation; this only drops the per-task
       // binding so a finished taskId cannot leak into a later run.
       this.deps.scopeGuard.release(ctx.taskId);
+      this.deps.directTasks.release(ctx.taskId);
     }
   }
 
@@ -845,41 +1008,44 @@ export class PipelineExecutor {
     this.deps.bus.publish("pipeline.stage.started", { stage }, ctx.taskId);
     try {
       const { value, detail, ok = true } = await fn();
+      const durationMs = Date.now() - startedAt;
       this.deps.bus.publish(
         "pipeline.stage.completed",
-        { stage, ok, detail, durationMs: Date.now() - startedAt },
+        { stage, ok, detail, durationMs },
         ctx.taskId
       );
+      trace({ kind: "stage", taskId: ctx.taskId, stage, ms: durationMs, ok, detail });
       return value;
     } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const detail = clip(String(error), 200);
       this.deps.bus.publish(
         "pipeline.stage.completed",
-        {
-          stage,
-          ok: false,
-          detail: clip(String(error), 200),
-          durationMs: Date.now() - startedAt,
-        },
+        { stage, ok: false, detail, durationMs },
         ctx.taskId
       );
+      trace({ kind: "stage", taskId: ctx.taskId, stage, ms: durationMs, ok: false, detail });
       throw error;
     }
   }
 
+  /**
+   * The goal, with no steps — a placeholder for the things downstream that
+   * want a Plan object (the assembler's plan section, the summary line).
+   *
+   * Stepless ON PURPOSE. It used to carry one invented step, and because
+   * that step had a minted id it was rendered into the model's context
+   * under "PLAN (report progress via update_plan_step)" — an id the tracker
+   * had never been given, so the one call it invited came back "Unknown
+   * step id for this task". An empty step list makes the assembler skip the
+   * section entirely, and the model writes the real plan with `set_plan`.
+   */
   private trivialPlan(ctx: TaskContext, intent: Intent): Plan {
     return {
       id: newId("plan"),
       taskId: ctx.taskId,
       goal: intent.summary,
-      steps: [
-        {
-          id: newId("step"),
-          title:
-            intent.kind === "question" ? "Answer from knowledge" : "Respond",
-          files: [],
-          status: "pending",
-        },
-      ],
+      steps: [],
       createdAt: Date.now(),
     };
   }
@@ -1048,11 +1214,13 @@ export class PipelineExecutor {
 
   /** Bounded fix loop: run validators, feed failures back, retry. */
   private async validateWithFixLoop(
-    ctx: TaskContext
+    ctx: TaskContext,
+    changedFiles: string[]
   ): Promise<{ results: ValidationResult[]; extraText: string }> {
     const kinds = this.deps.validators.detect();
     if (kinds.length === 0) return { results: [], extraText: "" };
     const maxRetries = this.deps.settings.get().maxValidationRetries;
+    const testPaths = testOnlyPaths(changedFiles);
     let extraText = "";
     let results: ValidationResult[] = [];
 
@@ -1061,7 +1229,18 @@ export class PipelineExecutor {
       for (const kind of kinds) {
         if (ctx.abort.signal.aborted) throw new AbortError();
         this.deps.bus.publish("validation.started", { kind }, ctx.taskId);
-        const result = await this.deps.validators.run(kind, ctx.abort.signal);
+        const result = await this.deps.validators.run(kind, {
+          signal: ctx.abort.signal,
+          paths: testPaths,
+          // Streamed so the run is visible while it happens; a validator is
+          // the longest stretch of a task with nothing else to show.
+          onChunk: (chunk) =>
+            this.deps.bus.publish(
+              "validation.output",
+              { kind, chunk },
+              ctx.taskId
+            ),
+        });
         this.deps.bus.publish("validation.result", result, ctx.taskId);
         this.recordTestRun(ctx.taskId, kind, result);
         results.push(result);
@@ -1233,7 +1412,8 @@ export class PipelineExecutor {
     ctx: TaskContext,
     systemPrompt: string,
     prompt: string,
-    withImages = false
+    withImages = false,
+    claudeMaxTurns = 1
   ): Promise<string> {
     return runOneShot({
       model: ctx.opts.model,
@@ -1243,6 +1423,7 @@ export class PipelineExecutor {
       cwd: this.deps.config.workspaceRoot,
       signal: ctx.abort.signal,
       effort: ctx.opts.effort,
+      claudeMaxTurns,
       ...(withImages && ctx.images.length ? { images: ctx.images } : {}),
     });
   }
@@ -1342,16 +1523,16 @@ export class PipelineExecutor {
     // knowledge engine this turn does not have, down to tools it cannot
     // call and hooks that will not fire.
     const direct = isDirectMode(ctx.opts);
-    // The modularity clause rides only when the guard is live: a direct turn
-    // is exempted from the guard outright, and every other turn asks the
-    // guard itself. The user's own rules stay LAST in both modes — they are
-    // instructions for this workspace, and they are declared to win.
-    const modularity =
-      !direct && this.deps.modularityInForce() ? MODULARITY_RULE : "";
+    // FAST_RULES, not SYSTEM_RULES. The old block was ~110 lines describing
+    // guards this turn no longer arms, and prose the model paid to read on
+    // every cache miss. What survived is only what changes what the model
+    // DOES: reach for the index first, finish the turn, stay in the
+    // workspace, and the two hooks that will stop it and ask the user.
+    // The modularity clause went with the guard that enforced it.
+    // The user's own rules stay LAST — they are instructions for this
+    // workspace, and they are declared to win.
     const rules =
-      (direct ? DIRECT_RULES : SYSTEM_RULES) +
-      modularity +
-      (await userRulesPrompt(this.deps.config.workspaceRoot));
+      (direct ? DIRECT_RULES : FAST_RULES) + (await this.userRules(ctx));
     // Rides AFTER the static rules, never between them: the lock changes
     // per conversation, and splitting the static prefix would invalidate
     // the provider prompt cache on every turn. A direct turn has no lock —
@@ -1374,7 +1555,10 @@ export class PipelineExecutor {
           prompt,
           images,
           tools: this.deps.tools,
+          files: this.deps.files,
           toolNames: direct ? DIRECT_TOOLS : undefined,
+          // Decides the reasoning models' hidden pass; see the loop.
+          effort,
           taskId: ctx.taskId,
           signal: ctx.abort.signal,
           emitText: (delta) => {
@@ -1386,6 +1570,56 @@ export class PipelineExecutor {
                 messageId: ctx.messageId,
                 delta,
               },
+              ctx.taskId
+            );
+          },
+          // Same surface Claude's thinking uses, so a reasoning model's
+          // long quiet stretch shows as thought instead of a hang.
+          emitThinking: (delta) => {
+            this.deps.bus.publish(
+              "agent.thinking.delta",
+              { conversationId: ctx.conversationId, delta },
+              ctx.taskId
+            );
+          },
+        }),
+      };
+    }
+
+    if (isGrokModel(ctx.opts.model)) {
+      return {
+        text: await runGrokAgentLoop({
+          model: grokModelName(ctx.opts.model as string),
+          system:
+            layout +
+            rules +
+            (ctx.opts.vibe ? VIBE_RULES : "") +
+            scoped +
+            appendContext,
+          prompt,
+          images,
+          tools: this.deps.tools,
+          files: this.deps.files,
+          toolNames: direct ? DIRECT_TOOLS : undefined,
+          effort,
+          taskId: ctx.taskId,
+          signal: ctx.abort.signal,
+          emitText: (delta) => {
+            ctx.collectedText += delta;
+            this.deps.bus.publish(
+              "chat.message.delta",
+              {
+                conversationId: ctx.conversationId,
+                messageId: ctx.messageId,
+                delta,
+              },
+              ctx.taskId
+            );
+          },
+          emitThinking: (delta) => {
+            this.deps.bus.publish(
+              "agent.thinking.delta",
+              { conversationId: ctx.conversationId, delta },
               ctx.taskId
             );
           },
@@ -1401,7 +1635,10 @@ export class PipelineExecutor {
       const text = await runCodexExec({
         cwd: this.deps.config.workspaceRoot,
         model: codexModelName(ctx.opts.model as string),
-        sandbox: ctx.opts.planMode ? "read-only" : "workspace-write",
+        // Codex workspace mutations must go through Atelier MCP so hooks,
+        // diffs, scope and cancellation stay observable. Its native sandbox
+        // remains read-only even for implementation turns.
+        sandbox: "read-only",
         effort,
         signal: ctx.abort.signal,
         toolBridge,
@@ -1449,6 +1686,19 @@ export class PipelineExecutor {
     // With images, the Claude turn is a structured multimodal user message.
     // The plan pass also needs streaming input — setPermissionMode is only
     // available in that mode — so plain text is wrapped the same way there.
+    // Measured from just before the SDK is asked for a session: everything
+    // after this point is process spawn + prefill + the model's own first
+    // token — the half of the wait no amount of pipeline work can shorten,
+    // and the number to compare a prompt-size change against.
+    const spawnedAt = Date.now();
+    let firstToken = false;
+    /**
+     * SDK-builtin tool calls awaiting their result, by tool_use id. Only
+     * builtins land here — MCP calls already have their whole lifecycle
+     * published by ToolRegistry. Anything still open when the stream ends
+     * is closed out below, so a rail row can never be left spinning.
+     */
+    const builtinToolCalls = new Map<string, { name: string; at: number }>();
     const stream = query({
       prompt: hasImages
         ? imagePrompt(prompt, images)
@@ -1503,7 +1753,12 @@ export class PipelineExecutor {
         ...(sdkModel(ctx.opts.model)
           ? { model: sdkModel(ctx.opts.model) }
           : {}),
-        ...(sdkEffort(effort) ? { effort: sdkEffort(effort) } : {}),
+        ...(claudeEffort(effort) ? { effort: claudeEffort(effort) } : {}),
+        // A normal Claude Code query is otherwise open-ended. Tool loops and
+        // failed repair attempts can keep spending the five-hour quota long
+        // after the useful work stopped. Purpose-aware ceilings leave enough
+        // room for a grounded coding pass while bounding every SDK session.
+        maxTurns: claudeTurnBudget(purpose),
         disallowedTools: DISABLED_BUILTINS,
         mcpServers: { [MCP_SERVER_NAME]: mcpServer },
         strictMcpConfig: true,
@@ -1521,7 +1776,7 @@ export class PipelineExecutor {
                         (name) => `mcp__${MCP_SERVER_NAME}__${name}`
                       )
                     : [`mcp__${MCP_SERVER_NAME}__*`])),
-                ...FAST_BUILTINS,
+                ...CLAUDE_FAST_BUILTINS,
               ],
         includePartialMessages: true,
         // Atelier injects selected skills itself so disabled skills cannot
@@ -1555,6 +1810,55 @@ export class PipelineExecutor {
       if (m.type === "rate_limit_event") {
         this.deps.usage.recordEvent(m.rate_limit_info);
       }
+      // The SDK's OWN tools — Grep and Glob (CLAUDE_FAST_BUILTINS) — never
+      // touch ToolRegistry, so nothing was publishing tool.* for them. They
+      // are also most of what a turn does: it spends its calls looking for
+      // things. The rail therefore sat on whichever MCP label happened to be
+      // last while the model searched, and a Task fan-out was wholly
+      // invisible. These three branches close that hole; the registry stays
+      // the source of truth for its own tools, so MCP names are skipped here
+      // rather than reported twice.
+      if (m.type === "assistant") {
+        for (const block of assistantToolUses(m)) {
+          builtinToolCalls.set(block.id, { name: block.name, at: Date.now() });
+          this.deps.bus.publish(
+            "tool.started",
+            { toolCallId: block.id, name: block.name, input: block.input },
+            ctx.taskId
+          );
+        }
+      }
+      if (m.type === "user") {
+        for (const block of userToolResults(m)) {
+          const started = builtinToolCalls.get(block.toolUseId);
+          if (!started) continue;
+          builtinToolCalls.delete(block.toolUseId);
+          const durationMs = Date.now() - started.at;
+          if (block.isError) {
+            this.deps.bus.publish(
+              "tool.failed",
+              {
+                toolCallId: block.toolUseId,
+                name: started.name,
+                error: clip(block.text || "tool reported an error", 300),
+                durationMs,
+              },
+              ctx.taskId
+            );
+          } else {
+            this.deps.bus.publish(
+              "tool.completed",
+              {
+                toolCallId: block.toolUseId,
+                name: started.name,
+                result: { summary: clip(block.text, 200) },
+                durationMs,
+              },
+              ctx.taskId
+            );
+          }
+        }
+      }
       if (m.type === "stream_event") {
         const event = m.event as {
           type?: string;
@@ -1562,6 +1866,15 @@ export class PipelineExecutor {
         };
         if (event?.type === "content_block_delta" && event.delta) {
           if (event.delta.type === "text_delta" && event.delta.text) {
+            if (!firstToken) {
+              firstToken = true;
+              trace({
+                kind: "first_token",
+                taskId: ctx.taskId,
+                ms: Date.now() - spawnedAt,
+                detail: purpose,
+              });
+            }
             text += event.delta.text;
             ctx.collectedText += event.delta.text;
             this.deps.bus.publish(
@@ -1604,6 +1917,22 @@ export class PipelineExecutor {
         }
       }
     }
+    // A builtin whose result never arrived — the stream ended first, or the
+    // turn was cancelled mid-call. Left open, its row spins in the rail for
+    // the rest of the session, which reads as a hung tool.
+    for (const [toolCallId, started] of builtinToolCalls) {
+      this.deps.bus.publish(
+        "tool.failed",
+        {
+          toolCallId,
+          name: started.name,
+          error: ctx.abort.signal.aborted ? "cancelled" : "no result returned",
+          durationMs: Date.now() - started.at,
+        },
+        ctx.taskId
+      );
+    }
+    builtinToolCalls.clear();
     // Unwind on the spot rather than carrying a half-streamed answer into the
     // next stage, which would only be stopped at the following boundary.
     if (ctx.abort.signal.aborted) throw new AbortError();
@@ -1673,12 +2002,6 @@ export class PipelineExecutor {
   }
 }
 
-function sdkEffort(
-  effort: TaskOptions["effort"]
-): Exclude<TaskOptions["effort"], "ultra"> | undefined {
-  return effort === "ultra" ? undefined : effort;
-}
-
 /**
  * Token cap for the shared memory block. A bare "continue" classifies as
  * chat, which is precisely the turn that needs the thread most — so the light
@@ -1703,7 +2026,83 @@ function chunkLabel(preview: string): string {
   return head.length > 60 ? `${head.slice(0, 57)}…` : head;
 }
 
-/** Exported so Settings can display exactly what the agent is told. */
+/**
+ * What a chat turn actually carries.
+ *
+ * This replaced SYSTEM_RULES on the interactive path. The test each clause
+ * had to pass was "does the turn come out different without it?" — a rule
+ * that only describes good taste is prose the model pays for on every cache
+ * miss and then averages away. The clauses below survive because each one
+ * changes execution behavior or prevents an observed failure mode:
+ *
+ * - KNOWLEDGE FIRST, because the index is the thing Atelier has and a stock
+ *   CLI does not, and the model will not reach for it unprompted.
+ * - AUTONOMOUS EXECUTION, because without it turns end by offering to work.
+ * - WORKSPACE CONFINEMENT, because it is the one boundary with no hook.
+ * - GIT FLOW and DATABASE, because those hooks DO block, and a model that
+ *   was not told loops against them.
+ * - REPORTING, because narration is most of the text on a slow turn.
+ *
+ * Everything tied to a guard that now stands down (targeted edits, edit
+ * impact, modularity) went with it: a rule stated but not enforced, or
+ * enforced but not stated, is worse than neither.
+ *
+ * Byte-stable — it rides in the static half of the prompt for caching.
+ */
+export const FAST_RULES =
+  "KNOWLEDGE FIRST: call retrieve_knowledge / query_knowledge_graph / " +
+  "search_symbols before falling back to search_workspace or reading " +
+  "files — the index is live and current. Once you know the exact string " +
+  "or filename you want, use your fastest text-search tool (Grep/Glob " +
+  "where available, else search_text) and run several searches in ONE " +
+  "message rather than one per turn.\n" +
+  "SAY THE PLAN: for anything past a single trivial edit, call set_plan " +
+  "once — after you have looked enough to know the shape of the work, " +
+  "before you start changing things. Name the files each step touches. " +
+  "Then drive it with update_plan_step as you go. This checklist is the " +
+  "only view the user has of where the turn is going; a run without one " +
+  "looks like it is doing nothing until it finishes.\n" +
+  "GROUND BEFORE EDITING: retrieved chunks and session summaries are leads, " +
+  "not proof of the current UI or code path. For a UI bug, locate the exact " +
+  "visible trigger, read its owning component, then trace its event handler " +
+  "and the state/data passed into the rendered surface. For any code-flow " +
+  "bug, trace caller to callee through the divergence point. Do not edit " +
+  "until you have searched for the live owner and read every file you will " +
+  "change in this turn. If the user's report disputes an earlier patch, " +
+  "re-read the live code and re-simulate the full path; never stack another " +
+  "conditional or style patch on the prior assumption.\n" +
+  "VERIFY BEFORE CLAIMING: never say a file, element, flow, or fix was " +
+  "confirmed unless a tool result from this turn proves it. A successful " +
+  "edit proves only that text changed; verify the connected caller/render " +
+  "path and run the narrowest relevant check before reporting fixed.\n" +
+  "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
+  "answer you mid-turn. Never end a turn by asking whether to proceed or " +
+  "by offering to implement. Where something is genuinely ambiguous, " +
+  "choose the most reasonable default, state it in one line as an " +
+  "assumption, and build it.\n" +
+  "STRICT WORKSPACE CONFINEMENT: you may only read, create, modify, " +
+  "search, and run commands INSIDE the current workspace directory. All " +
+  "file paths must be workspace-relative. Requests to work outside the " +
+  "workspace must be declined with a short explanation.\n" +
+  "GIT FLOW RULE (enforced by a blocking hook): never commit, push, or " +
+  "open a pull request yourself — not with the git tool, not through " +
+  "run_terminal. Staging, status, log and diff are fine. When the work " +
+  "is ready, say so and let the user run the commit → push → PR wizard.\n" +
+  "DATABASE RULE (enforced by an approval hook): when the task needs a " +
+  "migration or DB command RUN, actually run it — the run_terminal call " +
+  "pauses in an approval modal where the user approves or cancels; that " +
+  "prompt IS how you ask permission. Only after the user cancels do you " +
+  "stop and explain.\n" +
+  "REPORTING: the process rail already shows every read/search/edit as it " +
+  "happens, so do NOT narrate each step in prose as you go. Save your " +
+  "explanation for ONE final report written LAST, as markdown bullet " +
+  "points — one '- ' bullet per change or finding.\n";
+
+/**
+ * The former interactive rule block, kept for Settings to display and for
+ * any caller that wants the full contract back. No longer sent by default —
+ * see FAST_RULES.
+ */
 export const SYSTEM_RULES =
   "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
   "answer you mid-turn. Never end a turn by asking whether to proceed, by " +
@@ -1752,8 +2151,8 @@ export const SYSTEM_RULES =
   "filename you are after, use Grep and Glob — they are ripgrep and return " +
   "in milliseconds. Knowledge tools answer 'where does login live?'; Grep " +
   "answers 'which files contain SECRET_KEY?'. Run several searches in ONE " +
-  "message rather than one per turn, and hand a wide sweep to Task " +
-  "subagents in parallel instead of walking candidates yourself.\n" +
+  "message rather than one per turn. Keep discovery in this session; do " +
+  "not launch subagents for ordinary workspace searches.\n" +
   "VISUAL GROUNDING: when the request includes a screenshot or names " +
   "on-screen text (a label, button, plan name, id), FIRST search for those " +
   "literal visible strings to map the pixels to the real element — never " +
@@ -2289,17 +2688,144 @@ export function readIntent(prompt: string): Intent {
 /** A path or "@mention" as typed: `src/app.ts`, `apps/web`, `Composer.tsx`. */
 const TARGET_PATH = /@?[\w.-]+(?:[/\\][\w.-]+)+|@?[\w-]+\.[a-z]{1,4}\b/gi;
 
+/** Prefix every Atelier MCP tool carries once the SDK has namespaced it. */
+const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
+
+interface BuiltinToolUse {
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/**
+ * The `tool_use` blocks in an assistant message, minus Atelier's own.
+ *
+ * ToolRegistry.run already publishes the full lifecycle for every MCP tool,
+ * so reporting them here as well would double every read and edit in the
+ * rail. What is left is exactly the surface nothing else observes: the
+ * builtins in CLAUDE_FAST_BUILTINS.
+ */
+function assistantToolUses(message: Record<string, unknown>): BuiltinToolUse[] {
+  // Ignore nested SDK activity defensively. `Task` is not offered on the
+  // normal Atelier surface anymore, but SDK/provider changes must not make
+  // nested tool traffic look like main-session work in the process rail.
+  if (message.parent_tool_use_id != null) return [];
+  const inner = message.message as { content?: unknown } | undefined;
+  if (!Array.isArray(inner?.content)) return [];
+  const uses: BuiltinToolUse[] = [];
+  for (const raw of inner.content) {
+    const block = raw as Record<string, unknown>;
+    if (block?.type !== "tool_use") continue;
+    const id = typeof block.id === "string" ? block.id : "";
+    const name = typeof block.name === "string" ? block.name : "";
+    if (!id || !name || name.startsWith(MCP_TOOL_PREFIX)) continue;
+    uses.push({ id, name, input: block.input });
+  }
+  return uses;
+}
+
+interface BuiltinToolResult {
+  toolUseId: string;
+  text: string;
+  isError: boolean;
+}
+
+/**
+ * The `tool_result` blocks in a user message. Content is either a plain
+ * string or the block array the API also accepts, so both are flattened to
+ * the short text the rail shows beside a finished row.
+ */
+function userToolResults(
+  message: Record<string, unknown>
+): BuiltinToolResult[] {
+  // Matches the filter on the tool_use side; a result whose call was never
+  // published has nothing to close anyway (the id lookup would miss).
+  if (message.parent_tool_use_id != null) return [];
+  const inner = message.message as { content?: unknown } | undefined;
+  if (!Array.isArray(inner?.content)) return [];
+  const results: BuiltinToolResult[] = [];
+  for (const raw of inner.content) {
+    const block = raw as Record<string, unknown>;
+    if (block?.type !== "tool_result") continue;
+    const toolUseId =
+      typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+    if (!toolUseId) continue;
+    results.push({
+      toolUseId,
+      text: flattenResultContent(block.content),
+      isError: block.is_error === true,
+    });
+  }
+  return results;
+}
+
+function flattenResultContent(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((raw) => {
+      const part = raw as Record<string, unknown>;
+      return part?.type === "text" && typeof part.text === "string"
+        ? part.text
+        : "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 /** True when nothing is expected to change — a question, asked plainly. */
 function isReadOnly(intent: Intent): boolean {
   return intent.kind === "question";
 }
 
-function looksLikeQuestion(prompt: string): boolean {
+/**
+ * Does the answer end by ASKING to do the work instead of doing it?
+ *
+ * Only the tail is tested: a turn may reasonably say "I could also add
+ * tests" halfway through and then get on with the job. What the nudge is
+ * for is the closing line that hands the turn back to a user who is not
+ * there — "want me to implement this?", "let me know and I'll proceed".
+ */
+function endsWithAnOffer(text: string): boolean {
+  const tail = text.trimEnd().slice(-400).toLowerCase();
+  if (!tail) return false;
   return (
-    /\?\s*$/.test(prompt.trim()) ||
-    /^(what|where|when|why|how|who|is|are|can|does|do|did)\b/i.test(
-      prompt.trim()
-    )
+    /\b(?:want|would you like|shall i|should i|do you want)\b[^.?!]*\?/.test(
+      tail
+    ) ||
+    /\b(?:say the word|let me know|just tell me|if you'?d like|if you want|on your go|give me the go[- ]?ahead|happy to (?:implement|proceed|do that|make))\b/.test(
+      tail
+    ) ||
+    /\bi(?:'| wi)?ll (?:go ahead and )?(?:implement|apply|make|write|add) (?:it|them|this|these|that)\b/.test(
+      tail
+    ) ||
+    /\bready to (?:implement|apply|proceed)\b/.test(tail)
+  );
+}
+
+/**
+ * Openers that ask to be TOLD something rather than to have something
+ * changed. Kept separate from the interrogatives above because they are
+ * imperative in form — "explain the auth flow" parses as a command, and
+ * classifying it as work is what made a purely explanatory turn pay for a
+ * second full model round-trip when it (correctly) edited nothing.
+ *
+ * Deliberately not here: "fix", "add", "make", "update", "refactor",
+ * "implement", "rename", "remove" — those DO expect the code to move, and
+ * a turn that answers one of them with prose really has stopped short.
+ */
+const EXPLAIN_OPENERS =
+  /^(?:please\s+)?(?:explain|describe|summari[sz]e|compare|analy[sz]e|review|audit|investigate|explore|walk\s+me\s+through|tell\s+me|show\s+me|help\s+me\s+understand|look\s+(?:at|into)|find|locate|list|trace|check|inspect|what'?s|where'?s|which)\b/i;
+
+function looksLikeQuestion(prompt: string): boolean {
+  const trimmed = prompt.trim();
+  return (
+    /\?\s*$/.test(trimmed) ||
+    /^(what|where|when|why|how|who|is|are|can|could|should|does|do|did|was|were)\b/i.test(
+      trimmed
+    ) ||
+    EXPLAIN_OPENERS.test(trimmed)
   );
 }
 

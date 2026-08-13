@@ -314,10 +314,48 @@ export function createAtelierMcpServer(
       { annotations: { readOnlyHint: true } }
     ),
     tool(
+      "set_plan",
+      "Publish the plan for this task — the checklist the user watches " +
+        "while you work. Call it ONCE, as soon as you know the shape of " +
+        "the work and before you start changing things, for anything " +
+        "beyond a single trivial edit. State the steps you will actually " +
+        "take, in order, naming the files each one touches; do not pad it " +
+        "with steps you have no intention of doing. Returns the step ids " +
+        "— drive them with update_plan_step as you go.",
+      {
+        goal: z
+          .string()
+          .describe("One line: what this task delivers, in the user's terms"),
+        steps: z
+          .array(
+            z.object({
+              title: z
+                .string()
+                .describe("Short imperative step, e.g. 'Add the /health route'"),
+              detail: z
+                .string()
+                .optional()
+                .describe("One line of extra context, when the title needs it"),
+              files: z
+                .array(z.string())
+                .optional()
+                .describe(
+                  "Workspace-relative files this step touches. The checklist " +
+                    "advances itself when one of them is edited, so these are " +
+                    "worth getting right."
+                ),
+            })
+          )
+          .describe("The steps, in the order you will do them (max 12)"),
+      },
+      (input) => run("set_plan", input)
+    ),
+    tool(
       "update_plan_step",
       "Report progress on the current task plan. Call when you start a " +
         "step (in-progress) and when you finish it (done/failed/skipped). " +
-        "Step ids appear in the PLAN section of your context.",
+        "Step ids come back from set_plan and appear in the PLAN section " +
+        "of your context.",
       {
         stepId: z.string().describe("The [step_...] id from the plan"),
         status: z.enum([

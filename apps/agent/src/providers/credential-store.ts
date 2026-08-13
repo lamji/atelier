@@ -35,6 +35,8 @@ export interface ProviderConfig {
    * picker would bury the handful anyone actually uses.
    */
   enabledModels?: string[];
+  /** Models this account's /api/chat rejected as subscription-only. */
+  subscriptionRequiredModels?: string[];
 }
 
 /** id -> config, for the providers we know about. */

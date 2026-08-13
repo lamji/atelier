@@ -10,6 +10,13 @@ import { useConnectionStore } from "@/state/connection.store";
 import { useSessionsStore, type SessionVm } from "@/state/sessions.store";
 import { useMarkdownStore } from "@/state/markdown.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
+import {
+  BACKEND_ENGINEER_CHOICE,
+  markUiUxReferencesSent,
+  UI_UX_DESIGNER_CHOICE,
+  UI_UX_DESIGNER_REFERENCE_PATHS,
+  uiUxReferencesWereSent,
+} from "@/lib/agent-skills";
 import { useProvidersStore } from "@/state/providers.store";
 import {
   usePreferencesStore,
@@ -40,6 +47,64 @@ const MAX_PROMPT_FILE_CHARS = 32_000;
 export const NO_PROMPT_FILE = "none";
 
 const MD_REFETCH_DEBOUNCE_MS = 400;
+
+/**
+ * The picker exposes agent roles beside the provider rows. UI/UX Designer
+ * takes the Claude roster's advertised Opus 5 row when present (`opus` is
+ * the SDK alias fallback if a probe is unavailable or labels have changed).
+ * Backend Engineer takes the FIRST Codex row: the Codex CLI catalog arrives
+ * priority-sorted with the flagship on top, so the first row is the highest
+ * and latest Codex model; `codex/default` defers to the signed-in session's
+ * configured model if the roster carries no Codex rows.
+ */
+function resolveAgentModel(
+  choice: ModelChoice,
+  models: ModelOption[]
+): string | undefined {
+  if (choice === "default") return undefined;
+  if (choice === BACKEND_ENGINEER_CHOICE) {
+    const flagship = models.find((model) => model.provider === "codex");
+    return flagship?.value ?? "codex/default";
+  }
+  if (choice !== UI_UX_DESIGNER_CHOICE) return choice;
+  const opusFive = models.find(
+    (model) =>
+      (model.provider ?? "claude") === "claude" &&
+      /\bopus\s*5\b/i.test(
+        `${model.label} ${model.description ?? ""} ${model.resolvedModel ?? ""}`
+      )
+  );
+  return opusFive?.value ?? "opus";
+}
+
+/** Low → high, mirroring the agent's own ordering of reasoning levels. */
+const EFFORT_RANK = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+/**
+ * Backend Engineer defaults to the resolved Codex row's HIGHEST supported
+ * reasoning level ("Codex highest"); an explicit pick always wins, and any
+ * other role keeps the plain default-means-unset behavior.
+ */
+function resolveAgentEffort(
+  choice: ModelChoice,
+  models: ModelOption[]
+): NonNullable<ModelOption["reasoningLevels"]>[number] | undefined {
+  if (choice !== BACKEND_ENGINEER_CHOICE) return undefined;
+  const flagship = models.find((model) => model.provider === "codex");
+  const levels = flagship?.reasoningLevels;
+  if (!levels || levels.length === 0) return undefined;
+  return [...levels].sort(
+    (a, b) => EFFORT_RANK.indexOf(a) - EFFORT_RANK.indexOf(b)
+  )[levels.length - 1];
+}
+
+function promptForAgentSkill(choice: ModelChoice, prompt: string): string {
+  if (choice === UI_UX_DESIGNER_CHOICE) return `/ui-ux-designer ${prompt}`;
+  if (choice === BACKEND_ENGINEER_CHOICE) {
+    return `/secure-backend-integrator ${prompt}`;
+  }
+  return prompt;
+}
 
 function clipPromptFile(content: string): string {
   if (content.length <= MAX_PROMPT_FILE_CHARS) return content;
@@ -89,11 +154,44 @@ function readImage(file: File): Promise<ImageResult> {
   });
 }
 
+/**
+ * UI/UX Designer has visual references, not merely a written style guide.
+ * Resolve through Vite's base URL so the exact same files load in dev and
+ * from the packaged desktop app's file:// bundle.
+ */
+async function loadUiUxDesignerReferences(): Promise<PendingImage[]> {
+  const results = await Promise.all(
+    UI_UX_DESIGNER_REFERENCE_PATHS.map(async (path, index) => {
+      const url = new URL(`${import.meta.env.BASE_URL}${path}`, window.location.href);
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`couldn't load UI reference ${index + 1}`);
+      }
+      const blob = await response.blob();
+      return readImage(
+        new File([blob], `ui-ux-reference-${index + 1}.png`, {
+          type: blob.type || "image/png",
+        })
+      );
+    })
+  );
+  const rejected = results.find((result) => !result.ok);
+  if (rejected && !rejected.ok) throw new Error(rejected.reason);
+  return results.flatMap((result) => (result.ok ? [result.image] : []));
+}
+
 export interface ComposerViewModel {
   input: string;
   setInput: (value: string) => void;
   /** Ready to send: connected AND a session is selected. */
   connected: boolean;
+  /**
+   * A turn is in flight. Model, effort, prompt file and the mode switches
+   * are read once at task.start, so they lock WHILE a run is happening —
+   * changing them mid-flight would only look like it applied. The moment
+   * the agent is idle they unlock again: the next turn is free to use a
+   * different model or drop out of plan mode.
+   */
   busy: boolean;
   cancelling: boolean;
   /**
@@ -128,6 +226,9 @@ export interface ComposerViewModel {
   /** Ticked: an independent reviewer checks the changes before the summary. */
   autoReview: boolean;
   changeAutoReview: (value: boolean) => void;
+  /** Ticked: typecheck/lint/test run over what the task changed. */
+  autoValidate: boolean;
+  changeAutoValidate: (value: boolean) => void;
   attachments: string[];
   addAttachment: (path: string) => void;
   removeAttachment: (path: string) => void;
@@ -184,6 +285,8 @@ export function useComposerViewModel(): ComposerViewModel {
   // per project rather than something to re-tick every message.
   const autoReview = usePreferencesStore((s) => s.autoReview);
   const changeAutoReview = usePreferencesStore((s) => s.setAutoReview);
+  const autoValidate = usePreferencesStore((s) => s.autoValidate);
+  const changeAutoValidate = usePreferencesStore((s) => s.setAutoValidate);
 
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -315,6 +418,22 @@ export function useComposerViewModel(): ComposerViewModel {
               .map((p) => `- ${p}`)
               .join("\n")}`
           : body || "(see attached image)";
+      const prefs = usePreferencesStore.getState();
+      const pick = { ...prefs.defaults, ...prefs.byChat[id] };
+      let taskImages = images;
+      const attachDesignerReferences =
+        pick.model === UI_UX_DESIGNER_CHOICE &&
+        !uiUxReferencesWereSent(id);
+      if (attachDesignerReferences) {
+        try {
+          taskImages = [...(await loadUiUxDesignerReferences()), ...images];
+        } catch (error) {
+          // Keep the user's draft and attachments intact if the bundled
+          // visual authority cannot be sent with this design task.
+          setError(`Couldn't load UI/UX Designer references: ${errText(error)}`);
+          return;
+        }
+      }
       // The transcript shows the pick, not the whole md file.
       const shown = text || (note ? `Prompt from ${note}` : "");
       const sent = images;
@@ -331,28 +450,40 @@ export function useComposerViewModel(): ComposerViewModel {
         sent.map((i) => i.dataUrl)
       );
 
-      const prefs = usePreferencesStore.getState();
-      const pick = { ...prefs.defaults, ...prefs.byChat[id] };
       void bridge
         .rpc("task.start", {
           conversationId: id,
-          prompt,
-          model: pick.model === "default" ? undefined : pick.model,
-          effort: pick.effort === "default" ? undefined : pick.effort,
+          prompt: promptForAgentSkill(pick.model, prompt),
+          model: resolveAgentModel(pick.model, models),
+          effort:
+            pick.effort === "default"
+              ? resolveAgentEffort(pick.model, models)
+              : pick.effort,
           planMode: pick.planMode || undefined,
           // Only ever sent when OFF: absent means the normal pipeline, so
           // an older agent that ignores the flag still behaves correctly.
           systemKnowledge: pick.systemKnowledge === false ? false : undefined,
           vibe: prefs.vibe || undefined,
-          // Same "only when OFF" rule: absent keeps the review stage.
-          autoReview: prefs.autoReview ? undefined : false,
+          // Always explicit, unlike the flags above. The agent's default is
+          // now OFF — review is the most expensive thing a turn can do once
+          // the answer is already on screen — so an absent flag no longer
+          // means "on" and the tick has to say which way it is set. Sending
+          // the boolean both ways also reads the same to an older agent.
+          autoReview: prefs.autoReview,
+          // Explicit for the same reason: the agent skips the validators
+          // unless this says otherwise.
+          autoValidate: prefs.autoValidate,
           images:
-            sent.length > 0
-              ? sent.map((i) => ({ mediaType: i.mediaType, data: i.data }))
+            taskImages.length > 0
+              ? taskImages.map((i) => ({ mediaType: i.mediaType, data: i.data }))
               : undefined,
           promptFile: note,
         })
         .then(({ taskId, queued }) => {
+          // Accepted means the agent received the images, whether this task
+          // starts now or waits in the conversation queue. Failed RPCs do not
+          // mark delivery, so retrying still carries the visual authority.
+          if (attachDesignerReferences) markUiUxReferencesSent(id);
           // Queued behind a running task: it owns neither the live feed nor
           // the busy state yet. It announces itself with task.started when
           // its turn comes, and taskStarted takes it out of the line then.
@@ -380,7 +511,7 @@ export function useComposerViewModel(): ComposerViewModel {
           useSessionsStore.getState().taskEnded(id, "error", errText(e));
         });
     })();
-  }, [input, attachments, images, promptFile]);
+  }, [input, attachments, images, models, promptFile]);
 
   /**
    * Stopping is not instant — the agent finishes the in-flight step, so
@@ -445,8 +576,31 @@ export function useComposerViewModel(): ComposerViewModel {
   }, []);
 
   const changeModel = useCallback(
-    (value: ModelChoice) => setComposer(selectedId, { model: value }),
-    [setComposer, selectedId]
+    (value: ModelChoice) => {
+      // The reasoning pick belongs to the MODEL it was made under. Codex
+      // tops out at xhigh, an Ollama reasoning model only has off/on, a
+      // non-reasoning model has nothing — so a level chosen for Claude may
+      // not exist on the row being switched to. Carrying it across anyway
+      // is how a turn starts with an effort the provider rejects; reset to
+      // default whenever the new row does not support the current pick.
+      const prefs = usePreferencesStore.getState();
+      const current =
+        prefs.byChat[selectedId ?? ""]?.effort ?? prefs.defaults.effort;
+      const row = models.find((m) => m.value === value);
+      const keeps =
+        current === "default" ||
+        row === undefined ||
+        (row.supportsEffort !== false &&
+          (row.reasoningLevels === undefined ||
+            row.reasoningLevels.includes(
+              current as NonNullable<typeof row.reasoningLevels>[number]
+            )));
+      setComposer(
+        selectedId,
+        keeps ? { model: value } : { model: value, effort: "default" }
+      );
+    },
+    [setComposer, selectedId, models]
   );
 
   const changeEffort = useCallback(
@@ -499,6 +653,8 @@ export function useComposerViewModel(): ComposerViewModel {
     changeVibe,
     autoReview,
     changeAutoReview,
+    autoValidate,
+    changeAutoValidate,
     attachments,
     addAttachment,
     removeAttachment,

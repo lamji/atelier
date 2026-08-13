@@ -2,6 +2,25 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { SlashCommand } from "@atelier/protocol";
+import {
+  GLOBAL_SESSION_COMMAND_ID,
+  GLOBAL_SESSION_COMMAND_NAME,
+} from "../context/global-session/index.js";
+
+const GLOBAL_SESSION_COMMAND: SlashCommand = {
+  id: GLOBAL_SESSION_COMMAND_ID,
+  name: GLOBAL_SESSION_COMMAND_NAME,
+  description:
+    "Promote or update this conversation as detailed cross-session RAG memory.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+const GLOBAL_SESSION_DETAIL = `# Global session\n\n` +
+  `Use /global-session to promote this conversation into the experimental ` +
+  `cross-session knowledge index. The selected AI names it from the session. ` +
+  `Running it again updates the same stable memory instead of duplicating it.`;
 
 /**
  * Discovers the slash commands and skills the Claude Agent SDK will
@@ -20,6 +39,7 @@ export function listSlashCommands(
 ): SlashCommand[] {
   const disabled = new Set(disabledSkills);
   const commands: SlashCommand[] = [
+    GLOBAL_SESSION_COMMAND,
     ...scanBase(os.homedir(), "user"),
     ...scanBase(workspaceRoot, "project"),
   ].map((command) => ({
@@ -35,6 +55,9 @@ export function readSlashCommandDetail(
   id: string,
   disabledSkills: string[] = []
 ): { command: SlashCommand; content: string } | null {
+  if (id === GLOBAL_SESSION_COMMAND_ID) {
+    return { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL };
+  }
   const disabled = new Set(disabledSkills);
   for (const entry of scanDetails(os.homedir(), "user")) {
     if (entry.command.id === id) {
@@ -67,6 +90,7 @@ export function listSlashCommandDetails(
 ): Array<{ command: SlashCommand; content: string }> {
   const disabled = new Set(disabledSkills);
   const details = [
+    { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL },
     ...scanDetails(os.homedir(), "user"),
     ...scanDetails(workspaceRoot, "project"),
   ].map((entry) => ({

@@ -6,7 +6,6 @@ import {
   type LiveDiff,
   type SessionVm,
 } from "@/state/sessions.store";
-import { useThemeStore } from "@/state/theme.store";
 import type { ChatItemVm } from "@/types";
 
 /** Shared empties so "no session" never hands the view a fresh array. */
@@ -28,8 +27,6 @@ export interface ChatViewModel {
   cancelling: boolean;
   busy: boolean;
   lastError: string | null;
-  /** Monaco theme ("atelier-dark" | "atelier-light") for inline diffs. */
-  monacoTheme: string;
 }
 
 /**
@@ -55,7 +52,6 @@ export function useChatViewModel(): ChatViewModel {
   const cancelling = useSessionsStore((s) => pick(s, (v) => v.cancelling));
   const status = useSessionsStore((s) => pick(s, (v) => v.status));
   const lastError = useSessionsStore((s) => pick(s, (v) => v.lastError));
-  const theme = useThemeStore((s) => s.theme);
 
   return {
     connected: online && hasSession,
@@ -70,7 +66,6 @@ export function useChatViewModel(): ChatViewModel {
     cancelling: cancelling ?? false,
     busy: status === "working",
     lastError: lastError ?? null,
-    monacoTheme: theme === "dark" ? "atelier-dark" : "atelier-light",
   };
 }
 

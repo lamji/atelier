@@ -141,6 +141,19 @@ tool("analyze_impact", "Find what depends on whole files or symbols.", {
   symbols: z.array(z.string()).optional(),
   depth: z.number().optional(),
 });
+tool("set_plan", "Publish the plan for this task — the checklist the user " +
+  "watches while you work. Call it ONCE, before you start changing things, " +
+  "for anything beyond a single trivial edit. Returns the step ids — drive " +
+  "them with update_plan_step as you go.", {
+  goal: z.string(),
+  steps: z.array(
+    z.object({
+      title: z.string(),
+      detail: z.string().optional(),
+      files: z.array(z.string()).optional(),
+    })
+  ),
+});
 tool("update_plan_step", "Report progress on the current task plan.", {
   stepId: z.string(),
   status: z.enum([
@@ -158,6 +171,32 @@ tool("run_terminal", "Run a shell command only when no semantic Atelier tool fit
   cwd: z.string().optional(),
   timeoutMs: z.number().optional(),
 });
+
+// The liveness canary. Handled here in the proxy, never forwarded to the
+// registry: its whole job is to prove the MODEL can reach these tools.
+// Codex 0.147's exec mode has been observed to complete the MCP handshake
+// and still not offer the tools to the model — so neither process spawn
+// nor the initialized callback is proof of anything. A tool CALL is: the
+// instructions tell the model to ping first, only a model that actually
+// has the tools can comply, and the bridge treats a run without this ping
+// as a dud to kill and respawn.
+server.registerTool(
+  "ping",
+  {
+    description:
+      "Atelier bridge connectivity check. Call this ONCE, as your first " +
+      "action in every run, before any other tool.",
+    inputSchema: {},
+  },
+  async () => {
+    await fetch(url.replace(/\/call$/, "/hello"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, kind: "tool" }),
+    }).catch(() => undefined);
+    return { content: [{ type: "text", text: "pong — Atelier tools are live" }] };
+  }
+);
 
 await server.connect(new StdioServerTransport());
 

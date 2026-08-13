@@ -3,17 +3,20 @@ import type { ImageAttachment, ReasoningEffort } from "@atelier/protocol";
 import { ollamaChat } from "./ollama/client.js";
 import {
   codexModelName,
+  grokModelName,
   isCodexModel,
+  isGrokModel,
   ollamaModelName,
   ollamaTargetOf,
 } from "./model-routing.js";
 import { runCodexExec } from "./codex/client.js";
+import { grokChat } from "./grok/client.js";
 
 /**
- * The three tool-less call sites in the agent (pipeline stage calls, git
+ * Tool-less call sites in the agent (pipeline stage calls, git
  * drafts, feature summaries) all want the same thing: one turn, a system
  * prompt, a user prompt, finished text back. Routing them through here is
- * what makes "pick an Ollama model" work — the prompt each caller builds,
+ * what makes selecting a hosted model work — the prompt each caller builds,
  * including everything RAG, knowledge and impact put in it, is untouched.
  */
 
@@ -33,15 +36,21 @@ const DISABLED_BUILTINS = [
 ];
 
 export interface OneShotOptions {
-  /** The user's selected model; an "ollama/" id routes to the daemon. */
+  /** The user's selected model; its namespace routes to the provider. */
   model?: string;
-  /** Claude model to use when the selection isn't an Ollama one. */
+  /** Claude model to use when the selection has no explicit provider namespace. */
   claudeFallback: string;
   system: string;
   prompt: string;
   cwd?: string;
   signal?: AbortSignal;
   effort?: ReasoningEffort;
+  /**
+   * Claude Code agent-turn ceiling. Defaults to one so existing drafts and
+   * summaries keep their current cost; callers that genuinely need Claude's
+   * completion/finalization turn may opt into a small bounded allowance.
+   */
+  claudeMaxTurns?: number;
   /** Caller wants strict JSON — Ollama can enforce it at the daemon. */
   json?: boolean;
   /**
@@ -76,6 +85,17 @@ export async function runOneShot(opts: OneShotOptions): Promise<string> {
       effort: opts.effort,
     });
   }
+  if (isGrokModel(opts.model)) {
+    return grokChat({
+      model: grokModelName(opts.model as string),
+      system: opts.system,
+      prompt: opts.prompt,
+      signal: opts.signal,
+      effort: opts.effort,
+      json: opts.json,
+      images: opts.images,
+    });
+  }
   return runClaudeOneShot(opts);
 }
 
@@ -88,7 +108,7 @@ async function runClaudeOneShot(opts: OneShotOptions): Promise<string> {
     options: {
       systemPrompt: opts.system,
       model: opts.claudeFallback,
-      maxTurns: 1,
+      maxTurns: boundedClaudeTurns(opts.claudeMaxTurns),
       disallowedTools: DISABLED_BUILTINS,
       strictMcpConfig: true,
       settingSources: [],
@@ -101,6 +121,11 @@ async function runClaudeOneShot(opts: OneShotOptions): Promise<string> {
     if (m.type === "result" && typeof m.result === "string") text = m.result;
   }
   return text;
+}
+
+function boundedClaudeTurns(value?: number): number {
+  if (value === undefined) return 1;
+  return Math.min(Math.max(Math.trunc(value), 1), 3);
 }
 
 /**

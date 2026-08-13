@@ -75,5 +75,8 @@ export const MAX_PER_PATH = 2;
 /** Max session-memory chunks per turn, so recall cannot crowd out code. */
 export const MAX_SESSION_MEMORY = 4;
 
+/** Cross-session memories are opt-in, but still cannot crowd out live code. */
+export const MAX_GLOBAL_SESSION_MEMORY = 4;
+
 /** Ranked items considered for the code section before packing. */
 export const MAX_CODE_CANDIDATES = 12;

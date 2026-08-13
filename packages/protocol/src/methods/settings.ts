@@ -5,6 +5,8 @@ export const Settings = z.object({
   model: z.string().optional(),
   ignoreGlobs: z.array(z.string()).default([]),
   disabledSkills: z.array(z.string()).default([]),
+  /** Experimental: let promoted sessions participate in cross-session RAG. */
+  globalSessionKnowledge: z.boolean().default(false),
   maxValidationRetries: z.number().default(2),
   maxReviewRetries: z.number().default(2),
 });

@@ -6,6 +6,7 @@ import type { SymbolImpactAnalyzer } from "../knowledge/impact/symbol-impact.js"
 import type { KnowledgeQuery } from "../knowledge/query/knowledge-query.js";
 import type { LessonStore } from "../knowledge/lessons/lesson-store.js";
 import type { EventBus } from "../events/event-bus.js";
+import type { SettingsRepo } from "../storage/repositories/settings.js";
 
 interface RetrieveInput {
   query: string;
@@ -58,10 +59,14 @@ export function registerKnowledgeTools(
   knowledge: KnowledgeQuery,
   lessons: LessonStore,
   symbolImpact: SymbolImpactAnalyzer,
-  bus: EventBus
+  bus: EventBus,
+  settings: SettingsRepo
 ): void {
   registry.register("retrieve_knowledge", async (input: RetrieveInput) => {
-    const filters = input.pathGlob ? { pathGlob: input.pathGlob } : undefined;
+    const filters = {
+      ...(input.pathGlob ? { pathGlob: input.pathGlob } : {}),
+      includeGlobalSessions: settings.get().globalSessionKnowledge,
+    };
     return retriever.retrieve(input.query, input.k ?? 12, filters);
   });
 

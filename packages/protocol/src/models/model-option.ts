@@ -24,7 +24,7 @@ export const ModelOption = z.object({
   reasoningLevels: z.array(ReasoningEffort).optional(),
   /** Which backend serves this row. */
   provider: z
-    .enum(["claude", "ollama", "ollama-local", "codex"])
+    .enum(["claude", "ollama", "ollama-local", "codex", "grok"])
     .default("claude"),
 });
 export type ModelOption = z.infer<typeof ModelOption>;

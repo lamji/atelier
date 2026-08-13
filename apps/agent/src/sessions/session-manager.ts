@@ -144,6 +144,7 @@ export function registerSessionHandlers(
       planMode: params.planMode,
       vibe: params.vibe,
       autoReview: params.autoReview,
+      autoValidate: params.autoValidate,
       systemKnowledge: params.systemKnowledge,
       scopeRoots: params.scopeRoots,
       images: params.images,

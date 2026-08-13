@@ -21,9 +21,7 @@ knowledge graph are one console, not seven windows.
 
 > **Alpha, and honest about it.** Windows is the platform it is developed and
 > packaged on; the code is cross-platform but macOS/Linux are unverified and
-> the installer script is NSIS-only. Real sign-in needs your own Supabase
-> project — or skip it in dev with `ATELIER_DEV_SKIP_AUTH=1`, see
-> [Run it locally](#run-it-locally).
+> the installer script is NSIS-only.
 
 ## The console
 
@@ -124,15 +122,14 @@ external MCP servers and user rules.
 
 ## How it fits together
 
-- **`apps/desktop`** — the Electron app. Main process owns Google login
-  (Supabase PKCE + `atelier://` deep link), the project registry, and a
-  ProjectManager that forks one agent **utilityProcess** per open project.
+- **`apps/desktop`** — the Electron app. Main process owns the project registry
+  and a ProjectManager that forks one agent **utilityProcess** per open project.
 - **`apps/agent`** — the Local Agent runtime. Owns every privileged
   operation: Claude Agent SDK, filesystem, terminal, git, tree-sitter
   knowledge engine, RAG, hooks, validation. Serves RPCs over an Electron
   MessagePort (no sockets, no tokens).
-- **`apps/web`** — the renderer (React + Vite). Login → workspace picker →
-  workspace; a pure presentation layer that talks to its agent through a
+- **`apps/web`** — the renderer (React + Vite). Workspace picker → workspace;
+  a pure presentation layer that talks to its agent through a
   transferred MessagePort.
 - **`packages/protocol`** — the zod-typed contract (RPC methods, event
   taxonomy, native port frames) all sides compile against.
@@ -163,29 +160,7 @@ corepack enable          # provides the pinned pnpm 10
 pnpm install
 ```
 
-### 3. Sign-in — configure it, or skip it
-
-The desktop shell gates the app behind Google sign-in via Supabase, so a fresh
-clone has two ways in:
-
-- **Skip it while you work on the app.** `ATELIER_DEV_SKIP_AUTH=1` drops you
-  straight into the workspace picker as a local dev user. It needs the env var
-  *and* an unpackaged build, so a shipped installer can never take this path.
-
-  ```powershell
-  $env:ATELIER_DEV_SKIP_AUTH = "1"; pnpm dev    # PowerShell
-  ```
-
-  ```sh
-  ATELIER_DEV_SKIP_AUTH=1 pnpm dev              # bash / zsh
-  ```
-
-- **Wire up real sign-in** with your own Supabase project — copy
-  `apps/desktop/auth.local.example.json` to `apps/desktop/auth.local.json` and
-  follow [Sign-in (Supabase)](#sign-in-supabase), especially the redirect URLs:
-  that is the part that fails silently.
-
-### 4. Start the dev stack
+### 3. Start the dev stack
 
 ```sh
 pnpm dev
@@ -218,55 +193,19 @@ so one keeps working while you look at another.
 
 | Variable | Effect |
 | --- | --- |
-| `ATELIER_DEV_SKIP_AUTH=1` | Dev-only sign-in bypass; unpackaged builds only |
 | `ATELIER_WEB_PORT` | Pin the Vite port instead of scanning from 5173 |
 | `OLLAMA_HOST` | Point the local Ollama provider at a non-default endpoint |
 
 ### If it does not start
 
-- **"Electron quit immediately"** — an older Atelier window still holds the
-  single-instance lock. Close it, or kill the leftover `electron` process.
 - **`better-sqlite3` prebuild failed** — a previous dev stack still has the
   `.node` file open. Stop it and rerun `pnpm dev`.
 - **`ERR_PNPM_UNSUPPORTED_ENGINE` on install** — you are on Node 21+; Atelier
   pins Node 20 LTS.
-- **Sign-in opens the browser and never comes back** — the redirect URL is not
-  allow-listed. See [Sign-in (Supabase)](#sign-in-supabase), or use
-  `ATELIER_DEV_SKIP_AUTH=1` to get past it for now.
 - **Window opens but no models in the picker** — no provider is switched on,
   or the CLI it probes is not signed in. Settings → Providers → Test re-probes.
 
 ## Configuration
-
-### Sign-in (Supabase)
-
-Atelier's desktop shell gates the app behind Google sign-in via Supabase, so a
-fork needs its own Supabase project. (To postpone this entirely, run dev with
-`ATELIER_DEV_SKIP_AUTH=1`.) Copy `apps/desktop/auth.local.example.json` to
-`apps/desktop/auth.local.json` (it is gitignored) and fill in your project's
-URL + anon key, with the Google provider enabled.
-
-**Supabase → Authentication → URL Configuration → Redirect URLs must list all
-three loopback callbacks**, or sign-in cannot complete:
-
-```
-http://127.0.0.1:53174/auth-callback
-http://127.0.0.1:53175/auth-callback
-http://127.0.0.1:53176/auth-callback
-```
-
-Sign-in redirects to a local page the app serves, so the browser lands on a
-real "you're signed in" screen instead of being stranded on a dead
-`atelier://` navigation. Three ports because the first free one wins if
-another process already holds 53174.
-
-This failure mode is silent: an un-allow-listed redirect is not rejected —
-Supabase just sends the browser to the project's Site URL instead, so the
-callback never fires. The login screen prints the URLs to add if a sign-in
-attempt never comes back.
-
-`atelier://auth-callback` stays registered as a fallback and can remain in the
-list.
 
 ### Providers
 
@@ -291,8 +230,7 @@ pnpm --filter @atelier/desktop dist   # NSIS installer
 ```
 
 `build-backend.mjs` stages the web dist + agent bundle + natives
-retargeted to the Electron ABI under `resources/`; the installer registers
-the `atelier://` scheme for the OAuth deep link. No system Node needed.
+retargeted to the Electron ABI under `resources/`. No system Node needed.
 
 ## Layout
 

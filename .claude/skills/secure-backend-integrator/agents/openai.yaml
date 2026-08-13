@@ -1,0 +1,4 @@
+interface:
+  display_name: "Secure Backend Integrator"
+  short_description: "Secure page-by-page backend and API integration"
+  default_prompt: "Use $secure-backend-integrator to trace the application and securely integrate the next page or feature."

@@ -30,12 +30,22 @@ export function composePromptFilePrompt(
   typed: string,
   notePath?: string
 ): string {
+  // Two jobs, and the wording has burned us in both directions. The path
+  // must be named, or "update this md" resolves to whichever markdown file
+  // retrieval surfaced. But the old header then said "write updates back
+  // to that path", and models took that as the ASSIGNMENT — a note that
+  // spec'd a feature came back as a nicely edited note and no feature.
+  // The note is the prompt: the default is to DO what it says, and the
+  // note is only ever the edit target when its instructions say so.
   const header = notePath
     ? `${SOURCE_PREFIX}${notePath}\n` +
-      "(That path IS \"this file\"/\"this note\"/\"this md\" in anything " +
-      "below. Everything up to the instructions marker is its current " +
-      "content. Write updates back to that path — do not resolve the " +
-      "reference to some other file.)\n\n"
+      "(The content below, up to any instructions marker, is that file's " +
+      "current text, given as the TASK for this turn — instructions to " +
+      "carry out in the codebase, not a document to improve. When it says " +
+      '"this file"/"this note"/"this md", it means exactly that path, no ' +
+      "other file. Edit the note itself ONLY if its instructions " +
+      "explicitly ask for changes to that file; a run report is appended " +
+      "to it automatically after the task, so do not write one yourself.)\n\n"
     : "";
   const body = typed ? `${noteBody}${INSTRUCTIONS_MARKER}${typed}` : noteBody;
   return `${header}${body}`;

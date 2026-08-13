@@ -49,6 +49,7 @@ const settings = new SettingsRepo(db, {
   workspaceRoot: root,
   ignoreGlobs: [],
   disabledSkills: [disabledId],
+  globalSessionKnowledge: false,
   maxValidationRetries: 2,
   maxReviewRetries: 2,
 });

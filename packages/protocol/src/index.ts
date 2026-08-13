@@ -7,6 +7,7 @@ export * from "./models/plan.js";
 export * from "./models/diff.js";
 export * from "./models/knowledge.js";
 export * from "./models/terminal.js";
+export * from "./models/cli.js";
 export * from "./models/hooks.js";
 export * from "./models/usage.js";
 export * from "./models/impact.js";

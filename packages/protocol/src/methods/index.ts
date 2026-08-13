@@ -6,6 +6,7 @@ export { ImageAttachment } from "./task.js";
 import { taskMethods } from "./task.js";
 import { fsMethods } from "./fs.js";
 import { terminalMethods } from "./terminal.js";
+import { cliMethods } from "./cli.js";
 import { gitMethods } from "./git.js";
 import { validationMethods } from "./validation.js";
 import { knowledgeMethods } from "./knowledge.js";
@@ -22,6 +23,7 @@ export const methods = {
   ...taskMethods,
   ...fsMethods,
   ...terminalMethods,
+  ...cliMethods,
   ...gitMethods,
   ...validationMethods,
   ...knowledgeMethods,
@@ -52,6 +54,7 @@ export {
   taskMethods,
   fsMethods,
   terminalMethods,
+  cliMethods,
   gitMethods,
   validationMethods,
   knowledgeMethods,

@@ -32,20 +32,23 @@ export const OLLAMA_LOCAL = "ollama-local";
 export const CLAUDE = "claude";
 /** The Codex CLI, on the user's signed-in ChatGPT/Codex session. */
 export const CODEX = "codex";
+/** xAI's hosted Grok API, authenticated with an API key. */
+export const GROK = "grok";
 
 /**
- * The three providers exposed by Settings. The legacy local-Ollama id stays
- * readable in the credential store so older installs are not corrupted, but
- * it is no longer an Atelier provider tab or model-picker source.
+ * Providers exposed by Settings. Local Ollama is a separate provider from
+ * Cloud because its daemon and model roster are independent.
  */
 const LABELS: Record<string, string> = {
   [OLLAMA_CLOUD]: "Ollama Cloud",
+  [OLLAMA_LOCAL]: "Ollama Local",
   [CODEX]: "Codex",
   [CLAUDE]: "Claude",
+  [GROK]: "Grok",
 };
 
-/** Providers that use an already signed-in account, so no key can apply. */
-const KEYLESS = new Set([CLAUDE, CODEX]);
+/** Providers that use a local process or signed-in CLI, so no key can apply. */
+const KEYLESS = new Set([CLAUDE, CODEX, OLLAMA_LOCAL]);
 
 /**
  * Providers reached through a CLI the user is already signed in to, so
@@ -61,7 +64,7 @@ const HOSTLESS = new Set([CLAUDE, CODEX]);
  * pulling a model, signing in to a CLI — so making the user re-declare that
  * in Settings would just look like the provider was broken.
  */
-const ALLOWLIST_IMPLIES_ALL = new Set([CLAUDE, CODEX]);
+const ALLOWLIST_IMPLIES_ALL = new Set([CLAUDE, CODEX, OLLAMA_LOCAL]);
 
 export function allowlistImpliesAll(id: string): boolean {
   return ALLOWLIST_IMPLIES_ALL.has(id);
@@ -75,6 +78,11 @@ export function providerEnabled(id: string): boolean {
 /** Reads what the Ollama client should use for one endpoint. */
 export function ollamaConfig(id: string = OLLAMA_CLOUD): ProviderConfig {
   return readCredentialStore()[id] ?? {};
+}
+
+/** Reads the hosted Grok API settings. */
+export function grokConfig(): ProviderConfig {
+  return readCredentialStore()[GROK] ?? {};
 }
 
 /**
@@ -133,6 +141,13 @@ function fillGaps(
     next.enabledModels = [...legacy.enabledModels];
     changed = true;
   }
+  if (
+    !next.subscriptionRequiredModels?.length &&
+    legacy.subscriptionRequiredModels?.length
+  ) {
+    next.subscriptionRequiredModels = [...legacy.subscriptionRequiredModels];
+    changed = true;
+  }
   return changed ? next : null;
 }
 
@@ -145,8 +160,8 @@ export function listProviders(): ProviderCredential[] {
     return {
       id: id as ProviderCredential["id"],
       label: LABELS[id] ?? id,
-      // Signed-in providers have nothing for Atelier to store first, so they
-      // are always present. Ollama Cloud appears after an API key is saved.
+      // Keyless providers have nothing for Atelier to store first, so they
+      // are always present. Hosted providers appear after a key is saved.
       configured: keyless || Boolean(key),
       enabled: config?.enabled !== false,
       keyless,
@@ -168,16 +183,27 @@ export function saveProvider(
 ): ProviderCredential[] {
   const store = { ...readCredentialStore() };
   const current = store[id] ?? {};
+  const apiKey =
+    update.apiKey === undefined ? current.apiKey : update.apiKey.trim();
   const next: ProviderConfig = {
-    apiKey: update.apiKey === undefined ? current.apiKey : update.apiKey.trim(),
+    apiKey,
     host: update.host === undefined ? current.host : update.host.trim(),
     enabled: current.enabled,
     enabledModels: current.enabledModels,
+    // Entitlement belongs to the account behind the key. A replacement key
+    // must be checked independently instead of inheriting the old result.
+    subscriptionRequiredModels:
+      apiKey === current.apiKey
+        ? current.subscriptionRequiredModels
+        : undefined,
   };
   if (!next.apiKey) delete next.apiKey;
   if (!next.host) delete next.host;
   if (next.enabled === undefined) delete next.enabled;
   if (!next.enabledModels?.length) delete next.enabledModels;
+  if (!next.subscriptionRequiredModels?.length) {
+    delete next.subscriptionRequiredModels;
+  }
 
   store[id] = next;
   writeCredentialStore(store);
@@ -222,6 +248,45 @@ export function setModelEnabled(
 /** Enabled tags for a provider, for filtering the roster. */
 export function enabledModelsFor(id: string): string[] {
   return readCredentialStore()[id]?.enabledModels ?? [];
+}
+
+/** Models this account can discover but Ollama refuses without a plan. */
+export function subscriptionRequiredModelsFor(id: string): string[] {
+  return readCredentialStore()[id]?.subscriptionRequiredModels ?? [];
+}
+
+/** Learns or clears one account-specific subscription requirement. */
+export function setModelSubscriptionRequired(
+  id: string,
+  name: string,
+  required: boolean
+): void {
+  const store = { ...readCredentialStore() };
+  const current = store[id] ?? {};
+  const restricted = new Set(current.subscriptionRequiredModels ?? []);
+  const enabled = new Set(current.enabledModels ?? []);
+  const hadRestriction = restricted.has(name);
+  const wasEnabled = enabled.has(name);
+
+  if (required) {
+    restricted.add(name);
+    enabled.delete(name);
+  } else {
+    restricted.delete(name);
+  }
+  if (hadRestriction === required && (!required || !wasEnabled)) return;
+
+  const next: ProviderConfig = {
+    ...current,
+    enabledModels: [...enabled],
+    subscriptionRequiredModels: [...restricted],
+  };
+  if (!next.enabledModels?.length) delete next.enabledModels;
+  if (!next.subscriptionRequiredModels?.length) {
+    delete next.subscriptionRequiredModels;
+  }
+  store[id] = next;
+  writeCredentialStore(store);
 }
 
 export function removeProvider(id: string): ProviderCredential[] {

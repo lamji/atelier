@@ -4,6 +4,7 @@ import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openExternal } from "@/lib/desktop";
+import { retintDarkSurfaces, TuiSurfaceFilter } from "@/lib/tui-surface";
 import { bridge } from "./bridge-client.js";
 
 interface Entry {
@@ -23,6 +24,22 @@ interface Entry {
   detach: (() => void) | null;
   /** Timestamp of the last Ctrl+C, for the double-press force stop. */
   lastCtrlC: number;
+  /**
+   * Set for a terminal whose whole job is hosting somebody else's themed TUI
+   * — CLI mode's provider consoles. Non-null means its output is re-tinted in
+   * light theme; see {@link TuiSurfaceFilter}. A plain shell terminal keeps
+   * its bytes exactly as the program wrote them.
+   */
+  surfaces: TuiSurfaceFilter | null;
+}
+
+export interface TerminalMountOptions {
+  /**
+   * Correct the dark surfaces a provider CLI paints when it could not find
+   * out the terminal is light. Only for terminals that exist to run one, and
+   * only ever a no-op in dark theme.
+   */
+  retintDarkSurfaces?: boolean;
 }
 
 /**
@@ -43,6 +60,20 @@ const SEARCH_DECORATIONS = {
   activeMatchColorOverviewRuler: "#c58b2c",
 };
 
+/**
+ * `getComputedStyle(...).backgroundColor`, as an xterm OSC 11 colour reply —
+ * or null for a fully transparent one, so the caller keeps walking up to the
+ * next ancestor instead of reporting "no colour" as a real answer.
+ */
+function opaqueRgb(cssColor: string): string | null {
+  const m = cssColor.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
+  if (!m) return null;
+  const [, r, g, b, a] = m;
+  if (a !== undefined && Number(a) === 0) return null;
+  const channel = (n: string) => Number(n).toString(16).padStart(2, "0").repeat(2);
+  return `rgb:${channel(r!)}/${channel(g!)}/${channel(b!)}`;
+}
+
 export interface TerminalSearchOptions {
   caseSensitive?: boolean;
   regex?: boolean;
@@ -58,18 +89,74 @@ export interface TerminalSearchOptions {
 class TerminalRegistry {
   private entries = new Map<string, Entry>();
   private searchRequest: (termId: string) => void = () => {};
+  private inputListeners = new Map<string, Set<(data: string) => void>>();
+  private outputListeners = new Map<string, Set<(data: string) => void>>();
+  /**
+   * The live theme. Kept here rather than read per write because output
+   * arrives far more often than the theme changes, and both mount() and
+   * setTheme() already carry it.
+   */
+  private dark = false;
 
   /** The panel registers here so Ctrl+F inside xterm can open its find bar. */
   onSearchRequest(handler: (termId: string) => void): void {
     this.searchRequest = handler;
   }
 
+  /**
+   * Observe the raw bytes the user types into a terminal, as they are sent
+   * to the pty. Kept apart from the xterm instances so a listener can be
+   * registered before the terminal is ever mounted — CLI mode attaches one
+   * the moment a session exists, which is well before its container is on
+   * screen. Returns the unsubscribe.
+   */
+  onInput(termId: string, listener: (data: string) => void): () => void {
+    let listeners = this.inputListeners.get(termId);
+    if (!listeners) {
+      listeners = new Set();
+      this.inputListeners.set(termId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.inputListeners.delete(termId);
+    };
+  }
+
+  /** Observe raw pty output without coupling activity state to xterm mounts. */
+  onOutput(termId: string, listener: (data: string) => void): () => void {
+    let listeners = this.outputListeners.get(termId);
+    if (!listeners) {
+      listeners = new Set();
+      this.outputListeners.set(termId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.outputListeners.delete(termId);
+    };
+  }
+
   themeFor(dark: boolean) {
     // cursor = the block colour, cursorAccent = the glyph UNDER the block.
     // Without a solid accent the character vanishes on a transparent bg,
     // which read as an "invisible white cursor".
-    // Background stays fully transparent so the terminal sits on the bottom
-    // panel's own surface; the rest tracks the --atelier-* tokens.
+    // Background is fully transparent (alpha 0) so the terminal sits on
+    // whichever surface hosts it — the bottom dock's panel or the CLI pane's
+    // editor surface — without knowing which. The RGB channels are 0,0,0 in
+    // BOTH themes, though, which matters for one thing besides the pixels:
+    // xterm answers a program's "what's your background?" query (OSC 11)
+    // with this exact value. A CLI that asks — Codex and Claude Code both
+    // do, to pick a light/dark palette for their own UI — was always told
+    // "black", in light theme too, and drew itself dark regardless. See
+    // effectiveBackgroundRgb(), which intercepts that one query and answers
+    // with the surface's REAL colour instead of this placeholder.
+    //
+    // That is the whole fix wherever the query survives the trip. On Windows
+    // it does not: a ConPTY re-emits what it understood of its program's
+    // output, and an OSC colour query is not on that list, so it is dropped
+    // before xterm ever sees it and there is nothing here to answer. See
+    // TuiSurfaceFilter for what has to happen instead.
     return dark
       ? {
           background: "#00000000",
@@ -88,12 +175,18 @@ class TerminalRegistry {
   }
 
   /**
-   * Opens the terminal into its persistent container exactly once. Called
-   * again with the same container (re-renders, theme toggles) it is a
-   * no-op, so scrollback and rendered content survive. Each terminal keeps
-   * its own container for its whole life — nothing is ever wiped.
+   * Opens the terminal into its container, preserving the same xterm instance
+   * when React replaces that container. xterm's open() is intentionally a
+   * no-op after the first call, so an existing terminal must have its rendered
+   * element moved or it stays attached to the detached old container.
    */
-  mount(termId: string, container: HTMLElement, dark: boolean): Entry {
+  mount(
+    termId: string,
+    container: HTMLElement,
+    dark: boolean,
+    options: TerminalMountOptions = {}
+  ): Entry {
+    this.dark = dark;
     let entry = this.entries.get(termId);
     if (!entry) {
       const term = new Terminal({
@@ -121,6 +214,27 @@ class TerminalRegistry {
       );
       term.onData((data) => {
         void bridge.rpc("terminal.write", { termId, data }).catch(() => {});
+        // Observers must never be able to stop the keystroke reaching the
+        // pty, so they run after the write and each is isolated.
+        for (const listener of this.inputListeners.get(termId) ?? []) {
+          try {
+            listener(data);
+          } catch {
+            // a watcher's problem is not the terminal's
+          }
+        }
+      });
+      // Overrides xterm's own OSC 11 answer (see the comment on themeFor)
+      // with the colour actually painted behind this terminal. Registered
+      // AFTER xterm's built-in handler, and xterm tries handlers most-recent
+      // first — so this one runs, and returning false for anything but a
+      // bare query hands the sequence straight back to xterm's own handling.
+      term.parser.registerOscHandler(11, (data) => {
+        if (data !== "?") return false;
+        const rgb = this.effectiveBackgroundRgb(termId);
+        if (!rgb) return false;
+        term.input(`\x1b]11;${rgb}\x1b\\`, false);
+        return true;
       });
       entry = {
         term,
@@ -130,6 +244,7 @@ class TerminalRegistry {
         stick: true,
         detach: null,
         lastCtrlC: 0,
+        surfaces: options.retintDarkSurfaces ? new TuiSurfaceFilter() : null,
       };
       this.entries.set(termId, entry);
       term.attachCustomKeyEventHandler((event) =>
@@ -139,14 +254,21 @@ class TerminalRegistry {
         .rpc("terminal.getHistory", { termId })
         .then(({ data }) => {
           if (!data) return;
+          // Replayed scrollback gets the same treatment as live output, or a
+          // reload would bring the dark surfaces back. Whole and complete, so
+          // it goes through the stateless pass rather than the stream filter.
+          const replay =
+            entry!.surfaces && !this.dark ? retintDarkSurfaces(data) : data;
           // The replay must land at its end, not at line one.
-          entry!.term.write(data, () => entry!.term.scrollToBottom());
+          entry!.term.write(replay, () => entry!.term.scrollToBottom());
         })
         .catch(() => {});
     }
-    // Only (re)open when the target element actually changed.
+    // A CLI pane is unmounted when CLI mode is switched off, so its
+    // replacement is a different node even though the terminal is still live.
     if (entry.element !== container) {
-      entry.term.open(container);
+      if (entry.term.element) container.appendChild(entry.term.element);
+      else entry.term.open(container);
       entry.element = container;
       this.watchViewport(entry);
       this.fitAndSync(termId);
@@ -174,8 +296,19 @@ class TerminalRegistry {
   }
 
   write(termId: string, data: string): void {
+    for (const listener of this.outputListeners.get(termId) ?? []) {
+      try {
+        listener(data);
+      } catch {
+        // an activity observer must never interrupt terminal rendering
+      }
+    }
     const entry = this.entries.get(termId);
     if (!entry) return;
+    // Pushed through the filter in BOTH themes, so its held-back tail never
+    // straddles a theme change and re-emerges in the wrong one; the filter
+    // itself only rewrites anything when told the theme is light.
+    if (entry.surfaces) data = entry.surfaces.push(data, !this.dark);
     // The callback runs after the write is parsed and rendered, so the
     // scroll lands past the new rows rather than where they used to end.
     entry.term.write(data, () => {
@@ -203,14 +336,69 @@ class TerminalRegistry {
     }
   }
 
+  /**
+   * The colour actually painted behind this terminal, as an xterm OSC 11
+   * reply (`rgb:RRRR/GGGG/BBBB`). The terminal's own background is
+   * transparent (see themeFor), so this walks up from its container to the
+   * first ancestor that paints something — the panel or editor surface
+   * underneath — rather than reporting the transparent placeholder itself.
+   */
+  private effectiveBackgroundRgb(termId: string): string | null {
+    const el = this.entries.get(termId)?.element;
+    if (!el) return null;
+    let node: HTMLElement | null = el;
+    while (node) {
+      const rgb = opaqueRgb(getComputedStyle(node).backgroundColor);
+      if (rgb) return rgb;
+      node = node.parentElement;
+    }
+    return opaqueRgb(getComputedStyle(document.body).backgroundColor);
+  }
+
   setTheme(dark: boolean): void {
+    const changed = this.dark !== dark;
+    this.dark = dark;
     for (const entry of this.entries.values()) {
       entry.term.options.theme = this.themeFor(dark);
     }
+    if (!changed) return;
+    // Re-tinting only touches bytes on their way in, so a TUI's already
+    // painted frame keeps the old theme's surfaces until it draws another
+    // one. Nudging the size is what asks it to — the same redraw a real
+    // terminal gets when its window changes.
+    for (const [termId, entry] of this.entries) {
+      if (entry.surfaces) this.nudgeRedraw(termId);
+    }
+  }
+
+  /**
+   * Make a full-screen TUI redraw itself, by reporting one column narrower
+   * and then the real width again. There is no polite way to ask: the pty is
+   * running somebody else's program, and a resize is the one signal every
+   * one of them answers by repainting.
+   */
+  private nudgeRedraw(termId: string): void {
+    const entry = this.entries.get(termId);
+    if (!entry) return;
+    const { cols, rows } = entry.term;
+    if (cols < 2) return;
+    void bridge
+      .rpc("terminal.resize", { termId, cols: cols - 1, rows })
+      .then(() => bridge.rpc("terminal.resize", { termId, cols, rows }))
+      .catch(() => {});
   }
 
   focus(termId: string): void {
     this.entries.get(termId)?.term.focus();
+  }
+
+  /**
+   * Insert text as a paste, same as Ctrl+V. Used for dropped file paths —
+   * routing through `term.paste()` rather than a raw pty write is what wraps
+   * it in bracketed-paste markers when the running program asked for them.
+   */
+  pasteText(termId: string, text: string): void {
+    this.entries.get(termId)?.term.paste(text);
   }
 
   /** Runs a find; `back` searches upwards. Returns whether it matched. */

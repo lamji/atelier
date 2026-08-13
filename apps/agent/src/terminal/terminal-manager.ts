@@ -19,6 +19,8 @@ interface ManagedTerminal {
   flushTimer: ReturnType<typeof setTimeout> | null;
   history: string;
   historyDirty: boolean;
+  /** False once the user explicitly closes this terminal. */
+  persistOnExit: boolean;
 }
 
 /**
@@ -29,6 +31,7 @@ interface ManagedTerminal {
 export class TerminalManager {
   private terminals = new Map<string, ManagedTerminal>();
   private saveTimer: ReturnType<typeof setInterval> | null = null;
+  private shuttingDown = false;
 
   constructor(
     private db: Db,
@@ -36,6 +39,10 @@ export class TerminalManager {
     private defaultCwd: string
   ) {
     this.saveTimer = setInterval(() => this.saveDirtyHistory(), HISTORY_SAVE_MS);
+    // PTYs cannot survive the agent process. Provider conversations already
+    // live in Codex/Claude history and are resumed by exact id from CLI mode;
+    // restoring saved PTYs with a bare `resume` command only opens another
+    // session picker and duplicates meaningless "Codex N" rows.
     this.db.prepare("DELETE FROM terminal_history").run();
   }
 
@@ -45,6 +52,17 @@ export class TerminalManager {
     cols?: number;
     rows?: number;
   }): TerminalSession {
+    return this.spawn(opts);
+  }
+
+  private spawn(
+    opts: {
+      cwd?: string;
+      name?: string;
+      cols?: number;
+      rows?: number;
+    }
+  ): TerminalSession {
     const id = newId("term");
     const cols = opts.cols ?? 80;
     const rows = opts.rows ?? 24;
@@ -78,6 +96,7 @@ export class TerminalManager {
       flushTimer: null,
       history: "",
       historyDirty: false,
+      persistOnExit: true,
     };
     this.terminals.set(id, managed);
 
@@ -85,9 +104,11 @@ export class TerminalManager {
     proc.onExit(({ exitCode }) => {
       this.flush(managed);
       session.alive = false;
+      if (this.shuttingDown) return;
       this.bus.publish("terminal.exit", { termId: id, exitCode });
       this.bus.publish("terminal.session.closed", { termId: id });
-      this.saveHistoryRow(managed);
+      if (managed.persistOnExit) this.saveHistoryRow(managed);
+      else this.deleteHistoryRow(id);
       this.terminals.delete(id);
     });
 
@@ -95,6 +116,9 @@ export class TerminalManager {
       termId: id,
       name: session.name,
     });
+    // Persist the identity immediately. A newly opened CLI session must still
+    // be recoverable if Electron closes before the first history flush.
+    this.saveHistoryRow(managed);
     return session;
   }
 
@@ -135,7 +159,10 @@ export class TerminalManager {
   }
 
   kill(termId: string): void {
-    killTree(this.get(termId).pty);
+    const managed = this.get(termId);
+    managed.persistOnExit = false;
+    this.deleteHistoryRow(termId);
+    killTree(managed.pty);
   }
 
   /**
@@ -179,11 +206,14 @@ export class TerminalManager {
 
   private saveDirtyHistory(): void {
     for (const managed of this.terminals.values()) {
-      if (managed.historyDirty) this.saveHistoryRow(managed);
+      if (managed.persistOnExit && managed.historyDirty) {
+        this.saveHistoryRow(managed);
+      }
     }
   }
 
   private saveHistoryRow(managed: ManagedTerminal): void {
+    if (!managed.persistOnExit) return;
     managed.historyDirty = false;
     this.db
       .prepare(
@@ -200,8 +230,14 @@ export class TerminalManager {
       );
   }
 
+  private deleteHistoryRow(termId: string): void {
+    this.db.prepare("DELETE FROM terminal_history WHERE term_id = ?").run(termId);
+  }
+
   shutdown(): void {
     if (this.saveTimer) clearInterval(this.saveTimer);
+    this.saveDirtyHistory();
+    this.shuttingDown = true;
     for (const managed of this.terminals.values()) {
       try {
         killTree(managed.pty);

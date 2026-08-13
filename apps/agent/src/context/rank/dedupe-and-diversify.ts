@@ -1,5 +1,9 @@
 import type { RankedItem } from "../types.js";
-import { MAX_PER_PATH, MAX_SESSION_MEMORY } from "../types.js";
+import {
+  MAX_GLOBAL_SESSION_MEMORY,
+  MAX_PER_PATH,
+  MAX_SESSION_MEMORY,
+} from "../types.js";
 
 /**
  * Drops exact duplicates (same content hash, or same path+row span) and
@@ -11,6 +15,7 @@ export function dedupeAndDiversify(items: RankedItem[]): RankedItem[] {
   const seenHashes = new Set<string>();
   const perPath = new Map<string, number>();
   let sessionMemory = 0;
+  let globalSessionMemory = 0;
   const out: RankedItem[] = [];
   for (const item of items) {
     const c = item.chunk;
@@ -23,13 +28,18 @@ export function dedupeAndDiversify(items: RankedItem[]): RankedItem[] {
       if (sessionMemory >= MAX_SESSION_MEMORY) continue;
       sessionMemory += 1;
     }
+    if (c.kind === "global-session-memory") {
+      if (globalSessionMemory >= MAX_GLOBAL_SESSION_MEMORY) continue;
+      globalSessionMemory += 1;
+    }
     const count = perPath.get(c.path) ?? 0;
     // Lessons and feature summaries share a pseudo-path per kind; the
     // per-file cap is for real source files only.
     const fileless =
       c.kind === "lesson" ||
       c.kind === "feature-summary" ||
-      c.kind === "session-memory";
+      c.kind === "session-memory" ||
+      c.kind === "global-session-memory";
     if (!fileless && count >= MAX_PER_PATH) continue;
     seenHashes.add(key);
     perPath.set(c.path, count + 1);

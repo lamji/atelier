@@ -66,10 +66,19 @@ export class TaskSummaryStore {
       );
 
     const texts = this.writeSessionChunks(summary, chunkId, overviewText);
-    for (const [id, text] of texts) await this.embedChunk(id, text);
     // A new memory must be visible to the very next retrieval; the retrieval
     // cache is keyed on the index generation, which only file indexing bumps.
+    // Fired HERE, before the embeddings, because the rows above are what make
+    // the memory recallable at all — the keyword and session-memory arms read
+    // the chunk text directly, and `sessionMemoryHits` LEFT JOINs the vector
+    // rather than requiring it. A summary that is findable by text now beats
+    // one that is findable by cosine a second from now.
     this.onWrite?.();
+    // One embed call for every chunk this task produced, not one per chunk.
+    // Every await before this point is gone, so a caller that does not await
+    // `save` still gets all of the SQL above executed synchronously and
+    // leaves only the model work outstanding.
+    await this.embedChunks(texts);
   }
 
   recent(conversationId: string, n: number): TaskSummary[] {
@@ -187,10 +196,19 @@ export class TaskSummaryStore {
     return Number(info.lastInsertRowid);
   }
 
-  private async embedChunk(chunkId: number, text: string): Promise<void> {
-    if (!this.embedder || !this.vectors) return;
-    const [vec] = await this.embedder.embed([text]);
-    if (vec) this.vectors.upsert(chunkId, vec);
+  /**
+   * Embeds every chunk of a task in ONE call. A long session writes an
+   * overview plus a detail chunk per unit of work, and running the model
+   * once per chunk paid its fixed cost over and over for texts that were
+   * already all in hand.
+   */
+  private async embedChunks(texts: Array<[number, string]>): Promise<void> {
+    if (!this.embedder || !this.vectors || texts.length === 0) return;
+    const vecs = await this.embedder.embed(texts.map(([, text]) => text));
+    texts.forEach(([chunkId], i) => {
+      const vec = vecs[i];
+      if (vec) this.vectors!.upsert(chunkId, vec);
+    });
   }
 }
 

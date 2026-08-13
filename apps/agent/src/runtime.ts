@@ -5,6 +5,7 @@ import { TimelineStore } from "./events/timeline-store.js";
 import { openDb } from "./storage/db.js";
 import { ConversationRepo } from "./storage/repositories/conversations.js";
 import { SettingsRepo } from "./storage/repositories/settings.js";
+import { CliSessionDiffRepo } from "./storage/repositories/cli-session-diffs.js";
 import { Router } from "./bridge/router.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { UsageMonitor } from "./orchestrator/usage-monitor.js";
@@ -88,6 +89,7 @@ import { Embedder, EMBEDDING_DIMS } from "./knowledge/embeddings/embedder.js";
 import { VectorStore } from "./knowledge/embeddings/vector-store.js";
 import { LessonStore } from "./knowledge/lessons/lesson-store.js";
 import { registerKnowledgeTools } from "./tools/knowledge-tools.js";
+import { GlobalSessionStore } from "./context/global-session/index.js";
 import { registerPlanTools } from "./tools/plan-tools.js";
 import { PlanTracker } from "./orchestrator/plan-tracker.js";
 import { ValidationRunners } from "./validation/runners.js";
@@ -136,11 +138,17 @@ export function createAgentRuntime(
   const bus = new EventBus();
   const timeline = new TimelineStore(db, bus);
   const conversations = new ConversationRepo(db);
+  const cliSessionDiffs = new CliSessionDiffRepo(db);
   const settings = new SettingsRepo(db, {
     workspaceRoot: config.workspaceRoot,
     ignoreGlobs: [],
     disabledSkills: [],
-    maxValidationRetries: 2,
+    globalSessionKnowledge: false,
+    // No auto-repair rounds. Each retry re-runs the WHOLE validator set and
+    // spends another full model turn, and measured across real tasks the
+    // retry count — not the validators — was the dominant cost. The findings
+    // still reach the user; the agent just does not go round again by itself.
+    maxValidationRetries: 0,
     maxReviewRetries: 2,
   });
 
@@ -341,6 +349,9 @@ export function createAgentRuntime(
   // from its reachable code (no LLM), embed into the knowledge engine.
   const routeFeatures = new RouteFeatureScanner(db, bus, files, embedder, vectors);
   const lessons = new LessonStore(db, bus, embedder, vectors);
+  // The retriever caches its has-embeddings probe once it turns true; no
+  // reset wiring is needed, because embeddings only ever vanish at boot
+  // (the embedder-version wipe) — a fresh process with an empty cache.
   const retriever = new Retriever(db, embedder, vectors, knowledge, lessons);
   // Semantic retrieval cache: identical queries against an unchanged
   // index skip the re-embed and all retrieval arms entirely.
@@ -360,7 +371,8 @@ export function createAgentRuntime(
     knowledge,
     lessons,
     symbolImpact,
-    bus
+    bus,
+    settings
   );
   const planTracker = new PlanTracker(bus);
   registerPlanTools(tools, planTracker);
@@ -384,6 +396,13 @@ export function createAgentRuntime(
   // invalidate the retrieval cache the same way re-indexing a file does.
   const taskSummaries = new TaskSummaryStore(db, embedder, vectors, () =>
     generation.bump()
+  );
+  const globalSessions = new GlobalSessionStore(
+    db,
+    conversations,
+    embedder,
+    vectors,
+    () => generation.bump()
   );
   const sharedSessions = new SharedSessionContextBuilder({
     conversations,
@@ -412,6 +431,7 @@ export function createAgentRuntime(
     db,
     bus,
     tools,
+    files,
     scope,
     scopeGuard,
     ignore: ig,
@@ -432,6 +452,7 @@ export function createAgentRuntime(
     assembler,
     summaries: taskSummaries,
     sharedSessions,
+    globalSessions,
     codexTools,
     skillLoader,
     conversations,
@@ -456,7 +477,12 @@ export function createAgentRuntime(
   const selectedModel = () => settings.get().model;
   registerGitHandlers(router, git, selectedModel);
   registerProviderHandlers(router, settings, config.workspaceRoot);
-  registerTerminalHandlers(router, terminals);
+  registerTerminalHandlers(
+    router,
+    terminals,
+    config.workspaceRoot,
+    cliSessionDiffs
+  );
   registerHookHandlers(router, hooks, dbApprovalGuard);
   router.register("usage.get", async (params) => ({
     usage: params?.refresh ? await usage.refresh() : usage.current,

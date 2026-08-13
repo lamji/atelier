@@ -14,6 +14,9 @@ import { CommandPalette } from "./CommandPalette";
 import { EditorTabBar } from "./EditorTabBar";
 import { StatusBar } from "./StatusBar";
 import { ChatPanel } from "@/views/chat/ChatPanel";
+import { CliConsolePane } from "@/views/cli/CliConsolePane";
+import { CliProviderModal } from "@/views/cli/CliProviderModal";
+import { CliSessionListPanel } from "@/views/cli/CliSessionListPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
 import { GitFlowHost } from "@/views/git/GitFlowHost";
@@ -30,6 +33,7 @@ import { useTerminalViewModel } from "@/hooks/useTerminalViewModel";
 import { useSessionsViewModel } from "@/hooks/useSessionsViewModel";
 import { useConnectionViewModel } from "@/hooks/useConnectionViewModel";
 import { useTimelineViewModel } from "@/hooks/useTimelineViewModel";
+import { useProcessConsoleViewModel } from "@/hooks/useProcessConsoleViewModel";
 import { useFileExplorerViewModel } from "@/hooks/useFileExplorerViewModel";
 import { useEditorViewModel } from "@/hooks/useEditorViewModel";
 import { useGitViewModel } from "@/hooks/useGitViewModel";
@@ -42,7 +46,9 @@ import { useUsageViewModel } from "@/hooks/useUsageViewModel";
 import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
 import { useCommandRegistry } from "@/hooks/useCommandRegistry";
 import { bridge } from "@/services/bridge-client";
+import { useCliConsoleStore } from "@/services/cli-console";
 import { useGitStore } from "@/state/git.store";
+import { usePreferencesStore } from "@/state/preferences.store";
 import { useThemeStore } from "@/state/theme.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import { cn } from "@/lib/cn";
@@ -61,6 +67,7 @@ export function AppShell() {
   const connection = useConnectionViewModel();
   const sessions = useSessionsViewModel();
   const timeline = useTimelineViewModel();
+  const processConsole = useProcessConsoleViewModel();
   const explorer = useFileExplorerViewModel();
   const editor = useEditorViewModel();
   const git = useGitViewModel();
@@ -72,6 +79,7 @@ export function AppShell() {
   const dbApproval = useDbApprovalViewModel();
   const usage = useUsageViewModel();
   const contextStats = useContextStatsViewModel();
+  const cliMode = usePreferencesStore((s) => s.cliMode);
   const skillDetail = useWorkspaceStore((s) => s.skillDetail);
   const closeSkillDetail = useWorkspaceStore((s) => s.closeSkillDetail);
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
@@ -168,14 +176,24 @@ export function AppShell() {
 
   const leftPanel =
     activeView === "agents" ? (
-      <SessionListPanel
-        sessions={sessions.sessionList}
-        selectedId={sessions.selectedId}
-        onSelect={sessions.selectSession}
-        onCreate={() => void sessions.createSession()}
-        onRename={sessions.renameSession}
-        onDelete={(id) => void sessions.deleteSession(id)}
-      />
+      // CLI mode owns the whole conversation surface, so the chat sessions
+      // are hidden with it: the rail's Agents slot lists the CLI sessions
+      // of each provider instead. The chats are only out of sight — the
+      // list comes back untouched when the mode is switched off.
+      cliMode ? (
+        <CliSessionListPanel
+          onActivateSession={() => editor.setRightTab("chat")}
+        />
+      ) : (
+        <SessionListPanel
+          sessions={sessions.sessionList}
+          selectedId={sessions.selectedId}
+          onSelect={sessions.selectSession}
+          onCreate={() => void sessions.createSession()}
+          onRename={sessions.renameSession}
+          onDelete={(id) => void sessions.deleteSession(id)}
+        />
+      )
     ) : activeView === "explorer" ? (
       <FileTreePanel vm={explorer} />
     ) : activeView === "markdown" ? (
@@ -205,9 +223,13 @@ export function AppShell() {
   // trouble is never swapped in here — ConnectionGate covers the whole
   // viewport instead, so the transcript is not torn down and rebuilt on
   // every reconnect.
+  // CLI mode swaps the WHOLE chat surface — transcript and composer — for
+  // the selected provider CLI. Everything around it (sessions list, editor,
+  // terminals, git) stays exactly as it is.
   const chatPane = useMemo(
-    () => <ChatPanel shellError={sessions.error} />,
-    [sessions.error]
+    () =>
+      cliMode ? <CliConsolePane /> : <ChatPanel shellError={sessions.error} />,
+    [cliMode, sessions.error]
   );
 
   /*
@@ -217,7 +239,10 @@ export function AppShell() {
    */
   const commandSources = useMemo(
     () => ({
-      createSession: () => void sessions.createSession(),
+      createSession: () => {
+        if (cliMode) useCliConsoleStore.getState().openProviderPicker();
+        else void sessions.createSession();
+      },
       createTerminal: () => {
         // Open the dock first, or the new terminal is created into a panel
         // the user cannot see.
@@ -235,6 +260,7 @@ export function AppShell() {
       explorer.openFile,
       explorer.refresh,
       git.refresh,
+      cliMode,
       openBottom,
       sessions,
       terminal,
@@ -338,6 +364,7 @@ export function AppShell() {
                       ragVm={rag}
                       appTheme={theme}
                       timelineEntries={timeline.entries}
+                      processConsoleVm={processConsole}
                     />
                   </div>
                 </div>
@@ -381,6 +408,7 @@ export function AppShell() {
         onOpenFile={(path) => void explorer.openFile(path)}
         onClose={() => setPalette((p) => ({ ...p, open: false }))}
       />
+      <CliProviderModal />
       {/* Shell-level: raised by the git panel or by the git-flow hook. */}
       <GitFlowHost />
       {/* Shell-level: the agent's DB command waits on this answer. */}

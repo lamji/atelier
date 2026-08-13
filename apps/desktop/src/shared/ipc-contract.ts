@@ -7,11 +7,6 @@
  */
 
 export const IPC_CHANNELS = {
-  // auth
-  authSession: "atelier:auth:session",
-  authLoginStart: "atelier:auth:login-start",
-  authLogout: "atelier:auth:logout",
-  authChanged: "atelier:auth:changed",
   // projects
   projectsList: "atelier:projects:list",
   projectsAdd: "atelier:projects:add",
@@ -37,19 +32,6 @@ export const IPC_CHANNELS = {
  *  main world (ports cannot cross contextBridge). */
 export const PORT_MESSAGE_TYPE = "atelier-workspace-port";
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  name?: string;
-  avatar?: string;
-}
-
-export interface AuthState {
-  /** Null when Supabase isn't configured — the login gate is disabled. */
-  configured: boolean;
-  user: AuthUser | null;
-}
-
 export type ProjectRunState = "stopped" | "starting" | "running" | "error";
 
 export interface DesktopProjectInfo {
@@ -60,16 +42,6 @@ export interface DesktopProjectInfo {
   working: boolean;
   lastOpenedAt?: number;
   error?: string;
-}
-
-export interface DesktopAuthApi {
-  getSession(): Promise<AuthState>;
-  /** `hint` names the redirect URLs to allow-list, for the case where the
-   *  browser never comes back because Supabase refused ours. */
-  startLogin(): Promise<{ ok: boolean; error?: string; hint?: string }>;
-  logout(): Promise<void>;
-  /** Fires with login/logout results; returns an unsubscribe fn. */
-  onChanged(cb: (user: AuthUser | null, error?: string) => void): () => void;
 }
 
 export interface DesktopProjectsApi {
@@ -99,7 +71,6 @@ export interface DesktopWindowApi {
 export interface AtelierDesktopApi {
   platform: "win32" | "darwin" | "linux";
   version: string;
-  auth: DesktopAuthApi;
   projects: DesktopProjectsApi;
   /** Native directory picker; resolves null when cancelled. */
   pickFolder(): Promise<string | null>;

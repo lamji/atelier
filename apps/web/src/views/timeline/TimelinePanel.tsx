@@ -19,6 +19,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { actionDetail, actionLabel } from "@/lib/tool-labels";
 import { useStickToTop } from "@/hooks/useStickToBottom";
 import type { TimelineEntryVm } from "@/types";
 
@@ -247,12 +248,13 @@ function summarize(entry: TimelineEntryVm): string {
     }
   }
   if (typeof p.prompt === "string") return p.prompt.slice(0, 140);
+  // Tool events. Routed through the same labeller the process rail uses, so
+  // a replayed timeline reads identically to the live feed rather than as a
+  // raw `run_terminal · undefined`.
   if (typeof p.name === "string") {
-    const path =
-      typeof (p.input as Record<string, unknown> | undefined)?.path === "string"
-        ? ` · ${String((p.input as Record<string, unknown>).path)}`
-        : "";
-    return `${p.name}${path}`;
+    const label = actionLabel(p.name, p.input);
+    const detail = actionDetail(p.name, p.input);
+    return detail && detail !== label ? `${label} · ${detail}` : label;
   }
   if (typeof p.path === "string") return String(p.path);
   if (typeof p.message === "string") return p.message.slice(0, 140);

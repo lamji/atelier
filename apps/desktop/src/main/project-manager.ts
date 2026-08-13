@@ -22,6 +22,7 @@ import path from "node:path";
 import { app, MessageChannelMain, utilityProcess } from "electron";
 import type { AgentInitMessage, AgentParentMessage } from "@atelier/protocol";
 import { ProjectRegistry, atelierDataRoot, type ProjectRecord } from "./registry";
+import { mark } from "./boot-trace";
 
 export type ProjectRunState = "stopped" | "starting" | "running" | "error";
 
@@ -99,6 +100,47 @@ export class ProjectManager {
     return this.info(record);
   }
 
+  /**
+   * Fork the agent host now, before anything has asked for it.
+   *
+   * The fork costs the agent's whole module graph — native sqlite, the SDK,
+   * the schema — and it used to begin only once the renderer had booted far
+   * enough to call attach. Nothing about the fork needs the renderer, so the
+   * two waits were being paid one after the other for no reason. Started
+   * here it runs alongside the window load instead, and the attach that
+   * arrives later finds a host that is already up.
+   *
+   * Deliberately host-only: this loads modules and opens no workspace, so a
+   * user who never signs in pays a process and nothing else.
+   */
+  prewarmHost(): void {
+    // Nothing on record means nothing is going to be resumed, and the
+    // welcome screen's folder picker is a fine place to pay for the fork.
+    if (this.registry.list().length === 0) return;
+    void this.ensureHost().catch(() => {
+      // Left unreported on purpose: the renderer's own attach re-forks and
+      // surfaces the failure on a screen the user is actually looking at.
+    });
+  }
+
+  /**
+   * Open the workspace the app is about to resume anyway.
+   *
+   * The renderer picks the most recently opened project the moment it has
+   * the list, so choosing it here does not change what opens — it only
+   * stops the workspace build (db, watcher, indexer) from waiting on a
+   * round trip it can never influence.
+   */
+  prewarmWorkspace(): void {
+    const recent = [...this.registry.list()].sort(
+      (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0)
+    )[0];
+    if (!recent) return;
+    void this.start(recent.id)
+      .then(() => mark("workspace prewarmed"))
+      .catch(() => undefined);
+  }
+
   /** Forks the shared host, or returns the promise for the one starting. */
   private ensureHost(): Promise<void> {
     if (this.hostReady) return this.hostReady;
@@ -141,6 +183,7 @@ export class ProjectManager {
       const onMessage = (message: AgentParentMessage): void => {
         if (message.type === "ready") {
           clearTimeout(timer);
+          mark("agent host ready");
           resolve();
         }
       };
@@ -276,6 +319,7 @@ export class ProjectManager {
     await this.start(id);
     const host = this.host;
     if (!host) throw new Error("agent host is not running");
+    mark("attach: workspace ready");
     const { port1, port2 } = new MessageChannelMain();
     host.postMessage(
       {

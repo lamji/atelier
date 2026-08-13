@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { execa } from "execa";
 import type {
   ValidationFinding,
@@ -9,6 +10,22 @@ import type {
 
 const RUN_TIMEOUT_MS = 240_000;
 const RAW_OUTPUT_MAX = 4000;
+
+/** Grace period before a killed tree is given up on, matching run_terminal. */
+const FORCE_KILL_AFTER_MS = 1000;
+
+export interface RunValidationOptions {
+  /** Cancels the run; takes the whole process tree down with it. */
+  signal?: AbortSignal;
+  /** Receives output as it arrives, so a long run is never a silent one. */
+  onChunk?: (text: string) => void;
+  /**
+   * Restricts a `test` run to these files. Passed as positional filters
+   * after `--`, which is how vitest and jest both narrow a run; ignored for
+   * lint and typecheck, whose scripts own their own file globs.
+   */
+  paths?: string[];
+}
 
 /** Script names probed per validation kind, first hit wins. */
 const SCRIPT_CANDIDATES: Record<ValidationKind, string[]> = {
@@ -36,8 +53,9 @@ export class ValidationRunners {
 
   async run(
     kind: ValidationKind,
-    signal?: AbortSignal
+    options: RunValidationOptions = {}
   ): Promise<ValidationResult> {
+    const { signal, onChunk, paths } = options;
     const startedAt = Date.now();
     const scripts = this.scripts();
     const script = SCRIPT_CANDIDATES[kind].find((s) => scripts[s]);
@@ -51,17 +69,64 @@ export class ValidationRunners {
       };
     }
     const pm = this.packageManager();
-    const result = await execa(pm, ["run", script], {
+    const filters = kind === "test" ? (paths ?? []) : [];
+    const args = ["run", script, ...(filters.length > 0 ? ["--", ...filters] : [])];
+    // The command itself opens the stream, so a watcher can see what is
+    // running rather than only that something is.
+    onChunk?.(`$ ${pm} ${args.join(" ")}\n`);
+
+    const child = execa(pm, args, {
       cwd: this.workspaceRoot,
       // npm/pnpm are .cmd shims on Windows — hide the console they open.
       windowsHide: true,
-      timeout: RUN_TIMEOUT_MS,
       reject: false,
       all: true,
+      forceKillAfterDelay: FORCE_KILL_AFTER_MS,
+      // Colour codes would reach the finding parsers below as noise.
+      env: { ...process.env, FORCE_COLOR: "0" },
       ...(signal ? { cancelSignal: signal } : {}),
     });
-    const output = String(result.all ?? "");
-    const ok = result.exitCode === 0;
+
+    // A package script is a .cmd shim on Windows and the real runner is its
+    // CHILD, so signalling the shim leaves vitest/tsc running and this await
+    // never settles — which is what made Stop, and the timeout, do nothing.
+    // Both other shell paths in the agent kill the tree; so does this one.
+    const killTree = () => {
+      if (process.platform === "win32" && child.pid) {
+        spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true,
+          stdio: "ignore",
+        }).unref();
+      } else {
+        child.kill("SIGTERM");
+      }
+    };
+    // execa's own `timeout` signals the shim only, for the same reason.
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree();
+    }, RUN_TIMEOUT_MS);
+    if (signal?.aborted) killTree();
+    else signal?.addEventListener("abort", killTree, { once: true });
+
+    // Accumulated here rather than read from `result.all`: consuming the
+    // stream for `onChunk` is what leaves that property empty.
+    let output = "";
+    child.all?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      output += text;
+      onChunk?.(text);
+    });
+
+    let result;
+    try {
+      result = await child;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", killTree);
+    }
+    const ok = !timedOut && result.exitCode === 0;
     const findings = ok
       ? []
       : kind === "typecheck"
@@ -69,32 +134,17 @@ export class ValidationRunners {
         : kind === "lint"
           ? parseEslint(output)
           : [];
+    const tail =
+      output.length > RAW_OUTPUT_MAX ? output.slice(-RAW_OUTPUT_MAX) : output;
     return {
       kind,
       ok,
       findings: findings.slice(0, 100),
-      rawOutput:
-        output.length > RAW_OUTPUT_MAX ? output.slice(-RAW_OUTPUT_MAX) : output,
+      rawOutput: timedOut
+        ? `${kind} timed out after ${RUN_TIMEOUT_MS / 1000}s\n${tail}`
+        : tail,
       durationMs: Date.now() - startedAt,
     };
-  }
-
-  async runTests(
-    _paths?: string[],
-    signal?: AbortSignal
-  ): Promise<ValidationResult> {
-    return this.run("test", signal);
-  }
-
-  async runLint(
-    _paths?: string[],
-    signal?: AbortSignal
-  ): Promise<ValidationResult> {
-    return this.run("lint", signal);
-  }
-
-  async runTypecheck(signal?: AbortSignal): Promise<ValidationResult> {
-    return this.run("typecheck", signal);
   }
 
   private scripts(): Record<string, string> {

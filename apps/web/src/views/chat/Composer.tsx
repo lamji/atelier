@@ -16,13 +16,19 @@ import {
   ListPlus,
   Loader2,
   Paperclip,
+  Palette,
   Plus,
+  ServerCog,
   Sparkles,
   Square,
   X,
 } from "lucide-react";
 import type { MarkdownFile, ModelOption, SlashCommand } from "@atelier/protocol";
 import { cn } from "@/lib/cn";
+import {
+  BACKEND_ENGINEER_CHOICE,
+  UI_UX_DESIGNER_CHOICE,
+} from "@/lib/agent-skills";
 import {
   parentDir,
   rankMentionEntries,
@@ -66,14 +72,18 @@ type PickerOption =
  * name — no marketing hint underneath.
  */
 function modelOptions(models: ModelOption[]): PickerOption[] {
-  if (models.length === 0) return FALLBACK_MODELS;
   const options: PickerOption[] = [];
+  if (models.length === 0) {
+    options.push(...FALLBACK_MODELS);
+  }
   const order: Array<NonNullable<ModelOption["provider"]>> = [
     "claude",
     "ollama",
+    "ollama-local",
+    "grok",
     "codex",
   ];
-  for (const provider of order) {
+  for (const provider of models.length === 0 ? [] : order) {
     const rows = models.filter((m) => (m.provider ?? "claude") === provider);
     if (rows.length === 0) continue;
     options.push({
@@ -83,7 +93,29 @@ function modelOptions(models: ModelOption[]): PickerOption[] {
     });
     options.push(...rows.map((m) => [m.value, modelLabel(m)] as PickerOption));
   }
+  options.push({
+    separator: true,
+    value: "agent-skills",
+    label: "Agent skills",
+  });
+  options.push([
+    UI_UX_DESIGNER_CHOICE,
+    "UI/UX Designer",
+    "Opus 5 default",
+  ]);
+  options.push([
+    BACKEND_ENGINEER_CHOICE,
+    "Backend Engineer",
+    "Codex highest",
+  ]);
   return options;
+}
+
+/** Model-pill icon: each curated agent role gets its own glyph. */
+function agentRoleIcon(model: string): typeof Cpu {
+  if (model === UI_UX_DESIGNER_CHOICE) return Palette;
+  if (model === BACKEND_ENGINEER_CHOICE) return ServerCog;
+  return Cpu;
 }
 
 function providerLabel(provider: NonNullable<ModelOption["provider"]>): string {
@@ -94,6 +126,8 @@ function providerLabel(provider: NonNullable<ModelOption["provider"]>): string {
       return "Ollama (local)";
     case "codex":
       return "Codex";
+    case "grok":
+      return "Grok";
     default:
       return "Claude";
   }
@@ -112,7 +146,18 @@ function modelLabel(m: ModelOption): string {
   return version || m.label;
 }
 
+/**
+ * Reasoning options for the SELECTED row, never a generic list. A provider
+ * that reports its levels (Codex catalog, Ollama's thinking probe) gets
+ * exactly those; one that reports none-supported gets only "default"; only
+ * a row that says nothing at all (Claude) keeps the full-range fallback.
+ * The picker updating with the model is what keeps a pick like "xhigh"
+ * from being offered on a provider that would reject it.
+ */
 function effortOptions(model: ModelOption | undefined): PickerOption[] {
+  if (model?.supportsEffort === false) {
+    return [["default", "Reasoning: default", "This model has no reasoning control"]];
+  }
   const levels = model?.reasoningLevels;
   const available =
     levels && levels.length > 0
@@ -505,8 +550,8 @@ export const Composer = memo(function Composer() {
           </AnimatePresence>
           <div
             className={cn(
-              "rounded-2xl bg-muted/60 transition-colors",
-              "focus-within:bg-muted",
+              "rounded-2xl bg-white transition-colors dark:bg-muted/60",
+              "focus-within:bg-white dark:focus-within:bg-muted",
               dragging && "ring-2 ring-primary/60"
             )}
           >
@@ -535,7 +580,7 @@ export const Composer = memo(function Composer() {
                 onPaste={onPaste}
                 className={cn(
                   "max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5",
-                  "text-sm outline-none placeholder:text-muted-foreground/70",
+                  "text-sm text-black outline-none placeholder:text-muted-foreground/70 dark:text-foreground",
                   "disabled:opacity-60"
                 )}
               />
@@ -620,74 +665,98 @@ export const Composer = memo(function Composer() {
                   <Paperclip className="h-3.5 w-3.5" />
                 </button>
               </Tooltip>
-              <ComposerMenu
-                icon={Cpu}
-                tooltip="Model"
-                value={vm.model}
-                options={modelOptions(vm.models)}
-                onChange={(v) => vm.changeModel(v as ModelChoice)}
-                shortLabel={(label) => label.replace(/\s*\(recommended\)/i, "")}
-                interceptOpen={() => {
-                  if (!vm.noProvidersEnabled) return false;
-                  setProviderAlert(true);
-                  return true;
-                }}
-              />
-              <ComposerMenu
-                icon={Gauge}
-                tooltip="Reasoning effort"
-                value={vm.effort}
-                options={reasoningOptions}
-                onChange={(v) => vm.changeEffort(v as EffortChoice)}
-                shortLabel={(label) => label.replace(/^Reasoning:\s*/i, "")}
-              />
-              <PromptFileMenu
-                value={vm.promptFile}
-                files={vm.promptFiles}
-                onChange={vm.setPromptFile}
-              />
-              <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
-              <ComposerToggle
-                icon={ClipboardList}
-                label="Plan"
-                active={vm.planMode}
-                onToggle={vm.setPlanMode}
-                tooltip="Plan mode: the agent proposes a plan for approval before touching files"
-              />
-              <ComposerToggle
-                icon={Brain}
-                label="Knowledge"
-                active={vm.systemKnowledge}
-                onToggle={vm.setSystemKnowledge}
-                tooltip={
-                  vm.systemKnowledge
-                    ? "System knowledge ON: retrieval, impact, plan, review and session memory"
-                    : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
-                }
-              />
-              <ComposerChecks
-                icon={Sparkles}
-                label="Modes"
-                tooltip="How the agent works on this project"
-                items={[
-                  {
-                    key: "vibe",
-                    label: "Vibe code",
-                    hint: "Owns the feature end to end — UX, edge cases, polish",
-                    checked: vm.vibe,
-                    onChange: vm.changeVibe,
-                  },
-                  {
-                    key: "autoReview",
-                    label: "Auto review",
-                    hint: "An independent reviewer checks the changes and can send them back for a fix",
-                    checked: vm.autoReview,
-                    onChange: vm.changeAutoReview,
-                  },
-                ]}
-              />
+              {/*
+                These picks are read at task.start, so they are frozen only
+                for as long as a turn is actually running — idle, they are
+                editable again. A disabled fieldset greys and deadens the
+                whole group in one place; attaching files, sending and
+                cancelling stay live outside it.
+              */}
+              <fieldset
+                disabled={vm.busy}
+                className={cn(
+                  "flex min-w-0 items-center gap-1",
+                  "disabled:pointer-events-none disabled:opacity-40"
+                )}
+              >
+                <ComposerMenu
+                  icon={agentRoleIcon(vm.model)}
+                  tooltip="Model"
+                  value={vm.model}
+                  options={modelOptions(vm.models)}
+                  onChange={(v) => vm.changeModel(v as ModelChoice)}
+                  shortLabel={(label) => label.replace(/\s*\(recommended\)/i, "")}
+                  interceptOpen={() => {
+                    if (!vm.noProvidersEnabled) return false;
+                    setProviderAlert(true);
+                    return true;
+                  }}
+                />
+                <ComposerMenu
+                  icon={Gauge}
+                  tooltip="Reasoning effort"
+                  value={vm.effort}
+                  options={reasoningOptions}
+                  onChange={(v) => vm.changeEffort(v as EffortChoice)}
+                  shortLabel={(label) => label.replace(/^Reasoning:\s*/i, "")}
+                />
+                <PromptFileMenu
+                  value={vm.promptFile}
+                  files={vm.promptFiles}
+                  onChange={vm.setPromptFile}
+                />
+                <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
+                <ComposerToggle
+                  icon={ClipboardList}
+                  label="Plan"
+                  active={vm.planMode}
+                  onToggle={vm.setPlanMode}
+                  tooltip="Plan mode: the agent proposes a plan for approval before touching files"
+                />
+                <ComposerToggle
+                  icon={Brain}
+                  label="Knowledge"
+                  active={vm.systemKnowledge}
+                  onToggle={vm.setSystemKnowledge}
+                  tooltip={
+                    vm.systemKnowledge
+                      ? "System knowledge ON: retrieval, impact, plan, review and session memory"
+                      : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
+                  }
+                />
+                <ComposerChecks
+                  icon={Sparkles}
+                  label="Modes"
+                  tooltip="How the agent works on this project"
+                  items={[
+                    {
+                      key: "vibe",
+                      label: "Vibe code",
+                      hint: "Owns the feature end to end — UX, edge cases, polish",
+                      checked: vm.vibe,
+                      onChange: vm.changeVibe,
+                    },
+                    {
+                      key: "autoReview",
+                      label: "Auto review",
+                      hint: "An independent reviewer checks the changes and can send them back for a fix",
+                      checked: vm.autoReview,
+                      onChange: vm.changeAutoReview,
+                    },
+                    {
+                      key: "autoValidate",
+                      label: "Auto validate",
+                      hint: "Runs this project's typecheck, lint and test scripts after the changes land — the turn waits for them",
+                      checked: vm.autoValidate,
+                      onChange: vm.changeAutoValidate,
+                    },
+                  ]}
+                />
+              </fieldset>
               <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/50 min-[560px]:inline">
-                Enter ↵ · Shift+Enter newline
+                {vm.busy
+                  ? "Locked while the turn runs"
+                  : "Enter ↵ · Shift+Enter newline"}
               </span>
             </div>
           </div>

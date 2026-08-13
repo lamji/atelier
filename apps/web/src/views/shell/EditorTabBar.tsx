@@ -1,4 +1,11 @@
-import { Activity, FileCode2, MessageSquare, Network, Search } from "lucide-react";
+import {
+  Activity,
+  FileCode2,
+  MessageSquare,
+  Network,
+  Search,
+  TerminalSquare,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { RightTab } from "@/state/workspace.store";
 
@@ -45,6 +52,15 @@ export function EditorTabBar(props: EditorTabBarProps) {
       label: openFile ? basename(openFile) : "Editor",
       title: openFile ?? "Editor",
       icon: FileCode2,
+    },
+    // Permanent, unlike Graph/RAG below: it is the only place the output of
+    // a running validator can be read, so it has to be reachable at the
+    // moment a task looks stuck rather than only once already open.
+    {
+      id: "output",
+      label: "Output",
+      title: "Agent process output",
+      icon: TerminalSquare,
     },
   ];
   if (props.rightTab === "graph") {

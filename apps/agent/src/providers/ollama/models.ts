@@ -1,5 +1,10 @@
 import type { ModelOption, ProviderModel } from "@atelier/protocol";
-import { isCloudHost, listOllamaModels, type OllamaModel } from "./client.js";
+import {
+  isCloudHost,
+  listOllamaModels,
+  supportsThinking,
+  type OllamaModel,
+} from "./client.js";
 import {
   OLLAMA_LOCAL_PREFIX,
   OLLAMA_PREFIX,
@@ -11,10 +16,11 @@ import {
   OLLAMA_CLOUD,
   OLLAMA_LOCAL,
   providerEnabled,
+  subscriptionRequiredModelsFor,
 } from "../credentials.js";
 
-/** Settings exposes Ollama Cloud as Atelier's Ollama provider. */
-const TARGETS: OllamaTarget[] = ["ollama-cloud"];
+/** Cloud and the daemon are independent providers with independent rosters. */
+const TARGETS: OllamaTarget[] = ["ollama-cloud", "ollama-local"];
 
 /** Model-id namespace per endpoint, so a tag routes back to its host. */
 const PREFIX: Record<OllamaTarget, string> = {
@@ -27,9 +33,8 @@ const PREFIX: Record<OllamaTarget, string> = {
  * SDK roster feeds. Empty when nothing is enabled or nothing answers, so
  * the composer simply shows the Claude rows.
  *
- * Only the hosted account is probed. The local id remains understood by the
- * lower-level client for credential-store compatibility, but it is not one
- * of the three providers exposed by Atelier.
+ * Both configured endpoints are probed. The local call is loopback-only and
+ * returns immediately when the daemon is running or refuses the connection.
  */
 export async function probeOllamaModels(): Promise<ModelOption[]> {
   const rosters = await Promise.all(TARGETS.map((target) => probe(target)));
@@ -47,15 +52,30 @@ async function probe(target: OllamaTarget): Promise<ModelOption[]> {
 
   const models = await listOllamaModels(target);
   const enabled = enabledSet(target, models);
-  return models
-    .filter((m) => enabled.has(m.name))
-    .map((m) => ({
-      value: `${PREFIX[target]}${m.name}`,
-      label: m.name,
-      description: describe(target, m.name, m.parameterSize, m.quantization),
-      provider: target === OLLAMA_LOCAL ? ("ollama-local" as const) : ("ollama" as const),
-      supportsEffort: false,
-    }));
+  const restricted = new Set(subscriptionRequiredModelsFor(target));
+  const offered = models.filter(
+    (m) => enabled.has(m.name) && !restricted.has(m.name)
+  );
+  // Honest reasoning per row: a thinking-capable model exposes exactly the
+  // two states the agent loop can actually deliver (the hidden pass off or
+  // on), so the picker never offers levels that do nothing. Probes are
+  // cached per model, and only enabled rows — a handful — are asked.
+  return Promise.all(
+    offered.map(async (m) => {
+      const thinking = await supportsThinking(m.name, target).catch(() => false);
+      return {
+        value: `${PREFIX[target]}${m.name}`,
+        label: m.name,
+        description: describe(target, m.name, m.parameterSize, m.quantization),
+        provider:
+          target === OLLAMA_LOCAL ? ("ollama-local" as const) : ("ollama" as const),
+        supportsEffort: thinking,
+        ...(thinking
+          ? { reasoningLevels: ["low", "high"] as ModelOption["reasoningLevels"] }
+          : {}),
+      };
+    })
+  );
 }
 
 /**
@@ -84,11 +104,13 @@ export async function listOllamaCatalog(
 ): Promise<ProviderModel[]> {
   const models = await listOllamaModels(target);
   const enabled = enabledSet(target, models);
+  const restricted = new Set(subscriptionRequiredModelsFor(target));
   return models
     .map((m) => ({
       value: `${PREFIX[target]}${m.name}`,
       name: m.name,
-      enabled: enabled.has(m.name),
+      enabled: enabled.has(m.name) && !restricted.has(m.name),
+      subscriptionRequired: restricted.has(m.name),
       ...(sizeOf(m.parameterSize, m.quantization)
         ? { detail: sizeOf(m.parameterSize, m.quantization) }
         : {}),

@@ -3,6 +3,8 @@ import type { ReasoningEffort } from "@atelier/protocol";
 
 const VIBE_KEY = "atelier.vibe";
 const AUTO_REVIEW_KEY = "atelier.autoReview";
+const AUTO_VALIDATE_KEY = "atelier.autoValidate";
+const CLI_MODE_KEY = "atelier.cliMode";
 const DEFAULTS_KEY = "atelier.composer.defaults";
 const PER_CHAT_KEY = "atelier.composer.byChat";
 /** Keys from when the picks were one global setting; read once, then dead. */
@@ -62,10 +64,39 @@ function readVibe(): boolean {
   return (own ?? localStorage.getItem(VIBE_KEY)) === "1";
 }
 
-/** Reviewing your own changes is the default; only "0" turns it off. */
+/**
+ * Off unless asked for. Review runs a fresh reviewer session (and up to two
+ * repair rounds) after the answer has already finished streaming, so paying
+ * for it on every interactive send is the wrong default — it is worth it on
+ * a long unattended run, which is exactly when someone ticks it.
+ *
+ * Only "1" turns it on, so an install that explicitly enabled it keeps it
+ * and one that never touched the switch gets the faster turn.
+ */
 function readAutoReview(): boolean {
   const own = localStorage.getItem(scoped(AUTO_REVIEW_KEY));
-  return (own ?? localStorage.getItem(AUTO_REVIEW_KEY)) !== "0";
+  return (own ?? localStorage.getItem(AUTO_REVIEW_KEY)) === "1";
+}
+
+/**
+ * Off unless asked for, for the same reason review is. The validators are
+ * this project's own package scripts — a `test` script is the whole suite —
+ * run one after another once the answer is already on screen, and the turn
+ * cannot report itself finished until they return.
+ */
+function readAutoValidate(): boolean {
+  const own = localStorage.getItem(scoped(AUTO_VALIDATE_KEY));
+  return (own ?? localStorage.getItem(AUTO_VALIDATE_KEY)) === "1";
+}
+
+/**
+ * CLI mode swaps the main console for the real codex CLI. Off unless
+ * explicitly ticked: it bypasses everything Atelier adds, so it is a
+ * deliberate opt-in, per project like the other "how I work here" picks.
+ */
+function readCliMode(): boolean {
+  const own = localStorage.getItem(scoped(CLI_MODE_KEY));
+  return (own ?? localStorage.getItem(CLI_MODE_KEY)) === "1";
 }
 
 /** What a chat with no pick of its own gets — your last choice here. */
@@ -125,6 +156,12 @@ interface PreferencesStore {
   /** Independent review pass after the changes land. */
   autoReview: boolean;
   setAutoReview: (value: boolean) => void;
+  /** Run the validators (typecheck, lint, test) over what the task changed. */
+  autoValidate: boolean;
+  setAutoValidate: (value: boolean) => void;
+  /** CLI mode: the main console is the real codex CLI, nothing added. */
+  cliMode: boolean;
+  setCliMode: (value: boolean) => void;
   /** Applied to a chat that has never had a pick of its own. */
   defaults: ComposerPrefs;
   /**
@@ -158,6 +195,18 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
     set({ autoReview: value });
   },
 
+  autoValidate: readAutoValidate(),
+  setAutoValidate: (value) => {
+    localStorage.setItem(scoped(AUTO_VALIDATE_KEY), value ? "1" : "0");
+    set({ autoValidate: value });
+  },
+
+  cliMode: readCliMode(),
+  setCliMode: (value) => {
+    localStorage.setItem(scoped(CLI_MODE_KEY), value ? "1" : "0");
+    set({ cliMode: value });
+  },
+
   defaults: readDefaults(),
   byChat: readByChat(),
 
@@ -168,6 +217,8 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
     set({
       vibe: readVibe(),
       autoReview: readAutoReview(),
+      autoValidate: readAutoValidate(),
+      cliMode: readCliMode(),
       defaults: readDefaults(),
       byChat: readByChat(),
     });

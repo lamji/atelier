@@ -13,6 +13,7 @@ import { z } from "zod";
 export const ProviderId = z.enum([
   "claude",
   "codex",
+  "grok",
   "ollama-cloud",
   "ollama-local",
 ]);
@@ -66,6 +67,8 @@ export const ProviderModel = z.object({
   name: z.string(),
   enabled: z.boolean(),
   detail: z.string().optional(),
+  /** This account can list the model but cannot run it without upgrading. */
+  subscriptionRequired: z.boolean().optional(),
 });
 export type ProviderModel = z.infer<typeof ProviderModel>;
 

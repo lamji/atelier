@@ -9,6 +9,8 @@ import type {
   UsageSnapshot,
 } from "@atelier/protocol";
 import { bridge } from "./bridge-client.js";
+import { actionDetail, actionLabel } from "@/lib/tool-labels";
+import { isCliConsoleSession, useCliConsoleStore } from "./cli-console.js";
 import { terminalRegistry } from "./terminal-registry.js";
 import { useConnectionStore } from "@/state/connection.store";
 import { useDbApprovalStore } from "@/state/db-approval.store";
@@ -16,6 +18,8 @@ import { useGitFlowStore } from "@/state/git-flow.store";
 import { useGitStore } from "@/state/git.store";
 import { useKnowledgeStore } from "@/state/knowledge.store";
 import { useMarkdownStore } from "@/state/markdown.store";
+import { useProcessConsoleStore } from "@/state/process-console.store";
+import type { ConsoleSource } from "@/state/process-console.store";
 import type { IndexingProgress } from "@/state/knowledge.store";
 import { useSessionsStore } from "@/state/sessions.store";
 import { useTerminalStore } from "@/state/terminal.store";
@@ -195,94 +199,10 @@ function scopeLockedSummary(payload: Record<string, unknown>): string {
   return `${verb} ${where}${git}${anchored}`;
 }
 
-/** Human-readable label for a tool invocation. */
-function actionLabel(name: string, input: unknown): string {
-  const i = (input ?? {}) as Record<string, unknown>;
-  const path = typeof i.path === "string" ? i.path : "";
-  switch (name) {
-    case "read_file":
-      return `Reading ${path}`;
-    case "read_many_files": {
-      const files = Array.isArray(i.files) ? i.files : [];
-      return `Reading ${files.length} files`;
-    }
-    case "write_file":
-      return `Writing ${path}`;
-    case "replace_code":
-      return `Editing ${path}`;
-    case "replace_many": {
-      const edits = Array.isArray(i.edits) ? i.edits : [];
-      return `Editing ${edits.length} replacements`;
-    }
-    case "search_workspace":
-      return `Searching "${String(i.query ?? "")}"`;
-    case "search_text":
-      return `Searching text "${String(i.query ?? "")}"`;
-    case "list_dir":
-      return `Listing ${path || "workspace"}`;
-    case "run_terminal":
-      return terminalActionLabel(String(i.command ?? ""));
-    case "git":
-      return `git ${String(i.action ?? "")}`.trim();
-    case "retrieve_knowledge":
-      return `Retrieving knowledge: "${String(i.query ?? "")}"`;
-    case "query_knowledge_graph":
-      return `Querying code graph (${String(i.scope ?? "")})`;
-    case "search_symbols":
-      return `Searching symbols "${String(i.query ?? "")}"`;
-    case "analyze_impact": {
-      const files = Array.isArray(i.files) ? (i.files as string[]) : [];
-      const symbols = Array.isArray(i.symbols) ? (i.symbols as string[]) : [];
-      return `Analyzing impact of ${[...files, ...symbols].slice(0, 3).join(", ")}`;
-    }
-    case "impact_of_edit": {
-      const at = i.symbol ? String(i.symbol) : `${path}:${String(i.line ?? "?")}`;
-      return `Checking who uses ${at}`;
-    }
-    case "save_lesson":
-      return `Saving lesson: ${String(i.title ?? "")}`;
-    default:
-      return name;
-  }
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function terminalActionLabel(command: string): string {
-  const inner = unwrapShellCommand(command).trim();
-  const normalized = inner.replace(/\s+/g, " ");
-
-  if (/^git\s+status\b/i.test(normalized)) return "Checking git status";
-  if (/^git\s+diff\b/i.test(normalized)) return "Reading git diff";
-  if (/^git\s+log\b/i.test(normalized)) return "Reading git history";
-  if (/^git\s+branch(?:es)?\b/i.test(normalized)) return "Listing branches";
-  if (/^git\s+checkout\b/i.test(normalized)) return "Switching branch";
-  if (/^git\s+(?:add|stage)\b/i.test(normalized)) return "Staging changes";
-  if (/^git\s+commit\b/i.test(normalized)) return "Committing changes";
-  if (/^git\s+(?:rebase|merge)\b/i.test(normalized)) {
-    return "Updating branch";
-  }
-  if (/^(?:rg|grep|Select-String)\b/i.test(normalized)) {
-    return "Searching workspace";
-  }
-  if (/^(?:Get-Content|cat|type|sed)\b/i.test(normalized)) {
-    return "Reading file";
-  }
-  if (/^(?:Get-ChildItem|ls|dir|find)\b/i.test(normalized)) {
-    return "Listing workspace";
-  }
-  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+test)\b/i.test(normalized)) {
-    return "Running tests";
-  }
-  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|typecheck|lint)\b/i.test(normalized)) {
-    return "Running verification";
-  }
-
-  return "Running terminal tool";
-}
-
-function unwrapShellCommand(command: string): string {
-  const match = /(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)["'\s]*(?:-[^\s]+\s+)*-Command\s+(.+)$/i.exec(command);
-  return match?.[1] ?? command;
-}
 
 /**
  * Single subscription point: routes pushed events into the right stores.
@@ -306,6 +226,7 @@ export function startEventDispatcher(): void {
 
 function dispatch(frame: EventFrame): void {
   const sessions = useSessionsStore.getState();
+  const processConsole = useProcessConsoleStore.getState();
   const payload = frame.payload as Record<string, unknown>;
   const payloadConvId =
     typeof payload?.conversationId === "string"
@@ -369,16 +290,44 @@ function dispatch(frame: EventFrame): void {
       break;
     case "tool.started":
       if (convId) {
+        const name = String(payload.name);
         sessions.actionStarted(
           convId,
           String(payload.toolCallId),
-          actionLabel(String(payload.name), payload.input)
+          actionLabel(name, payload.input),
+          name,
+          // The label is prose and sometimes drops the specifics to stay
+          // short. This keeps them: which file, which query, which command.
+          actionDetail(name, payload.input)
+        );
+      }
+      break;
+    case "tool.output":
+      // Already published by the agent for every shell command it runs; it
+      // had no consumer here, so the output was crossing the wire and being
+      // dropped. The console pane is what reads it.
+      if (convId) {
+        processConsole.append(convId, "shell", String(payload.chunk));
+      }
+      break;
+    case "validation.output":
+      if (convId) {
+        processConsole.append(
+          convId,
+          payload.kind as ConsoleSource,
+          String(payload.chunk)
         );
       }
       break;
     case "tool.completed":
       if (convId) {
-        sessions.actionFinished(convId, String(payload.toolCallId), "done");
+        sessions.actionFinished(
+          convId,
+          String(payload.toolCallId),
+          "done",
+          undefined,
+          numberOrUndefined(payload.durationMs)
+        );
       }
       break;
     case "tool.failed": {
@@ -390,7 +339,8 @@ function dispatch(frame: EventFrame): void {
           convId,
           String(payload.toolCallId),
           "failed",
-          reason
+          reason,
+          numberOrUndefined(payload.durationMs)
         );
         console.error(
           `[tool.failed] ${String(payload.name ?? "tool")}: ${reason ?? "no reason reported"}`
@@ -442,7 +392,13 @@ function dispatch(frame: EventFrame): void {
         void bridge
           .rpc("terminal.list", {})
           .then(({ sessions }: { sessions: TerminalSession[] }) =>
-            useTerminalStore.getState().setSessions(sessions)
+            // CLI-mode sessions are ptys too, but they live in the main
+            // view — they must never appear as bottom-dock tabs.
+            useTerminalStore
+              .getState()
+              .setSessions(
+                sessions.filter((s) => !isCliConsoleSession(s.name))
+              )
           )
           .catch(() => undefined);
       }
@@ -450,6 +406,9 @@ function dispatch(frame: EventFrame): void {
     }
     case "terminal.session.closed": {
       const termId = String(payload.termId);
+      // If this was a CLI-mode session, drop its row from that list too —
+      // quitting the CLI is how a session ends.
+      useCliConsoleStore.getState().markClosed(termId);
       useTerminalStore.getState().removeSession(termId);
       terminalRegistry.dispose(termId);
       break;

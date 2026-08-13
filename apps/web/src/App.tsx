@@ -1,16 +1,13 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from "react";
-import { LoginScreen } from "@/screens/LoginScreen";
 import { OpeningScreen } from "@/screens/OpeningScreen";
 import { WelcomeScreen } from "@/screens/WelcomeScreen";
 import { WorkspaceSkeleton } from "@/screens/WorkspaceSkeleton";
 import { ErrorBoundary } from "@/views/shell/ErrorBoundary";
 import { startEventDispatcher } from "@/services/event-dispatcher";
 import {
-  closeWorkspace,
   openWorkspace,
   startProjectSync,
 } from "@/services/project-switch";
-import { useAuthStore } from "@/state/auth.store";
 import { useProjectsStore } from "@/state/projects.store";
 
 /**
@@ -38,14 +35,12 @@ function warmWorkspaceChunk(): void {
 }
 
 /**
- * Screen flow: login → workspace. There is no list screen in between: with
+ * Screen flow: workspace picker → workspace. With
  * workspaces on record the most recent one opens straight away, and with
  * none the welcome screen goes straight to the folder picker. Switching and
  * adding both live in the workspace's own selector.
  */
 export function App() {
-  const configured = useAuthStore((s) => s.configured);
-  const user = useAuthStore((s) => s.user);
   const projects = useProjectsStore((s) => s.projects);
   const activeId = useProjectsStore((s) => s.activeId);
   const loaded = useProjectsStore((s) => s.loaded);
@@ -55,17 +50,17 @@ export function App() {
     startProjectSync();
   }, []);
 
-  // Signed in means a workspace is almost certainly next; fetch its chunk now
-  // so it is parsed and ready by the time the agent's port lands.
+  // A workspace is almost certainly next; fetch its chunk now so it is parsed
+  // and ready by the time the agent's port lands.
   useEffect(() => {
-    if (user) warmWorkspaceChunk();
-  }, [user]);
+    warmWorkspaceChunk();
+  }, []);
 
   // Reopen the most recent workspace once, as soon as we know there is one.
   // Guarded by a ref rather than state: leaving a workspace on purpose
-  // (sign-out, removal) must not bounce straight back into it.
+  // (removal) must not bounce straight back into it.
   const resumed = useRef(false);
-  const canResume = Boolean(user) && loaded && activeId === null;
+  const canResume = loaded && activeId === null;
   // Layout effect, not effect: openWorkspace flips `switching` synchronously,
   // and running before paint is what keeps the picker from flashing for one
   // frame on the way into the resumed workspace.
@@ -78,18 +73,6 @@ export function App() {
     if (recent) void openWorkspace(recent.id).catch(() => undefined);
   }, [canResume, projects]);
 
-  // Signing out must detach the workspace, not just cover it with the
-  // login screen — and it re-arms the resume so the next sign-in reopens.
-  useEffect(() => {
-    if (user) return;
-    resumed.current = false;
-    if (useProjectsStore.getState().activeId !== null) closeWorkspace();
-  }, [user]);
-
-  // Login is required: no user means the login screen, always. A missing
-  // Supabase config is shown there as a setup problem rather than silently
-  // opening the app to everyone.
-  if (!user) return <LoginScreen configured={configured} />;
   // Hold the frame until the registry answers — a sub-second IPC round trip
   // that does not deserve a loading screen of its own.
   if (!loaded) return <Shell />;

@@ -2,6 +2,7 @@ import type { ModelOption, ProviderModel } from "@atelier/protocol";
 import { probeModels } from "../orchestrator/models-probe.js";
 import { probeCodexModels } from "./codex/models.js";
 import { probeOllamaModels } from "./ollama/models.js";
+import { probeGrokModels } from "./grok/models.js";
 import {
   allowlistImpliesAll,
   CLAUDE,
@@ -85,8 +86,9 @@ function enabledSet(id: SessionProvider, models: ModelOption[]): Set<string> {
 export async function pickerRoster(cwd: string): Promise<ModelOption[]> {
   const claude = await pickerSlice(CLAUDE, cwd);
   const ollama = await probeOllamaModels();
+  const grok = await probeGrokModels();
   const codex = await pickerSlice(CODEX, cwd);
-  return [...claude, ...ollama, ...codex];
+  return [...claude, ...ollama, ...grok, ...codex];
 }
 
 /**

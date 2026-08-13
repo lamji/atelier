@@ -23,6 +23,12 @@ export function renderItem(
   if (chunk.kind === "session-memory") {
     return `${head}\n${clip(chunk.preview, PREVIEW_CAP_CHARS)}`;
   }
+  if (chunk.kind === "global-session-memory" && level < 5) {
+    return `${head}\n${clip(chunk.preview, PREVIEW_CAP_CHARS)}`;
+  }
+  if (chunk.kind === "global-session-memory") {
+    return renderFull(chunk, head, db);
+  }
   const sym = chunk.symbolId ? symbolInfo(db, chunk.symbolId) : null;
   if (level === 2) {
     return sym?.doc ? `${head}\n  ${firstLines(sym.doc, 3)}` : head;

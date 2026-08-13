@@ -308,6 +308,45 @@ CREATE INDEX IF NOT EXISTS idx_session_chunks_conv
 CREATE INDEX IF NOT EXISTS idx_session_chunks_chunk
   ON session_chunks(chunk_id);
 
+-- Experimental cross-session memory. A promoted conversation owns one stable
+-- record; alias_norm also lets a later session deliberately update the same
+-- flow by reusing its alias. Its chunks are separate from session_chunks so
+-- ordinary same-session recall can never leak across conversations.
+CREATE TABLE IF NOT EXISTS global_sessions (
+  id TEXT PRIMARY KEY,
+  alias TEXT NOT NULL,
+  alias_norm TEXT NOT NULL UNIQUE,
+  source_conversation_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_global_sessions_source
+  ON global_sessions(source_conversation_id);
+
+-- Every conversation ever merged into a global flow retains the mapping.
+-- There is intentionally no FK to conversations: promoted memory survives
+-- deletion of its source chat and can still be updated through another source.
+CREATE TABLE IF NOT EXISTS global_session_sources (
+  conversation_id TEXT PRIMARY KEY,
+  global_session_id TEXT NOT NULL
+    REFERENCES global_sessions(id) ON DELETE CASCADE,
+  linked_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_global_session_sources_global
+  ON global_session_sources(global_session_id);
+
+CREATE TABLE IF NOT EXISTS global_session_chunks (
+  global_session_id TEXT NOT NULL
+    REFERENCES global_sessions(id) ON DELETE CASCADE,
+  ord INTEGER NOT NULL,
+  chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (global_session_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_global_session_chunks_chunk
+  ON global_session_chunks(chunk_id);
+
 -- The working-set lock for one conversation. Mentioning a folder ("@app/")
 -- narrows retrieval, tools and git to that checkout, and the lock is
 -- STICKY: a follow-up carries no path of its own, so without a stored row
@@ -320,3 +359,19 @@ CREATE TABLE IF NOT EXISTS conversation_scope (
   anchors TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+-- Durable review data for provider-owned CLI sessions. A PTY id is temporary;
+-- provider_id + session_id is the identity used by codex/claude resume.
+CREATE TABLE IF NOT EXISTS cli_session_diffs (
+  provider_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  before_content TEXT NOT NULL,
+  after_content TEXT NOT NULL,
+  first_touched_at INTEGER NOT NULL,
+  last_touched_at INTEGER NOT NULL,
+  also_touched_by TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (provider_id, session_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_cli_session_diffs_session
+  ON cli_session_diffs(provider_id, session_id, last_touched_at DESC);

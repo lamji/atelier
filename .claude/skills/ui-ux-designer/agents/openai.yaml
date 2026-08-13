@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI UX Designer"
+  short_description: "Design polished, intentional product interfaces."
+  default_prompt: "Create a focused UI UX direction and implement it without generic AI styling."

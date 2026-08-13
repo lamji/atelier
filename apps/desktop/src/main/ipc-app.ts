@@ -3,36 +3,9 @@
  * ipc.ts. Everything here delegates to the auth module and ProjectManager.
  */
 import crypto from "node:crypto";
-import { app, BrowserWindow, ipcMain } from "electron";
-import { IPC_CHANNELS, type AuthState } from "../shared/ipc-contract";
-import {
-  authConfigured,
-  getSession,
-  loginTroubleshootHint,
-  logout,
-  onAuthChanged,
-  startLogin,
-} from "./auth";
+import { BrowserWindow, ipcMain } from "electron";
+import { IPC_CHANNELS } from "../shared/ipc-contract";
 import type { ProjectManager } from "./project-manager";
-
-/**
- * Dev-only sign-in bypass for working on the UI before a Supabase project
- * is wired up. Requires an explicit env var AND an unpackaged build, so a
- * shipped app can never take this path — unlike an implicit
- * "not configured means no gate" rule, which is a hole.
- */
-function devAuthBypass(): boolean {
-  return !app.isPackaged && process.env.ATELIER_DEV_SKIP_AUTH === "1";
-}
-
-/** Bring Atelier forward — used when a browser round trip completes. */
-function focusMainWindow(): void {
-  const win = BrowserWindow.getAllWindows()[0];
-  if (!win || win.isDestroyed()) return;
-  if (win.isMinimized()) win.restore();
-  if (!win.isVisible()) win.show();
-  win.focus();
-}
 
 function broadcast(channel: string, ...args: unknown[]): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -41,36 +14,6 @@ function broadcast(channel: string, ...args: unknown[]): void {
 }
 
 export function registerAppIpc(projects: ProjectManager): void {
-  // ---- auth ----
-  ipcMain.handle(IPC_CHANNELS.authSession, async (): Promise<AuthState> => {
-    if (devAuthBypass()) {
-      return {
-        configured: true,
-        user: { id: "dev", email: "dev@localhost", name: "Dev" },
-      };
-    }
-    const configured = authConfigured();
-    return { configured, user: configured ? await getSession() : null };
-  });
-
-  ipcMain.handle(IPC_CHANNELS.authLoginStart, async () => {
-    const result = await startLogin();
-    // Carried on every start, not just failures: the case it explains is a
-    // sign-in that begins fine and then never comes back, which the renderer
-    // only discovers later.
-    return { ...result, hint: loginTroubleshootHint() };
-  });
-
-  ipcMain.handle(IPC_CHANNELS.authLogout, () => logout());
-
-  onAuthChanged((payload) => {
-    broadcast(IPC_CHANNELS.authChanged, payload);
-    // Sign-in finishes in the browser, so the user is looking at Chrome when
-    // it lands. Without this they have to find Atelier themselves, and the
-    // app looks like it did nothing.
-    if (payload.user) focusMainWindow();
-  });
-
   // ---- projects ----
   ipcMain.handle(IPC_CHANNELS.projectsList, () => projects.list());
 

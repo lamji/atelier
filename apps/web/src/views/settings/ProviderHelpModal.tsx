@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, Cloud, Sparkles, Terminal } from "lucide-react";
+import { Check, Cloud, HardDrive, Orbit, Sparkles, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /** What a provider needs before it can answer a turn. */
@@ -67,6 +67,32 @@ const PROVIDER_HELP: Record<string, ProviderHelp> = {
     readyLine: "Key stored and working.",
     note: "If the models list stays empty after saving, restart Atelier.",
   },
+  "ollama-local": {
+    icon: HardDrive,
+    title: "How Ollama Local connects",
+    summary:
+      "Atelier talks directly to the Ollama daemon on this machine. No API " +
+      "key or hosted account is required.",
+    steps: [
+      "Install Ollama and start the local daemon.",
+      "Pull at least one model with: ollama pull <model>",
+      "Press Test, then choose the local models you want in chat.",
+    ],
+    readyLine: "Local Ollama is running and returning models.",
+  },
+  grok: {
+    icon: Orbit,
+    title: "How Grok connects",
+    summary:
+      "Grok is key-based. Atelier calls xAI directly, stores the key locally, " +
+      "and exposes the same workspace and knowledge tools used by Ollama.",
+    steps: [
+      "Create an API key in the xAI Console at console.x.ai.",
+      "Paste it into the key field here and save.",
+      "Press Test, then switch on the Grok models you want in the chat picker.",
+    ],
+    readyLine: "xAI key stored and working.",
+  },
 };
 
 export interface ProviderHelpModalProps {
@@ -84,7 +110,7 @@ export interface ProviderHelpModalProps {
  * Explains what a provider actually needs before it will answer.
  *
  * Switching a provider on looks like it should be enough, but two of the
- * three are only a window onto a CLI that must already be signed in with
+ * providers are only a window onto a CLI that must already be signed in with
  * the user's OWN subscription — a distinction nothing in the card makes.
  * Shown on enable, and reachable afterwards from the card.
  */

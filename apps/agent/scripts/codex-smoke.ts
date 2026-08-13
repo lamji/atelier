@@ -17,10 +17,15 @@ const RED_SQUARE_PNG =
 const bus = telemetry ? new EventBus() : undefined;
 const topics: string[] = [];
 const tools: string[] = [];
+const nativeTools: string[] = [];
 bus?.subscribe((event) => {
   topics.push(event.topic);
   if (event.topic === "tool.started") {
-    tools.push(String((event.payload as { name?: string }).name ?? ""));
+    const payload = event.payload as { toolCallId?: string; name?: string };
+    tools.push(String(payload.name ?? ""));
+    if (String(payload.toolCallId ?? "").startsWith("codex_")) {
+      nativeTools.push(String(payload.name ?? ""));
+    }
   }
 });
 const registry = new ToolRegistry(bus ?? new EventBus());
@@ -40,7 +45,7 @@ const text = await runCodexExec({
     : image
       ? "An image is attached to this message. Reply with exactly the fill color of the attached square in uppercase (RED, BLUE, GREEN, ...). If no image reached you, reply with exactly NO_IMAGE."
       : telemetry
-        ? "Run a shell command to print OK, then reply with exactly OK."
+        ? "Reply with exactly OK."
         : "Reply with exactly OK.",
   sandbox: "read-only",
   signal: new AbortController().signal,
@@ -67,6 +72,11 @@ if (telemetry) console.log(`events=${topics.join(",")}`);
 if (mcp) console.log(`tools=${tools.join(",")}`);
 if (mcp && !tools.includes("search_workspace")) {
   throw new Error("Codex MCP smoke failed: search_workspace was not called");
+}
+if (mcp && nativeTools.length > 0) {
+  throw new Error(
+    `Codex isolation smoke failed: native tools were called (${nativeTools.join(",")})`,
+  );
 }
 if (image && !text.toUpperCase().includes("RED")) {
   throw new Error(`Codex image smoke failed: attachment never reached the model (${text})`);

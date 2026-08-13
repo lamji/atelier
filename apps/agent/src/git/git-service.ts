@@ -39,6 +39,13 @@ interface GitSnapshot {
 const REFRESH_DEBOUNCE_MS = 400;
 
 /**
+ * How many changed files get a content mark per refresh. One `stat` each,
+ * so a working tree with thousands of changes stays bounded; past the cap
+ * the file count and status marks still carry the change.
+ */
+const MAX_CONTENT_MARKED_FILES = 200;
+
+/**
  * simple-git wrapper. Emits git.state.changed whenever the observable repo
  * state (branch / clean / changed-file count) actually changes — triggered
  * by our own mutations, workspace file edits, and a small watcher on
@@ -295,6 +302,10 @@ export class GitService {
         path: this.toWorkspaceRel(root, f.path),
         index: f.index.trim(),
         workingDir: f.working_dir.trim(),
+        // Cheap per-file "content moved" mark. The changes rail measures a
+        // CLI session against it, so it must be read the same way for every
+        // file — see contentMark.
+        mark: this.contentMark(root, f.path),
       })),
       isClean: s.isClean(),
     };
@@ -459,19 +470,31 @@ export class GitService {
     }
     this.refreshing = true;
     try {
-      const s = await this.clientFor(this.activeRoot).status();
+      const root = this.activeRoot;
+      const s = await this.clientFor(root).status();
       const snapshot: GitSnapshot = {
         branch: s.current ?? "HEAD",
         isClean: s.isClean(),
         changedFiles: s.files.length,
       };
       // Key includes per-file index/workingDir so stage/unstage moves —
-      // which keep the same file count — still register as changes.
+      // which keep the same file count — still register as changes, and a
+      // content mark so a WRITE to an already-dirty file does too. Without
+      // the mark, every edit after the first to the same file was silent:
+      // the marks stay " M", the count stays put, and nothing downstream
+      // ever heard that the file had moved.
       const stateKey = [
         snapshot.branch,
         s.ahead,
         s.behind,
-        ...s.files.map((f) => `${f.path}:${f.index}${f.working_dir}`),
+        s.files.length,
+        ...s.files
+          .slice(0, MAX_CONTENT_MARKED_FILES)
+          .map(
+            (f) =>
+              `${f.path}:${f.index}${f.working_dir}:` +
+              this.contentMark(root, f.path)
+          ),
       ].join("|");
       if (stateKey !== this.lastStateKey) {
         this.lastStateKey = stateKey;
@@ -485,6 +508,23 @@ export class GitService {
         this.refreshQueued = false;
         void this.refresh();
       }
+    }
+  }
+
+  /**
+   * A cheap "has this file's content moved" mark: size and mtime.
+   *
+   * Not a hash — the question is only whether the last snapshot is stale,
+   * and hashing every dirty file on a 400ms debounce would read the whole
+   * working tree to answer it. A file being written as we look, or already
+   * deleted, marks as absent and the next refresh settles it.
+   */
+  private contentMark(root: string, repoRel: string): string {
+    try {
+      const stat = fs.statSync(path.join(root, repoRel));
+      return `${stat.size}@${Math.round(stat.mtimeMs)}`;
+    } catch {
+      return "-";
     }
   }
 

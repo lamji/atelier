@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { FolderOpen, LogOut } from "lucide-react";
-import { useAuthStore } from "@/state/auth.store";
+import { FolderOpen } from "lucide-react";
 import { addProject, openWorkspace } from "@/services/project-switch";
 import { BareTitleBar } from "@/views/shell/WindowControls";
 import { BrandMark } from "@/components/BrandMark";
@@ -16,7 +15,6 @@ import { cn } from "@/lib/cn";
  * this screen spends its boldness.
  */
 export function WelcomeScreen() {
-  const user = useAuthStore((s) => s.user);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -147,33 +145,6 @@ export function WelcomeScreen() {
             </p>
           )}
 
-          {user && (
-            <div className="mt-8 flex items-center gap-2 border-t border-border/60 pt-4">
-              {user.avatar ? (
-                <img
-                  src={user.avatar}
-                  alt=""
-                  className="h-5 w-5 rounded-full"
-                  referrerPolicy="no-referrer"
-                />
-              ) : null}
-              <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-                {user.name ?? user.email}
-              </span>
-              <button
-                type="button"
-                onClick={() => void window.atelierDesktop?.auth.logout()}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2 py-1",
-                  "text-[11px] text-muted-foreground outline-none",
-                  "transition-colors hover:bg-accent hover:text-foreground"
-                )}
-              >
-                <LogOut className="h-3 w-3" />
-                Sign out
-              </button>
-            </div>
-          )}
         </motion.div>
       </main>
     </div>

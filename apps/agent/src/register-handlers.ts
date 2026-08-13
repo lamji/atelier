@@ -45,7 +45,10 @@ export function registerMiscHandlers(
     jobId: await indexer.indexWorkspace(params?.force ?? false),
   }));
   router.register("knowledge.retrieve", async (params) => ({
-    result: await retriever.retrieve(params.query, params.k, params.filters),
+    result: await retriever.retrieve(params.query, params.k, {
+      ...params.filters,
+      includeGlobalSessions: settings.get().globalSessionKnowledge,
+    }),
   }));
   router.register("knowledge.graph", (params) => ({
     graph: graph.graphFor(params.scope, params.target, params.depth),

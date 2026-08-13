@@ -4,7 +4,7 @@ import type {
   RetrievalResult,
   RetrievedChunk,
 } from "@atelier/protocol";
-import type { Db } from "../storage/db.js";
+import { CHUNKS_FTS, hasChunkSearchIndex, type Db } from "../storage/db.js";
 import type { Embedder } from "../knowledge/embeddings/embedder.js";
 import type { VectorStore } from "../knowledge/embeddings/vector-store.js";
 import type { KnowledgeQuery } from "../knowledge/query/knowledge-query.js";
@@ -36,6 +36,7 @@ interface ChunkRow {
   token_count: number | null;
   content_hash: string | null;
   conversation_id: string | null;
+  global_alias: string | null;
 }
 
 /**
@@ -44,6 +45,9 @@ interface ChunkRow {
  * Degrades gracefully — with no embeddings it is keyword+graph only.
  */
 export class Retriever {
+  /** Whether the FTS index exists; probed once, then remembered. */
+  private useFts: boolean | null = null;
+
   constructor(
     private db: Db,
     private embedder: Embedder,
@@ -55,7 +59,12 @@ export class Retriever {
   async retrieve(
     query: string,
     k = 12,
-    filters?: { pathGlob?: string; kinds?: string[]; conversationId?: string }
+    filters?: {
+      pathGlob?: string;
+      kinds?: string[];
+      conversationId?: string;
+      includeGlobalSessions?: boolean;
+    }
   ): Promise<RetrievalResult> {
     const arms: string[] = [];
     const scores = new Map<number, { vec: number; kw: number; sym: number }>();
@@ -93,11 +102,28 @@ export class Retriever {
       }
     }
 
+    // Arm 1c: only memories the user explicitly promoted, and only while the
+    // experimental setting is on. This is separate from local session recall.
+    if (filters?.includeGlobalSessions) {
+      const hits = this.globalSessionHits(terms, qvec);
+      if (hits.length > 0) {
+        arms.push("global-session-memory");
+        for (const hit of hits) {
+          if (hit.vec > 0) bump(hit.chunkId, "vec", hit.vec);
+          if (hit.kw > 0) bump(hit.chunkId, "kw", hit.kw);
+        }
+      }
+    }
+
     // Arm 2: keyword occurrence over chunk text.
     if (terms.length > 0) {
       const hitCounts = new Map<number, number>();
       for (const term of terms) {
-        const rows = this.keywordRows(term, filters?.conversationId);
+        const rows = this.keywordRows(
+          term,
+          filters?.conversationId,
+          filters?.includeGlobalSessions ?? false
+        );
         for (const row of rows) {
           hitCounts.set(row.id, (hitCounts.get(row.id) ?? 0) + 1);
         }
@@ -170,15 +196,23 @@ export class Retriever {
     const loadChunk = this.db.prepare(
       "SELECT c.id, COALESCE(f.path, " +
         "CASE WHEN c.kind = 'session-memory' AND sc.conversation_id IS NOT NULL " +
-        "THEN 'session:' || sc.conversation_id ELSE c.kind END) AS path, " +
+        "THEN 'session:' || sc.conversation_id " +
+        "WHEN c.kind = 'global-session-memory' AND gs.alias IS NOT NULL " +
+        "THEN 'global-session:' || gs.alias ELSE c.kind END) AS path, " +
         "c.kind, c.text, " +
         "c.start_row, c.end_row, c.symbol_id, c.token_count, c.content_hash " +
-        ", sc.conversation_id " +
+        ", sc.conversation_id, gs.alias AS global_alias " +
         "FROM chunks c LEFT JOIN files f ON f.id = c.file_id " +
-        "LEFT JOIN session_chunks sc ON sc.chunk_id = c.id WHERE c.id = ?"
+        "LEFT JOIN session_chunks sc ON sc.chunk_id = c.id " +
+        "LEFT JOIN global_session_chunks gsc ON gsc.chunk_id = c.id " +
+        "LEFT JOIN global_sessions gs ON gs.id = gsc.global_session_id " +
+        "WHERE c.id = ?"
     );
     const fileless = (kind: string) =>
-      kind === "lesson" || kind === "feature-summary" || kind === "session-memory";
+      kind === "lesson" ||
+      kind === "feature-summary" ||
+      kind === "session-memory" ||
+      kind === "global-session-memory";
     const usedLessonChunks: number[] = [];
     for (const hit of combined) {
       if (chunks.length >= k) break;
@@ -187,6 +221,9 @@ export class Retriever {
       if (row.kind === "session-memory") {
         if (!filters?.conversationId) continue;
         if (row.conversation_id !== filters.conversationId) continue;
+      }
+      if (row.kind === "global-session-memory" && !filters?.includeGlobalSessions) {
+        continue;
       }
       if (pathRe && !fileless(row.kind) && !pathRe.test(row.path)) continue;
       if (filters?.kinds && !filters.kinds.includes(row.kind)) continue;
@@ -222,16 +259,94 @@ export class Retriever {
     return { strategy, chunks, graphNodes, features };
   }
 
+  /**
+   * Whether the vector arm has anything to search.
+   *
+   * This ran a `COUNT(*)` over every embedding on EVERY retrieve. Only a
+   * `true` answer is cached: the count is expensive exactly when the table
+   * is large, which is when it answers true, and embeddings never leave
+   * except at boot (the embedder-version wipe, a fresh process with an
+   * empty cache). A `false` re-probes each time — the count on an empty
+   * table is instant, and it is also the answer that can silently change
+   * underneath us: summary and lesson embeds write vectors WITHOUT a
+   * knowledge.updated event, so a stored false would disable the vector
+   * arm for the rest of the process.
+   */
+  private embeddingsPresent = false;
+
   private hasEmbeddings(): boolean {
-    const row = this.db
-      .prepare("SELECT COUNT(*) n FROM chunk_embeddings")
-      .get() as { n: number };
-    return row.n > 0;
+    if (!this.embeddingsPresent) {
+      const row = this.db
+        .prepare("SELECT COUNT(*) n FROM chunk_embeddings")
+        .get() as { n: number };
+      this.embeddingsPresent = row.n > 0;
+    }
+    return this.embeddingsPresent;
   }
 
   private keywordRows(
     term: string,
-    conversationId?: string
+    conversationId?: string,
+    includeGlobalSessions = false
+  ): Array<{ id: number }> {
+    if (this.useFts === null) this.useFts = hasChunkSearchIndex(this.db);
+    // A trigram index cannot answer a query shorter than a trigram, and it
+    // returns nothing rather than erroring — silently losing the term. In
+    // practice `extractTerms` never emits one, but the scan is correct for
+    // any length and a one-line guard is cheaper than that coupling.
+    if (this.useFts && term.length >= 3) {
+      try {
+        return this.ftsKeywordRows(term, conversationId, includeGlobalSessions);
+      } catch {
+        // A malformed MATCH expression should cost this one term, not the
+        // whole retrieval; the scan below still answers it correctly.
+        this.useFts = false;
+      }
+    }
+    return this.likeKeywordRows(term, conversationId, includeGlobalSessions);
+  }
+
+  /**
+   * The indexed path. The trigram tokenizer makes a MATCH on a bare term
+   * mean the same thing the LIKE did — the term appearing anywhere in the
+   * chunk, including inside an identifier — so this is a speed change, not
+   * a behaviour change. The term is double-quoted because FTS5 reads bare
+   * input as a query language, where `and`, `*` and `-` are operators.
+   */
+  private ftsKeywordRows(
+    term: string,
+    conversationId?: string,
+    includeGlobalSessions = false
+  ): Array<{ id: number }> {
+    const match = `"${term.replace(/"/g, '""')}"`;
+    if (conversationId) {
+      return this.db
+        .prepare(
+          `SELECT c.id FROM ${CHUNKS_FTS} f ` +
+            "JOIN chunks c ON c.id = f.rowid " +
+            "LEFT JOIN session_chunks sc ON sc.chunk_id = c.id " +
+            `WHERE ${CHUNKS_FTS} MATCH ? AND ` +
+            "(c.kind != 'session-memory' OR sc.conversation_id = ?) AND " +
+            "(c.kind != 'global-session-memory' OR ? = 1) LIMIT 300"
+        )
+        .all(match, conversationId, includeGlobalSessions ? 1 : 0) as Array<{ id: number }>;
+    }
+    return this.db
+      .prepare(
+        `SELECT c.id FROM ${CHUNKS_FTS} f ` +
+          "JOIN chunks c ON c.id = f.rowid " +
+          `WHERE ${CHUNKS_FTS} MATCH ? ` +
+          "AND c.kind != 'session-memory' " +
+          "AND (c.kind != 'global-session-memory' OR ? = 1) LIMIT 300"
+      )
+      .all(match, includeGlobalSessions ? 1 : 0) as Array<{ id: number }>;
+  }
+
+  /** The scan. Correct everywhere, fast nowhere — the fallback. */
+  private likeKeywordRows(
+    term: string,
+    conversationId?: string,
+    includeGlobalSessions = false
   ): Array<{ id: number }> {
     const like = `%${term}%`;
     if (conversationId) {
@@ -240,16 +355,44 @@ export class Retriever {
           "SELECT c.id FROM chunks c " +
             "LEFT JOIN session_chunks sc ON sc.chunk_id = c.id " +
             "WHERE lower(c.text) LIKE ? AND " +
-            "(c.kind != 'session-memory' OR sc.conversation_id = ?) LIMIT 300"
+            "(c.kind != 'session-memory' OR sc.conversation_id = ?) AND " +
+            "(c.kind != 'global-session-memory' OR ? = 1) LIMIT 300"
         )
-        .all(like, conversationId) as Array<{ id: number }>;
+        .all(like, conversationId, includeGlobalSessions ? 1 : 0) as Array<{ id: number }>;
     }
     return this.db
       .prepare(
         "SELECT id FROM chunks WHERE lower(text) LIKE ? " +
-          "AND kind != 'session-memory' LIMIT 300"
+          "AND kind != 'session-memory' " +
+          "AND (kind != 'global-session-memory' OR ? = 1) LIMIT 300"
       )
-      .all(like) as Array<{ id: number }>;
+      .all(like, includeGlobalSessions ? 1 : 0) as Array<{ id: number }>;
+  }
+
+  private globalSessionHits(
+    terms: string[],
+    qvec?: Float32Array
+  ): Array<{ chunkId: number; vec: number; kw: number }> {
+    const rows = this.db
+      .prepare(
+        "SELECT c.id, c.text, e.embedding FROM global_session_chunks gsc " +
+          "JOIN chunks c ON c.id = gsc.chunk_id " +
+          "LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id " +
+          "ORDER BY gsc.updated_at DESC, gsc.ord LIMIT 400"
+      )
+      .all() as Array<{ id: number; text: string; embedding: Buffer | null }>;
+    const hits = rows
+      .map((row) => {
+        const hay = row.text.toLowerCase();
+        const kw = terms.length
+          ? terms.filter((term) => hay.includes(term)).length / terms.length
+          : 0;
+        const vec = qvec && row.embedding ? cosine(qvec, row.embedding) : 0;
+        return { chunkId: row.id, vec, kw };
+      })
+      .filter((hit) => hit.vec > 0.2 || hit.kw > 0);
+    hits.sort((a, b) => Math.max(b.vec, b.kw) - Math.max(a.vec, a.kw));
+    return hits.slice(0, 12);
   }
 
   private sessionMemoryHits(
@@ -395,7 +538,8 @@ function normalizeKind(kind: string): RetrievedChunk["kind"] {
     kind === "doc" ||
     kind === "feature-summary" ||
     kind === "lesson" ||
-    kind === "session-memory"
+    kind === "session-memory" ||
+    kind === "global-session-memory"
     ? kind
     : "code";
 }

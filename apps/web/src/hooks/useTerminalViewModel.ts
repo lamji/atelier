@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "@/services/bridge-client";
+import { isCliConsoleSession } from "@/services/cli-console";
 import { terminalRegistry } from "@/services/terminal-registry";
 import {
   MAX_TERMINALS,
@@ -64,8 +65,11 @@ export function useTerminalViewModel() {
       try {
         const { sessions: live } = await bridge.rpc("terminal.list", {});
         if (cancelled) return;
-        if (live.length > 0) {
-          useTerminalStore.getState().setSessions(live);
+        // The CLI-mode console is adopted by its own pane, not the dock —
+        // and it must not suppress the roster restore for the dock's tabs.
+        const dockLive = live.filter((s) => !isCliConsoleSession(s.name));
+        if (dockLive.length > 0) {
+          useTerminalStore.getState().setSessions(dockLive);
           syncRoster();
           return;
         }

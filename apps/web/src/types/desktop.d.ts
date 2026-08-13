@@ -4,19 +4,6 @@
 export {};
 
 declare global {
-  interface AtelierAuthUser {
-    id: string;
-    email: string;
-    name?: string;
-    avatar?: string;
-  }
-
-  interface AtelierAuthState {
-    /** False when Supabase isn't configured — the login gate is disabled. */
-    configured: boolean;
-    user: AtelierAuthUser | null;
-  }
-
   type AtelierProjectRunState = "stopped" | "starting" | "running" | "error";
 
   interface AtelierProjectInfo {
@@ -27,15 +14,6 @@ declare global {
     working: boolean;
     lastOpenedAt?: number;
     error?: string;
-  }
-
-  interface AtelierDesktopAuthApi {
-    getSession(): Promise<AtelierAuthState>;
-    startLogin(): Promise<{ ok: boolean; error?: string; hint?: string }>;
-    logout(): Promise<void>;
-    onChanged(
-      cb: (user: AtelierAuthUser | null, error?: string) => void
-    ): () => void;
   }
 
   interface AtelierDesktopProjectsApi {
@@ -59,7 +37,6 @@ declare global {
   interface AtelierDesktopApi {
     platform: "win32" | "darwin" | "linux";
     version: string;
-    auth: AtelierDesktopAuthApi;
     projects: AtelierDesktopProjectsApi;
     pickFolder(): Promise<string | null>;
     /** Filesystem path of a dropped File (null if unavailable). */

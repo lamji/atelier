@@ -2,9 +2,11 @@
 <!--
   Atelier's landing page. Served by GitHub Pages from this folder
   (Settings -> Pages -> Branch: main, Folder: /docs), so it is deliberately a
-  single self-contained file: no build step, no framework, no CDN. The only
-  assets it loads are the screenshots in ./assets, which are real captures of
-  the running app produced by `node scripts/capture-ui.mjs`.
+  single self-contained file: no build step, no framework, no CDN. The hero is
+  a hand-built HTML replica of the app window replaying one agent turn, so the
+  only asset the page still loads is ./assets/icon.svg. The real captures in
+  ./assets (from `node scripts/capture-ui.mjs`) are kept for the README and the
+  og:image.
 -->
 <html lang="en" data-theme="dark">
   <head>
@@ -127,6 +129,28 @@
         background-clip: text;
         color: transparent;
       }
+      /* Hero entrance: each block rises in on its own beat, once, then the
+         console takes over as the only thing still moving above the fold. */
+      .rise { animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--d, 0) * 1ms); }
+      @keyframes rise {
+        from { opacity: 0; transform: translateY(14px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      /* The same rise, scrubbed by scroll position, for the blocks below the
+         fold. Behind @supports on purpose: without a view() timeline these
+         would all fire on load and be over before you scrolled to them. */
+      @supports (animation-timeline: view()) {
+        .grid .card,
+        .steps .step,
+        .rows .row,
+        .railbox {
+          animation: rise 1s linear both;
+          animation-timeline: view();
+          animation-range: entry 4% cover 20%;
+        }
+      }
+
       .lede {
         margin: 20px auto 0;
         max-width: 640px;
@@ -166,19 +190,361 @@
 
       /* ------------------------------------------------------ figures */
       figure { margin: 0; }
-      .shot {
-        display: block;
-        width: 100%;
-        height: auto;
-        border-radius: var(--radius);
+      figcaption { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+
+      /* ------------------------------------------- animated console
+         The hero is not a screenshot and not a video: it is the app window
+         rebuilt in HTML — title bar, activity rail, agents list, chat,
+         process rail, editor, terminal dock, status bar — replaying one
+         agent turn on a single 20s loop, with no JS.
+
+         The clock is the .bNN classes: .b23 fades its element in at 23% of
+         the loop (4.6s in) and EVERY beat clears together at 93–97%, so the
+         scene resets as a whole instead of blinking element by element.
+         Re-timing a beat means editing that one keyframe.
+
+         Everything inside is sized in cqw (1cqw = 1% of .frame's width), so
+         the mock scales with its column exactly like the image it replaced. */
+      .showcase { margin-top: 46px; }
+      .frame {
+        container-type: inline-size;
         border: 1px solid var(--border);
+        border-radius: var(--radius);
         background: var(--bg-elevated);
-      }
-      .hero-shot {
-        margin-top: 46px;
+        overflow: hidden;
         box-shadow: 0 30px 90px -30px rgba(0, 0, 0, 0.9);
       }
-      figcaption { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+      .frame-bar {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        height: 34px;
+        padding: 0 13px;
+        border-bottom: 1px solid var(--border-subtle);
+        background: var(--bg);
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .frame-bar .dot { width: 9px; height: 9px; border-radius: 999px; background: var(--border); }
+      .frame-title { margin-left: 8px; }
+      .frame-live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--accent); }
+      .frame-live i {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--accent);
+        animation: blink 2s ease-in-out infinite;
+      }
+      @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+      /* ---- the clock ------------------------------------------------
+         One beat per entry point. Shape is always the same: hidden until
+         the beat, 2% to fade up, held until 93%, gone by 97% — which is
+         the shared reset every element in the scene shares. */
+      .beat { opacity: 0; animation: 20s linear infinite; }
+      .b12 { animation-name: b12; }
+      .b15 { animation-name: b15; }
+      .b18 { animation-name: b18; }
+      .b23 { animation-name: b23; }
+      .b28 { animation-name: b28; }
+      .b33 { animation-name: b33; }
+      .b43 { animation-name: b43; }
+      .b53 { animation-name: b53; }
+      .b63 { animation-name: b63; }
+      .b68 { animation-name: b68; }
+      .b72 { animation-name: b72; }
+      @keyframes b12 { 0%, 12% { opacity: 0; transform: translateY(0.4cqw); } 14%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b15 { 0%, 15% { opacity: 0; transform: translateY(0.4cqw); } 17%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b18 { 0%, 18% { opacity: 0; transform: translateY(0.4cqw); } 20%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b23 { 0%, 23% { opacity: 0; transform: translateY(0.4cqw); } 25%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b28 { 0%, 28% { opacity: 0; transform: translateY(0.4cqw); } 30%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b33 { 0%, 33% { opacity: 0; transform: translateY(0.4cqw); } 35%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b43 { 0%, 43% { opacity: 0; transform: translateY(0.4cqw); } 45%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b53 { 0%, 53% { opacity: 0; transform: translateY(0.4cqw); } 55%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b63 { 0%, 63% { opacity: 0; transform: translateY(0.4cqw); } 65%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b68 { 0%, 68% { opacity: 0; transform: translateY(0.4cqw); } 70%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+      @keyframes b72 { 0%, 72% { opacity: 0; transform: translateY(0.4cqw); } 74%, 93% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+
+      /* ---- the window ----------------------------------------------- */
+      .sprite { position: absolute; width: 0; height: 0; }
+      .app {
+        display: grid;
+        grid-template-rows: 3.4cqw 1fr 2.6cqw;
+        aspect-ratio: 16 / 10;
+        background: var(--bg);
+        font-size: 1.02cqw;
+        line-height: 1.5;
+        color: var(--text-secondary);
+        text-align: left;
+      }
+      .app svg {
+        width: 1.5cqw;
+        height: 1.5cqw;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .app-title {
+        display: flex;
+        align-items: center;
+        gap: 0.8cqw;
+        padding: 0 1cqw;
+        background: var(--bg-elevated);
+        border-bottom: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+      }
+      .app-title .mark { width: 1.2cqw; height: 1.2cqw; fill: var(--accent); stroke: none; }
+      .app-title .name { color: var(--text-secondary); }
+      .app-title .chip {
+        padding: 0.1cqw 0.6cqw;
+        border: 1px solid var(--border);
+        border-radius: 0.45cqw;
+        background: var(--bg);
+      }
+      .omni {
+        display: flex;
+        align-items: center;
+        gap: 0.6cqw;
+        width: 26cqw;
+        margin: 0 auto;
+        padding: 0.2cqw 0.7cqw;
+        border: 1px solid var(--border-subtle);
+        border-radius: 0.5cqw;
+        background: var(--bg);
+      }
+      .omni kbd {
+        margin-left: auto;
+        font-family: var(--mono);
+        font-size: 0.8cqw;
+        padding: 0 0.35cqw;
+        border: 1px solid var(--border-subtle);
+        border-radius: 0.3cqw;
+      }
+      .win { letter-spacing: 0.9cqw; }
+
+      .app-body { display: grid; grid-template-columns: 3.6cqw 15cqw 1fr 1fr; min-height: 0; }
+
+      /* activity rail */
+      .act {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1.5cqw;
+        padding-top: 1.2cqw;
+        background: var(--bg-elevated);
+        border-right: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+      }
+      .act .on { color: var(--accent); }
+
+      /* agents list */
+      .side { background: var(--bg-elevated); border-right: 1px solid var(--border-subtle); min-width: 0; }
+      .side-head {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.9cqw 0.9cqw 0.6cqw;
+        font-family: var(--mono);
+        font-size: 0.8cqw;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+      .sess { padding: 0.55cqw 0.9cqw; border-left: 2px solid transparent; }
+      .sess b {
+        display: block;
+        font-weight: 500;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .sess span { display: block; min-height: 1.4cqw; font-size: 0.85cqw; color: var(--text-muted); }
+      .sess.on { background: var(--accent-soft); border-left-color: var(--accent); }
+      .sess.on b { color: var(--text); }
+
+      /* chat column */
+      .chat { display: grid; grid-template-rows: 2.6cqw 1fr auto; border-right: 1px solid var(--border-subtle); min-width: 0; }
+      .pane-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6cqw;
+        padding: 0 0.9cqw;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .pane-head .right { margin-left: auto; font-family: var(--mono); font-size: 0.82cqw; color: var(--text-muted); }
+      .msgs { display: grid; align-content: start; gap: 0.7cqw; padding: 0.9cqw; min-height: 0; }
+      .msg { border-radius: 0.6cqw; padding: 0.5cqw 0.75cqw; }
+      .msg .who { display: block; font-family: var(--mono); font-size: 0.78cqw; color: var(--text-muted); }
+      .msg.user {
+        justify-self: end;
+        max-width: 88%;
+        background: var(--accent-soft);
+        border: 1px solid rgba(104, 174, 184, 0.28);
+        color: var(--text);
+      }
+      .msg.bot { background: var(--bg-card); border: 1px solid var(--border-subtle); }
+
+      /* the process rail, the same three-column read as the real one */
+      .proc { border: 1px solid var(--border-subtle); border-radius: 0.6cqw; background: #0c1314; overflow: hidden; }
+      .proc header {
+        display: flex;
+        align-items: center;
+        gap: 0.5cqw;
+        padding: 0.45cqw 0.7cqw;
+        border-bottom: 1px solid var(--border-subtle);
+        font-family: var(--mono);
+        font-size: 0.78cqw;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+      .proc header i { width: 0.5cqw; height: 0.5cqw; border-radius: 999px; background: var(--accent); animation: blink 1.4s ease-in-out infinite; }
+      .proc ul { margin: 0; padding: 0.55cqw 0.7cqw; list-style: none; display: grid; gap: 0.35cqw; }
+      .proc li {
+        display: grid;
+        grid-template-columns: 1.2cqw 5.5cqw 1fr;
+        gap: 0.6cqw;
+        align-items: center;
+        font-family: var(--mono);
+        font-size: 0.85cqw;
+        color: var(--text-muted);
+      }
+      .proc .st { color: var(--text-secondary); }
+      .proc b { color: var(--accent); font-weight: 500; }
+      /* Dot = running, tick = done. The tick is opaque and stacked on top of
+         the dot, so the next beat simply covers it — no extra keyframe. */
+      .proc .glyph { position: relative; height: 1.2cqw; }
+      .proc .glyph i { position: absolute; inset: 0.35cqw; border-radius: 999px; background: var(--accent); animation: blink 1s ease-in-out infinite; }
+      .proc .glyph .tick { position: absolute; inset: 0; display: grid; place-items: center; background: #0c1314; color: var(--success); }
+
+      /* composer: the prompt types itself, then is sent at 12% */
+      .composer {
+        display: flex;
+        align-items: center;
+        gap: 0.3cqw;
+        margin: 0 0.9cqw 0.9cqw;
+        padding: 0.5cqw 0.7cqw;
+        border: 1px solid var(--border);
+        border-radius: 0.6cqw;
+        background: var(--bg-elevated);
+        font-family: var(--mono);
+        font-size: 0.92cqw;
+      }
+      .type {
+        display: inline-block;
+        width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        color: var(--text);
+        animation: typeLine 20s steps(42, end) infinite;
+      }
+      /* 42ch = the prompt, so the line finishes typing exactly at 11%. */
+      @keyframes typeLine {
+        0%, 3% { width: 0; opacity: 1; }
+        11%, 11.9% { width: 42ch; opacity: 1; }
+        12%, 100% { width: 0; opacity: 0; }
+      }
+      .caret { width: 0.14cqw; height: 1.2cqw; background: var(--accent); animation: blink 1.1s steps(2, end) infinite; }
+      .send {
+        display: grid;
+        place-items: center;
+        margin-left: auto;
+        width: 1.7cqw;
+        height: 1.7cqw;
+        border-radius: 0.4cqw;
+        background: var(--accent);
+        color: #0e1a1c;
+        font-size: 0.9cqw;
+      }
+
+      /* editor column */
+      .ed { display: grid; grid-template-rows: 2.6cqw 1fr auto; min-width: 0; }
+      .tabs { display: flex; align-items: stretch; background: var(--bg-elevated); border-bottom: 1px solid var(--border-subtle); font-size: 0.88cqw; }
+      .tab { display: flex; align-items: center; gap: 0.4cqw; padding: 0 0.9cqw; border-right: 1px solid var(--border-subtle); color: var(--text-muted); }
+      .tab.on { background: var(--bg); color: var(--text); box-shadow: inset 0 1.5px 0 var(--accent); }
+      .tab .mod { width: 0.45cqw; height: 0.45cqw; border-radius: 999px; background: var(--accent); }
+      .badge-diff { margin: 0 0.8cqw 0 auto; align-self: center; font-family: var(--mono); font-size: 0.8cqw; color: var(--success); }
+      .code { padding: 0.6cqw 0; font-family: var(--mono); font-size: 0.85cqw; line-height: 1.8; color: #cfe0e2; overflow: hidden; }
+      .ln { display: grid; grid-template-columns: 2.4cqw 1fr; gap: 0.6cqw; padding-right: 0.6cqw; white-space: nowrap; }
+      .ln .no { text-align: right; color: var(--text-muted); opacity: 0.55; }
+      .ln.del { background: rgba(214, 96, 96, 0.13); color: #e3a6a6; }
+      .ln.add { background: rgba(79, 168, 121, 0.14); color: #a8ddc0; }
+      .code .k { color: #7fb7c9; }
+      .code .c2 { color: var(--text-muted); }
+      /* The diff lands as a block: a masked height, so the hunk wipes in the
+         way Monaco fills when the agent's edit is applied. It starts at 43%
+         — the execute beat, since that is the stage that writes the file —
+         and is fully in by 53%, when validate runs in the terminal. */
+      .diff { overflow: hidden; max-height: 0; animation: diffIn 20s linear infinite; }
+      @keyframes diffIn {
+        0%, 43% { max-height: 0; opacity: 0; }
+        46% { opacity: 1; }
+        53%, 93% { max-height: 9cqw; opacity: 1; }
+        97%, 100% { max-height: 0; opacity: 0; }
+      }
+
+      /* terminal dock */
+      .term { background: #0c1314; border-top: 1px solid var(--border-subtle); font-family: var(--mono); font-size: 0.85cqw; }
+      .term-head {
+        padding: 0.35cqw 0.8cqw;
+        border-bottom: 1px solid var(--border-subtle);
+        font-size: 0.78cqw;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+      .term-body { display: grid; gap: 0.2cqw; padding: 0.5cqw 0.8cqw; min-height: 4cqw; }
+      .term-body .p { color: var(--accent); }
+      .term-body .ok { color: var(--success); }
+
+      /* status bar */
+      .app-status {
+        display: flex;
+        align-items: center;
+        gap: 1.2cqw;
+        padding: 0 1cqw;
+        background: var(--bg-elevated);
+        border-top: 1px solid var(--border-subtle);
+        font-size: 0.82cqw;
+        color: var(--text-muted);
+      }
+      .app-status > span { display: inline-flex; align-items: center; gap: 0.4cqw; }
+      .app-status svg { width: 1cqw; height: 1cqw; }
+      .app-status .ok { color: var(--success); }
+      /* One slot, three states: idle before the prompt, working for the run,
+         done for the rest of the loop. */
+      .agent-state { position: relative; width: 12cqw; height: 1.6cqw; margin-left: auto; }
+      .agent-state > span { position: absolute; right: 0; top: 0; display: flex; align-items: center; gap: 0.4cqw; white-space: nowrap; }
+      .st-idle { animation: stIdle 20s linear infinite; }
+      .st-work { opacity: 0; color: var(--accent); animation: stWork 20s linear infinite; }
+      .st-done { color: var(--success); }
+      @keyframes stIdle { 0%, 11% { opacity: 1; } 13%, 100% { opacity: 0; } }
+      @keyframes stWork { 0%, 13% { opacity: 0; } 15%, 70% { opacity: 1; } 72%, 100% { opacity: 0; } }
+      /* Same window, borrowed by the chat header and the agents list. */
+      .work-only { opacity: 0; animation: stWork 20s linear infinite; }
+      .spin {
+        width: 0.9cqw;
+        height: 0.9cqw;
+        border-radius: 999px;
+        border: 1.5px solid var(--accent);
+        border-top-color: transparent;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .app-cap { margin: 12px 0 0; font-size: 13px; color: var(--text-muted); }
+      /* Phones: the mock is a schematic, and cqw would shrink its type into
+         noise. Hold a floor width and let the figure scroll sideways instead
+         of squashing a four-column window into 380px. */
+      @media (max-width: 900px) {
+        .showcase { overflow-x: auto; }
+        .frame { min-width: 840px; }
+      }
 
       /* -------------------------------------------------------- stats */
       .stats {
@@ -221,9 +587,34 @@
       .card p { margin: 0; font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
       .card code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
 
-      /* ----------------------------------------------------- pipeline */
-      .stages { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
+      /* ----------------------------------------------------- pipeline
+         The ten stages light up in sequence on a 20s loop — 2s per stage —
+         and a pulse rides the track underneath them at the same tempo, so
+         the section reads as a turn actually moving through the pipeline. */
+      .flow { margin-top: 28px; }
+      .flow-track {
+        position: relative;
+        height: 2px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--border-subtle), var(--border), var(--border-subtle));
+        overflow: hidden;
+      }
+      .flow-track i {
+        position: absolute;
+        top: -1px;
+        height: 4px;
+        width: 26%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        animation: ride 20s linear infinite;
+      }
+      @keyframes ride { from { left: -26%; } to { left: 100%; } }
+
+      .stages { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
       .stage {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
         font-family: var(--mono);
         font-size: 12px;
         padding: 7px 13px;
@@ -231,12 +622,111 @@
         border: 1px solid var(--border);
         background: var(--bg-elevated);
         color: var(--text-secondary);
+        animation: stageOn 20s linear infinite;
+        animation-delay: calc((var(--i) - 10) * 2s);
       }
-      .stage.on { color: var(--accent); border-color: rgba(104, 174, 184, 0.35); background: var(--accent-soft); }
+      /* 2s lit, then it stays "done" (dim text, teal tick) until the loop
+         restarts — the same read as the real process rail. */
+      @keyframes stageOn {
+        0% { color: var(--text-muted); border-color: var(--border); background: var(--bg-elevated); }
+        1% { color: var(--accent); border-color: rgba(104, 174, 184, 0.55); background: var(--accent-soft); }
+        10% { color: var(--accent); border-color: rgba(104, 174, 184, 0.55); background: var(--accent-soft); }
+        11%, 100% { color: var(--text-secondary); border-color: var(--border); background: var(--bg-elevated); }
+      }
+      .stage i {
+        width: 5px;
+        height: 5px;
+        border-radius: 999px;
+        background: currentColor;
+        animation: stageDot 20s linear infinite;
+        animation-delay: calc((var(--i) - 10) * 2s);
+      }
+      @keyframes stageDot {
+        0%, 10% { transform: scale(1.6); opacity: 1; }
+        11%, 100% { transform: scale(1); opacity: 0.55; }
+      }
 
-      /* ------------------------------------------------------ gallery */
-      .gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 26px; margin-top: 30px; }
-      @media (max-width: 780px) { .gallery { grid-template-columns: 1fr; } }
+      /* ---------------------------------------------------- rail mock */
+      .railbox {
+        margin-top: 22px;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius);
+        background: #0c1314;
+        overflow: hidden;
+      }
+      .railbox header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border-subtle);
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+      .railbox header i {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--success);
+        animation: blink 1.4s ease-in-out infinite;
+      }
+      .rail { margin: 0; padding: 12px 16px 16px; list-style: none; display: grid; gap: 9px; }
+      .rail li {
+        display: grid;
+        grid-template-columns: 16px 108px 1fr;
+        align-items: baseline;
+        gap: 10px;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--text-muted);
+        opacity: 0;
+        animation: railIn 20s linear infinite;
+        animation-delay: calc((var(--i) - 10) * 2s);
+      }
+      /* Appears on its own beat, then holds for the rest of the loop. */
+      @keyframes railIn {
+        0% { opacity: 0; transform: translateX(-8px); }
+        3% { opacity: 1; transform: translateX(0); }
+        100% { opacity: 1; transform: translateX(0); }
+      }
+      .rail li .ok { color: var(--success); }
+      .rail li b { color: var(--accent); font-weight: 500; }
+      .rail-cap { margin: 10px 0 0; font-size: 13px; color: var(--text-muted); }
+
+      /* -------------------------------------------------- hero graph
+         A decorative agent graph behind the fold: dashed edges flowing
+         between pulsing nodes. Purely ornamental, hidden from the AT tree. */
+      .heroGraph {
+        position: absolute;
+        inset: -30px 0 auto 0;
+        width: 100%;
+        height: 320px;
+        pointer-events: none;
+        z-index: -1;
+        opacity: 0.55;
+      }
+      .heroGraph path {
+        fill: none;
+        stroke: var(--accent);
+        stroke-width: 1;
+        stroke-dasharray: 5 9;
+        opacity: 0.5;
+        animation: dash 3.2s linear infinite;
+      }
+      @keyframes dash { to { stroke-dashoffset: -28; } }
+      /* Opacity only — the geometry properties (r/cx/cy) are still not
+         animatable via CSS in every browser we care about. */
+      .heroGraph circle {
+        fill: var(--accent);
+        animation: node 4.4s ease-in-out infinite;
+      }
+      @keyframes node {
+        0%, 100% { opacity: 0.2; }
+        50% { opacity: 0.95; }
+      }
 
       /* --------------------------------------------------------- code */
       pre {
@@ -300,6 +790,23 @@
       }
       .foot-inner { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
       .foot-inner .sp { margin-left: auto; }
+
+      /* -------------------------------------------- reduced motion
+         Nothing moves. The console still shows the whole turn — every beat
+         is forced visible, so you read the finished state instead of the
+         replay: prompt sent, rail complete, diff applied, agent done. */
+      @media (prefers-reduced-motion: reduce) {
+        * { animation: none !important; transition: none !important; }
+        html { scroll-behavior: auto; }
+        .heroGraph { display: none; }
+        .beat, .work-only { opacity: 1 !important; }
+        .type { width: 42ch; }
+        .diff { max-height: none; }
+        .st-idle, .st-work { display: none; }
+        .flow-track i { left: 0; width: 100%; }
+        .stage { color: var(--accent); border-color: rgba(104, 174, 184, 0.35); background: var(--accent-soft); }
+        .rail li { opacity: 1; }
+      }
     </style>
   </head>
 
@@ -309,7 +816,8 @@
         <a class="brand" href="#top"><img src="assets/icon.svg" alt="" />Atelier</a>
         <nav class="nav-links">
           <a class="opt" href="#features">Features</a>
-          <a class="opt" href="#screens">Screens</a>
+          <a class="opt" href="#screens">Console</a>
+          <a class="opt" href="#workflow">Workflow</a>
           <a href="#quickstart">Run it</a>
           <a href="https://github.com/lamji/atelier">GitHub</a>
         </nav>
@@ -319,9 +827,24 @@
     <main id="top">
       <!-- ------------------------------------------------------- hero -->
       <section class="wrap hero">
-        <p class="eyebrow">Local-first agentic IDE</p>
-        <h1>Your workshop for<br />building software <span class="accent">with agents</span>.</h1>
-        <p class="lede">
+        <!-- Decorative: prompt -> retrieve -> plan -> tools -> diff, drawn as
+             a flowing agent graph. aria-hidden; it carries no information. -->
+        <svg class="heroGraph" viewBox="0 0 1120 320" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+          <path d="M90 210 C 230 210, 250 90, 390 90 S 560 200, 700 130 S 900 60, 1030 120" />
+          <path d="M60 110 C 220 60, 300 180, 450 180 S 640 250, 800 210 S 980 250, 1070 200" style="animation-delay: -1.1s" />
+          <path d="M180 30 C 320 120, 420 40, 560 70 S 760 30, 900 80" style="animation-delay: -2.2s" />
+          <circle cx="90" cy="210" r="3.5" />
+          <circle cx="390" cy="90" r="3.5" style="animation-delay: -0.6s" />
+          <circle cx="700" cy="130" r="3.5" style="animation-delay: -1.2s" />
+          <circle cx="1030" cy="120" r="3.5" style="animation-delay: -1.8s" />
+          <circle cx="450" cy="180" r="3" style="animation-delay: -2.4s" />
+          <circle cx="800" cy="210" r="3" style="animation-delay: -3s" />
+          <circle cx="560" cy="70" r="3" style="animation-delay: -3.6s" />
+        </svg>
+
+        <p class="eyebrow rise">Local-first agentic IDE</p>
+        <h1 class="rise" style="--d: 80">Your workshop for<br />building software <span class="accent">with agents</span>.</h1>
+        <p class="lede rise" style="--d: 180">
           Atelier opens a folder, parses it with tree-sitter into a local SQLite
           symbol graph and vector store, and runs agent sessions against that
           index through a staged pipeline — with hooks that stop the destructive
@@ -329,30 +852,167 @@
           terminal and your git history never leave the machine.
         </p>
 
-        <div class="badges">
+        <div class="badges rise" style="--d: 280">
           <span class="badge">MIT licensed</span>
           <span class="badge">Node 20 · Electron 34</span>
           <span class="badge">Claude · Codex · Ollama</span>
           <span class="badge live">Alpha</span>
         </div>
 
-        <div class="cta">
+        <div class="cta rise" style="--d: 360">
           <a class="btn btn-primary" href="https://github.com/lamji/atelier">View on GitHub</a>
           <a class="btn btn-ghost" href="#quickstart">Run it locally</a>
         </div>
 
-        <figure class="hero-shot">
-          <img
-            class="shot"
-            src="assets/console-dark.png"
-            width="3072"
-            height="1632"
-            alt="The Atelier console: agents rail, chat with a drafted prompt, editor tabs and the status bar."
-          />
-          <figcaption>
-            The console — one window for chat, editor, terminal, source control
-            and the knowledge graph. Every screenshot on this page is a real
-            capture of the app, not a mockup.
+        <!-- The console, rebuilt in HTML and replaying one turn on a 20s
+             loop. The .bNN class on an element is the moment it enters; the
+             stylesheet's "animated console" comment is the timeline. -->
+        <figure class="showcase rise" id="screens" style="--d: 440">
+          <!-- Icon sprite for the mock: one definition, reused by <use>. -->
+          <svg class="sprite" aria-hidden="true" focusable="false">
+            <defs>
+              <g id="i-mark"><path d="M8 1.6 14.4 8 8 14.4 1.6 8z" /></g>
+              <g id="i-chat"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" /></g>
+              <g id="i-files"><path d="M2.5 4.5h4l1.2 1.6h5.8v7h-11z" /></g>
+              <g id="i-git">
+                <circle cx="4.5" cy="4" r="1.6" /><circle cx="4.5" cy="12" r="1.6" /><circle cx="11.5" cy="5" r="1.6" />
+                <path d="M4.5 5.6v4.8M11.5 6.6v1.2a2.4 2.4 0 0 1-2.4 2.4H6.1" />
+              </g>
+              <g id="i-graph">
+                <circle cx="8" cy="3.8" r="1.5" /><circle cx="4" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" />
+                <path d="M7.3 5.2 4.7 10.6M8.7 5.2l2.6 5.4M5.5 12h5" />
+              </g>
+              <g id="i-term"><path d="M2.5 3.5h11v9h-11zM5 6.8 7 8.7 5 10.6M8.6 10.6h3" /></g>
+              <g id="i-cog"><path d="M3 5h10M3 11h10" /><circle cx="6" cy="5" r="1.7" /><circle cx="10.5" cy="11" r="1.7" /></g>
+            </defs>
+          </svg>
+
+          <div class="frame">
+            <div class="frame-bar">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="frame-title">atelier — one turn, replayed</span>
+              <span class="frame-live"><i></i>live HTML, no video</span>
+            </div>
+            <!-- The window. aria-hidden: it is an illustration, and the
+                 caption underneath carries the meaning for a screen reader. -->
+            <div class="app" aria-hidden="true">
+              <div class="app-title">
+                <svg class="mark" viewBox="0 0 16 16"><use href="#i-mark" /></svg>
+                <span class="name">Atelier</span>
+                <span class="chip">atelier ▾</span>
+                <span class="omni">Search files or run a command <kbd>Ctrl+P</kbd></span>
+                <span class="win">— ▢ ✕</span>
+              </div>
+
+              <div class="app-body">
+                <div class="act">
+                  <svg class="on" viewBox="0 0 16 16"><use href="#i-chat" /></svg>
+                  <svg viewBox="0 0 16 16"><use href="#i-files" /></svg>
+                  <svg viewBox="0 0 16 16"><use href="#i-git" /></svg>
+                  <svg viewBox="0 0 16 16"><use href="#i-graph" /></svg>
+                  <svg viewBox="0 0 16 16"><use href="#i-term" /></svg>
+                  <svg viewBox="0 0 16 16"><use href="#i-cog" /></svg>
+                </div>
+
+                <div class="side">
+                  <div class="side-head"><span>Agents</span><span>+</span></div>
+                  <div class="sess on">
+                    <b>Bridge reconnect</b>
+                    <span class="work-only">working…</span>
+                  </div>
+                  <div class="sess"><b>Index cold start</b><span>2h ago</span></div>
+                  <div class="sess"><b>Terminal ABI</b><span>yesterday</span></div>
+                </div>
+
+                <div class="chat">
+                  <div class="pane-head">
+                    <svg viewBox="0 0 16 16"><use href="#i-chat" /></svg>
+                    <span>Bridge reconnect</span>
+                    <span class="work-only"><span class="spin"></span></span>
+                    <span class="right">claude · opus</span>
+                  </div>
+
+                  <div class="msgs">
+                    <div class="msg user beat b12">
+                      <span class="who">you</span>
+                      add retry with backoff to bridge reconnect
+                    </div>
+
+                    <div class="proc beat b15">
+                      <header><i></i>process</header>
+                      <ul>
+                        <li class="beat b18"><span class="glyph"><i></i><span class="tick beat b23">✓</span></span><span class="st">retrieve</span><span>12 chunks · 4 files</span></li>
+                        <li class="beat b23"><span class="glyph"><i></i><span class="tick beat b28">✓</span></span><span class="st">impact</span><span><b>shared</b> — 7 callers</span></li>
+                        <li class="beat b28"><span class="glyph"><i></i><span class="tick beat b33">✓</span></span><span class="st">plan</span><span>3 steps · contract kept</span></li>
+                        <li class="beat b33"><span class="glyph"><i></i><span class="tick beat b43">✓</span></span><span class="st">hooks</span><span>git-flow <b>armed</b></span></li>
+                        <li class="beat b43"><span class="glyph"><i></i><span class="tick beat b53">✓</span></span><span class="st">execute</span><span>replace_code ×2 · <b>+14 −3</b></span></li>
+                        <li class="beat b53"><span class="glyph"><i></i><span class="tick beat b63">✓</span></span><span class="st">validate</span><span>tsc clean · lint clean</span></li>
+                        <li class="beat b63"><span class="glyph"><i></i><span class="tick beat b68">✓</span></span><span class="st">summary</span><span>1 file changed</span></li>
+                      </ul>
+                    </div>
+
+                    <div class="msg bot beat b68">
+                      <span class="who">atelier</span>
+                      Reconnect now retries five times with exponential
+                      backoff. Typecheck is clean — nothing committed.
+                    </div>
+                  </div>
+
+                  <div class="composer">
+                    <span class="type">add retry with backoff to bridge reconnect</span><i class="caret"></i>
+                    <span class="send">↑</span>
+                  </div>
+                </div>
+
+                <div class="ed">
+                  <div class="tabs">
+                    <span class="tab on">bridge.ts<i class="mod beat b43"></i></span>
+                    <span class="tab">ChatPanel.tsx</span>
+                    <span class="badge-diff beat b43">+14 −3</span>
+                  </div>
+
+                  <div class="code">
+                    <div class="ln"><span class="no">37</span><span class="c2">// apps/agent/src/bridge.ts</span></div>
+                    <div class="ln"><span class="no">38</span><span><span class="k">async function</span> connect(url) {</span></div>
+                    <div class="diff">
+                      <div class="ln del"><span class="no">39</span><span>-  <span class="k">return</span> open(url)</span></div>
+                      <div class="ln add"><span class="no">39</span><span>+  <span class="k">for</span> (<span class="k">let</span> i = 0; i &lt; 5; i++) {</span></div>
+                      <div class="ln add"><span class="no">40</span><span>+    <span class="k">try</span> { <span class="k">return await</span> open(url) }</span></div>
+                      <div class="ln add"><span class="no">41</span><span>+    <span class="k">catch</span> { <span class="k">await</span> wait(2 ** i * 250) }</span></div>
+                      <div class="ln add"><span class="no">42</span><span>+  }</span></div>
+                    </div>
+                    <div class="ln"><span class="no">43</span><span>}</span></div>
+                  </div>
+
+                  <div class="term">
+                    <div class="term-head">terminal · pwsh</div>
+                    <div class="term-body">
+                      <div class="beat b53"><span class="p">PS atelier&gt;</span> pnpm -w typecheck</div>
+                      <div class="beat b63"><span class="ok">✓</span> 4 packages · no errors</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="app-status">
+                <span class="ok">● connected</span>
+                <span><svg viewBox="0 0 16 16"><use href="#i-git" /></svg>electron</span>
+                <span>402 files · 7,808 symbols</span>
+                <span class="agent-state">
+                  <span class="st-idle">idle</span>
+                  <span class="st-work"><span class="spin"></span>working…</span>
+                  <span class="st-done beat b72">✓ 1 file changed · +14 −3</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <figcaption class="app-cap">
+            One turn, replayed: the prompt is typed and sent, the process rail
+            fills stage by stage, the diff lands in Monaco, validation runs in
+            the terminal and the status bar settles on <b>done</b>. This is
+            HTML, not a screenshot — the real app is on
+            <a href="https://github.com/lamji/atelier">GitHub</a>.
           </figcaption>
         </figure>
 
@@ -430,76 +1090,51 @@
       </section>
 
       <!-- --------------------------------------------------- pipeline -->
-      <section class="wrap band" id="pipeline">
+      <section class="wrap band" id="workflow">
         <h2>Ten observable stages</h2>
         <p class="sub">
           Every non-trivial turn runs the same pipeline, streamed to the process
           rail as it happens. Trivial chat skips the whole thing instead of
           paying for it.
         </p>
-        <div class="stages">
-          <span class="stage on">understand</span>
-          <span class="stage on">retrieve</span>
-          <span class="stage on">impact</span>
-          <span class="stage on">plan</span>
-          <span class="stage on">hooks</span>
-          <span class="stage on">execute</span>
-          <span class="stage on">validate</span>
-          <span class="stage on">knowledge</span>
-          <span class="stage on">review</span>
-          <span class="stage on">summary</span>
-        </div>
-      </section>
 
-      <!-- ---------------------------------------------------- gallery -->
-      <section class="wrap band" id="screens">
-        <h2>The console, screen by screen</h2>
-        <p class="sub">
-          Captured from a fresh clone opened on Atelier's own source tree.
+        <div class="flow">
+          <div class="flow-track" aria-hidden="true"><i></i></div>
+          <div class="stages">
+            <span class="stage" style="--i: 0"><i></i>understand</span>
+            <span class="stage" style="--i: 1"><i></i>retrieve</span>
+            <span class="stage" style="--i: 2"><i></i>impact</span>
+            <span class="stage" style="--i: 3"><i></i>plan</span>
+            <span class="stage" style="--i: 4"><i></i>hooks</span>
+            <span class="stage" style="--i: 5"><i></i>execute</span>
+            <span class="stage" style="--i: 6"><i></i>validate</span>
+            <span class="stage" style="--i: 7"><i></i>knowledge</span>
+            <span class="stage" style="--i: 8"><i></i>review</span>
+            <span class="stage" style="--i: 9"><i></i>summary</span>
+          </div>
+        </div>
+
+        <div class="railbox" aria-hidden="true">
+          <header><i></i>process rail</header>
+          <ul class="rail">
+            <li style="--i: 0"><span class="ok">✓</span><span>understand</span><span>intent <b>edit</b> · 2 targets · budget 18k</span></li>
+            <li style="--i: 1"><span class="ok">✓</span><span>retrieve</span><span>12 chunks · 4 files · <b>1.9k tokens</b></span></li>
+            <li style="--i: 2"><span class="ok">✓</span><span>impact</span><span><b>shared</b> — 7 callers across 3 files</span></li>
+            <li style="--i: 3"><span class="ok">✓</span><span>plan</span><span>3 steps · keep the contract stable</span></li>
+            <li style="--i: 4"><span class="ok">✓</span><span>hooks</span><span>modularity, git-flow, db <b>armed</b></span></li>
+            <li style="--i: 5"><span class="ok">✓</span><span>execute</span><span>replace_code ×3 · <b>+41 −12</b></span></li>
+            <li style="--i: 6"><span class="ok">✓</span><span>validate</span><span>tsc clean · lint clean</span></li>
+            <li style="--i: 7"><span class="ok">✓</span><span>knowledge</span><span>reindexed 3 files · <b>+18 symbols</b></span></li>
+            <li style="--i: 8"><span class="ok">✓</span><span>review</span><span>1 note · no blockers</span></li>
+            <li style="--i: 9"><span class="ok">✓</span><span>summary</span><span>turn saved to session memory</span></li>
+          </ul>
+        </div>
+        <p class="rail-cap">
+          A schematic of one turn at the tempo you would watch it run — the
+          stage names and the rail are the real ones, the numbers are
+          illustrative. The console at the top of the page replays the same
+          rail, drawn the same way.
         </p>
-
-        <div class="gallery">
-          <figure>
-            <img class="shot" loading="lazy" src="assets/knowledge.png" width="3072" height="1632"
-              alt="Knowledge panel showing indexed files, symbols, call edges, chunks and detected features." />
-            <figcaption>Knowledge — the graph, the counts, and the features it inferred from your code.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/git-flow.png" width="3072" height="1632"
-              alt="Source control panel listing hundreds of changed files with stage and discard controls." />
-            <figcaption>Source control — stage, discard, and a commit → push → PR wizard the agent cannot skip.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/editor.png" width="3072" height="1632"
-              alt="File explorer beside the Monaco editor showing package.json." />
-            <figcaption>Explorer and Monaco — the same editor surface the agent's diffs render into.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/hooks.png" width="3072" height="1632"
-              alt="Hooks panel listing pre-tool guards for modularity, git flow, database and package commands." />
-            <figcaption>Hooks — the guards, what they match, and whether they block or ask.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/settings.png" width="3072" height="1632"
-              alt="Settings providers tab with Claude, Codex and Ollama sections." />
-            <figcaption>Providers — switch one on, allow the models you want; the composer's picker is exactly that union.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/terminal.png" width="3072" height="1632"
-              alt="The console with the bottom terminal dock expanded." />
-            <figcaption>Terminal — real ConPTY sessions in the bottom dock, shared with the agent.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/explorer.png" width="3072" height="1632"
-              alt="Explorer sidebar with the workspace file tree." />
-            <figcaption>Explorer — one folder per workspace, as many workspaces as you like.</figcaption>
-          </figure>
-          <figure>
-            <img class="shot" loading="lazy" src="assets/console-light.png" width="3072" height="1632"
-              alt="The same console rendered in the light theme." />
-            <figcaption>The same console in the light theme.</figcaption>
-          </figure>
-        </div>
       </section>
 
       <!-- -------------------------------------------------- quickstart -->
@@ -529,11 +1164,7 @@ pnpm install</pre>
           </div>
           <div class="step">
             <h3>Start the dev stack</h3>
-            <pre><span class="c"># PowerShell — skip the Supabase sign-in gate while you work on the app</span>
-$env:ATELIER_DEV_SKIP_AUTH = "1"; pnpm dev
-
-<span class="c"># bash / zsh</span>
-ATELIER_DEV_SKIP_AUTH=1 pnpm dev</pre>
+            <pre>pnpm dev</pre>
           </div>
           <div class="step">
             <h3>First run</h3>
@@ -548,9 +1179,8 @@ ATELIER_DEV_SKIP_AUTH=1 pnpm dev</pre>
         <p class="note">
           <b>Alpha, and honest about it.</b> Windows is the platform Atelier is
           developed and packaged on; the code is cross-platform but macOS and
-          Linux are unverified, and the installer script is NSIS-only. Real
-          sign-in needs your own Supabase project — or skip it in dev with
-          <code>ATELIER_DEV_SKIP_AUTH=1</code>. Full instructions live in the
+          Linux are unverified, and the installer script is NSIS-only. Full
+          instructions live in the
           <a href="https://github.com/lamji/atelier#run-it-locally">README</a>.
         </p>
       </section>
@@ -567,9 +1197,8 @@ ATELIER_DEV_SKIP_AUTH=1 pnpm dev</pre>
           <div class="row">
             <code>apps/desktop</code>
             <p>
-              Electron shell. Owns Google sign-in (Supabase PKCE +
-              <code>atelier://</code> deep link), the project registry, and one
-              forked agent utilityProcess per open project.
+              Electron shell. Owns the project registry and one forked agent
+              utilityProcess per open project.
             </p>
           </div>
           <div class="row">

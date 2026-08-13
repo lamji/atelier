@@ -214,9 +214,14 @@ const agentBundler = spawn(
 children.push(agentBundler);
 
 process.env.ATELIER_WEB_PORT = String(webPort);
+// --force re-optimises every dependency (Monaco, xterm, the graph stack) on
+// each start. That is only ever needed when a dependency actually changed,
+// and Vite already re-optimises on its own when the lockfile moves — running
+// it unconditionally just made every boot a cold one.
+const viteFlags = process.env.ATELIER_VITE_FORCE === "1" ? ["--force"] : [];
 const vite = prefixed(
   "vite",
-  ["--filter", "@atelier/web", "dev", "--force", "--port", String(webPort)],
+  ["--filter", "@atelier/web", "dev", ...viteFlags, "--port", String(webPort)],
   repoRoot,
 );
 

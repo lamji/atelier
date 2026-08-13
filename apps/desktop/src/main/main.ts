@@ -5,61 +5,45 @@ import { devUrl, packagedIndexHtml } from "./resolve-url";
 import { registerIpcHandlers } from "./ipc";
 import { registerAppIpc } from "./ipc-app";
 import { installAppMenu } from "./menu";
-import { handleDeepLink } from "./auth";
-import {
-  deepLinkInArgv,
-  handleColdStartDeepLink,
-  registerProtocol,
-  wireOpenUrl,
-} from "./protocol";
+import { mark } from "./boot-trace";
 import { ProjectManager, resolveAgentEntry } from "./project-manager";
-
-// Must run before whenReady so the OS knows who owns atelier:// links.
-registerProtocol();
 
 const projects = new ProjectManager(resolveAgentEntry());
 
-// One instance: OAuth deep links arrive as a second-instance launch on
-// Windows/Linux, so the running app must claim them and stay focused.
-const hasLock = app.requestSingleInstanceLock();
-if (!hasLock) {
-  app.quit();
-} else {
-  app.on("second-instance", (_event, argv) => {
-    const link = deepLinkInArgv(argv);
-    if (link) void handleDeepLink(link);
-    const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.focus();
+app.whenReady().then(() => {
+  mark("app ready");
+  installAppMenu();
+  registerIpcHandlers();
+  registerAppIpc(projects);
+  // The agent fork and workspace prewarm are both on the critical path to a
+  // usable window and neither one needs the renderer.
+  projects.prewarmHost();
+  projects.prewarmWorkspace();
+  void start();
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) void start();
   });
-
-  wireOpenUrl();
-
-  app.whenReady().then(() => {
-    installAppMenu();
-    registerIpcHandlers();
-    registerAppIpc(projects);
-    void start();
-    handleColdStartDeepLink();
-
-    app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) void start();
-    });
-  });
-}
+});
 
 async function start(): Promise<void> {
   const win = createMainWindow();
+  mark("window created");
   const dev = devUrl();
   if (dev) {
     // Desktop dev reuses Electron's default session, so stale HTTP cache can
-    // keep old Vite-transformed modules alive across restarts and produce 404s
-    // for deps that no longer exist.
-    await win.webContents.session.clearCache();
+    // keep old Vite-transformed modules alive across restarts and produce
+    // 404s for deps that no longer exist. Clearing it also throws away the
+    // cache that makes every *other* boot fast, so it is opt-in: set
+    // ATELIER_DEV_CLEAR_CACHE=1 for the run after a dependency change.
+    if (process.env.ATELIER_DEV_CLEAR_CACHE === "1") {
+      await win.webContents.session.clearCache();
+      mark("dev http cache cleared");
+    }
     await win.loadURL(dev);
   }
   else await win.loadFile(packagedIndexHtml());
+  mark("renderer loaded");
   await maybeCapture(win);
 }
 

@@ -101,7 +101,8 @@ export class PromptAssembler {
           (c) =>
             c.kind === "code" ||
             c.kind === "doc" ||
-            c.kind === "session-memory"
+            c.kind === "session-memory" ||
+            c.kind === "global-session-memory"
         )
         .map((c) => `- [${c.kind}] ${c.path}`),
       ...already.map((c) => `- [${c.kind}] ${c.path} (already in context)`),

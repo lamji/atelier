@@ -7,6 +7,7 @@ export type RightTab =
   | "editor"
   | "terminal"
   | "activity"
+  | "output"
   | "graph"
   | "rag";
 

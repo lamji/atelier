@@ -14,7 +14,12 @@
  *    switches to cloud on its own.
  */
 
-import { ollamaConfig, OLLAMA_LOCAL } from "../credentials.js";
+import {
+  ollamaConfig,
+  OLLAMA_CLOUD,
+  OLLAMA_LOCAL,
+  setModelSubscriptionRequired,
+} from "../credentials.js";
 import type { OllamaTarget } from "../model-routing.js";
 import { recordUsage } from "./usage.js";
 
@@ -125,6 +130,50 @@ function authHeaders(target: OllamaTarget = "ollama-cloud"): Record<string, stri
   return key ? { authorization: `Bearer ${key}` } : {};
 }
 
+export type OllamaModelAccess =
+  | "available"
+  | "subscription-required"
+  | "unknown";
+
+/** Ollama exposes paid models in /api/tags, so only /api/chat proves access. */
+export async function probeOllamaModelAccess(
+  model: string,
+  target: OllamaTarget = "ollama-cloud"
+): Promise<OllamaModelAccess> {
+  try {
+    const response = await fetchWithTimeout(`${ollamaHost(target)}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(target) },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "Reply OK" }],
+        stream: false,
+        options: { num_predict: 1 },
+      }),
+      timeoutMs: 60_000,
+    });
+    if (response.ok) return "available";
+    const detail = await response.text().catch(() => "");
+    return isOllamaSubscriptionRequired(response.status, detail)
+      ? "subscription-required"
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export function isOllamaSubscriptionRequired(
+  status: number,
+  detail: string
+): boolean {
+  return (
+    status === 403 &&
+    /requires? a subscription|subscription required|upgrade for access/i.test(
+      detail
+    )
+  );
+}
+
 /**
  * Models the daemon currently has pulled. Returns [] when Ollama is not
  * running — a missing daemon is the normal case for most users, not an
@@ -207,10 +256,33 @@ function numCtxCap(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : MAX_NUM_CTX;
 }
 
+/** Thinking capability per endpoint+model, filled by the same /api/show. */
+const thinkingSupport = new Map<string, boolean>();
+
+/**
+ * Whether the model advertises the "thinking" capability — i.e. it is a
+ * reasoning model whose hidden pass can be toggled with `think` on
+ * /api/chat. Cached beside the context window; the two come from the same
+ * probe, so asking after resolveNumCtx has run costs nothing.
+ */
+export async function supportsThinking(
+  model: string,
+  target: OllamaTarget = "ollama-cloud"
+): Promise<boolean> {
+  const key = `${target}:${model}`;
+  const cached = thinkingSupport.get(key);
+  if (cached !== undefined) return cached;
+  // Populates both caches on the way through.
+  await modelContextLength(model, target);
+  return thinkingSupport.get(key) ?? false;
+}
+
 /**
  * The model's own context length, from its manifest. The key is
  * family-scoped ("gemma4.context_length", "llama.context_length"), so it is
  * matched by suffix rather than by a list of families that would go stale.
+ * Also records the manifest's capability list (thinking support) so one
+ * probe answers both questions.
  */
 async function modelContextLength(
   model: string,
@@ -226,7 +298,15 @@ async function modelContextLength(
     if (!response.ok) return null;
     const body = (await response.json()) as {
       model_info?: Record<string, unknown>;
+      capabilities?: unknown;
     };
+    const capabilities = Array.isArray(body.capabilities)
+      ? body.capabilities.map(String)
+      : [];
+    thinkingSupport.set(
+      `${target}:${model}`,
+      capabilities.includes("thinking")
+    );
     const info = body.model_info ?? {};
     for (const [key, value] of Object.entries(info)) {
       if (!key.endsWith("context_length")) continue;
@@ -290,6 +370,13 @@ export async function ollamaChat(opts: OllamaChatOptions): Promise<string> {
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
+    if (isOllamaSubscriptionRequired(response.status, detail)) {
+      setModelSubscriptionRequired(target, opts.model, true);
+      throw new Error(
+        `Ollama model "${opts.model}" requires a subscription. ` +
+          "Choose a Free-access model or upgrade the Ollama account."
+      );
+    }
     if (response.status === 401 || response.status === 403) {
       throw new Error(
         `Ollama rejected the credentials for "${opts.model}" (${response.status}). ` +
@@ -311,6 +398,9 @@ export async function ollamaChat(opts: OllamaChatOptions): Promise<string> {
     total_duration?: number;
   };
   if (body.error) throw new Error(`Ollama error: ${body.error}`);
+  if (target === OLLAMA_CLOUD) {
+    setModelSubscriptionRequired(target, opts.model, false);
+  }
 
   // Ollama has no usage endpoint, so the per-response counters are the only
   // measure of what we spend. Metering must never break a completion.
