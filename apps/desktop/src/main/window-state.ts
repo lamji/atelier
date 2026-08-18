@@ -11,6 +11,7 @@ interface WindowState {
 
 /** Mirrors atelierDataRoot() in @atelier/shared/node — same data dir. */
 function dataRoot(): string {
+  if (process.env.ATELIER_DATA_DIR) return process.env.ATELIER_DATA_DIR;
   const base =
     process.env.LOCALAPPDATA ?? path.join(os.homedir(), ".local", "share");
   return path.join(base, "atelier");
@@ -48,6 +49,7 @@ export function trackWindowState(win: BrowserWindow): void {
 
   const save = (): void => {
     if (win.isDestroyed()) return;
+    if (win.isKiosk()) return;
     const state: WindowState = {
       maximized: win.isMaximized(),
       bounds: win.isMaximized() ? win.getNormalBounds() : win.getBounds(),

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { UsageWindow } from "@atelier/protocol";
+import type { OllamaCloudUsageWindow, UsageWindow } from "@atelier/protocol";
 import { bridge } from "@/services/bridge-client";
 import { useConnectionStore } from "@/state/connection.store";
 import { useUsageStore } from "@/state/usage.store";
@@ -9,6 +9,8 @@ export interface UsageVm {
   status: "allowed" | "allowed_warning" | "rejected" | null;
   /** Windows to show as usage bars, 5-hour and weekly first. */
   windows: UsageWindow[];
+  /** Activity observed from Ollama Cloud responses, not account quota. */
+  ollamaCloudUsage: OllamaCloudUsageWindow[];
   /** True while a manual/auto refresh probe is in flight. */
   refreshing: boolean;
   /** Force a fresh probe of the plan usage. */
@@ -68,6 +70,7 @@ export function useUsageViewModel(): UsageVm {
     available: usage.available,
     status: usage.status,
     windows: orderWindows(usage.windows),
+    ollamaCloudUsage: usage.ollamaCloudUsage,
     refreshing,
     refresh,
   };

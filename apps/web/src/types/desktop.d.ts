@@ -29,9 +29,28 @@ declare global {
   interface AtelierDesktopWindowApi {
     minimize(): void;
     maximizeToggle(): void;
+    kioskToggle(): void;
     close(): void;
     isMaximized(): Promise<boolean>;
+    isKiosk(): Promise<boolean>;
     onMaximizedChanged(cb: (maximized: boolean) => void): () => void;
+    onKioskChanged(cb: (kiosk: boolean) => void): () => void;
+  }
+
+  interface AtelierDesktopCaptureRect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
+
+  interface AtelierDesktopCaptureRequest extends AtelierDesktopCaptureRect {
+    previewUrl?: string;
+  }
+
+  interface AtelierDesktopCaptureResult {
+    dataUrl: string;
+    frameUrl: string | null;
   }
 
   interface AtelierDesktopApi {
@@ -39,6 +58,10 @@ declare global {
     version: string;
     projects: AtelierDesktopProjectsApi;
     pickFolder(): Promise<string | null>;
+    /** Captures a renderer-relative rectangle and its live preview route. */
+    captureRegion(
+      request: AtelierDesktopCaptureRequest
+    ): Promise<AtelierDesktopCaptureResult | null>;
     /** Filesystem path of a dropped File (null if unavailable). */
     pathForFile(file: File): string | null;
     openExternal(url: string): Promise<void>;

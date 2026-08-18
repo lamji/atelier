@@ -23,6 +23,8 @@ const agentRoot = path.join(repoRoot, "apps", "agent");
 const DEFAULT_WEB_PORT = 5173;
 const PORT_SCAN_SPAN = 100;
 const WEB_READY_TIMEOUT_MS = 60_000;
+const ATELIER_RENDERER_MARKER =
+  '<meta name="atelier-renderer" content="web" />';
 // esbuild writes main/preload (and their maps) in a burst; coalesce them into
 // one restart. The second delay lets the dying process release the
 // single-instance lock — too short and the replacement quits on startup.
@@ -131,12 +133,17 @@ async function findFreePort(start) {
   return start;
 }
 
-async function isHttpReady(port) {
+/**
+ * A listening port is not enough: it may belong to another dev server. Only
+ * the Atelier Vite document may release Electron to load the renderer.
+ */
+async function isAtelierRendererReady(port) {
   try {
-    await fetch(`http://localhost:${port}/`, {
+    const response = await fetch(`http://localhost:${port}/`, {
       signal: AbortSignal.timeout(1000),
     });
-    return true;
+    if (!response.ok) return false;
+    return (await response.text()).includes(ATELIER_RENDERER_MARKER);
   } catch {
     return false;
   }
@@ -149,7 +156,7 @@ async function waitFor(child, name, port, timeoutMs) {
       console.error(`[desktop] ${name} exited before it was ready`);
       shutdown(1);
     }
-    if (await isHttpReady(port)) return;
+    if (await isAtelierRendererReady(port)) return;
     await new Promise((r) => setTimeout(r, 250));
   }
   console.error(`[desktop] ${name} not ready on port ${port} in time`);
@@ -193,9 +200,22 @@ function ensureIcon() {
 ensureElectronAbi();
 ensureIcon();
 
-const webPort = process.env.ATELIER_WEB_PORT
-  ? Number(process.env.ATELIER_WEB_PORT)
+const configuredWebPort = process.env.ATELIER_WEB_PORT;
+const webPort = configuredWebPort
+  ? Number(configuredWebPort)
   : await findFreePort(DEFAULT_WEB_PORT);
+
+if (!Number.isInteger(webPort) || webPort < 1 || webPort > 65_535) {
+  console.error(`[desktop] invalid ATELIER_WEB_PORT: ${configuredWebPort}`);
+  shutdown(1);
+}
+if (configuredWebPort && !(await canBind(webPort))) {
+  console.error(
+    `[desktop] configured web port ${webPort} is already in use — ` +
+      "unset ATELIER_WEB_PORT or choose a free port",
+  );
+  shutdown(1);
+}
 
 console.log(`[desktop] dev: web ${webPort} (native, no supervisor)`);
 

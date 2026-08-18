@@ -18,10 +18,10 @@ export function SessionListPanel(props: SessionListPanelProps) {
   return (
     <div className="flex h-full flex-col">
       <div className="island-header justify-between">
-        <div className="flex items-center gap-1.5">
-          <Bot className="h-3.5 w-3.5 text-muted-foreground" />
-          <span className="island-title">Agents</span>
-        </div>
+        <span className="icon-tile icon-tile-sm">
+          <Bot className="h-3.5 w-3.5" />
+        </span>
+        <span className="island-title">Agents</span>
         <button
           type="button"
           title="New agent session"
@@ -32,7 +32,7 @@ export function SessionListPanel(props: SessionListPanelProps) {
           <Plus className="h-4 w-4" />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
         <AnimatePresence initial={false}>
           {props.sessions.map((session) => (
             <SessionRow
@@ -86,12 +86,14 @@ function SessionRow(props: {
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const last = session.items[session.items.length - 1];
+  const preview =
+    last?.text.replaceAll("\n", " ").trim() || session.previewText;
   const subtitle =
     session.status === "working"
       ? "Working…"
       : session.status === "error"
         ? (session.lastError ?? "Error")
-        : (last?.text.replaceAll("\n", " ") ?? "No messages yet");
+        : (preview ?? "No messages yet");
 
   // A row that scrolls out of view mid-confirm must not keep a live "delete"
   // armed for whenever it comes back.
@@ -108,22 +110,42 @@ function SessionRow(props: {
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0 }}
       className={cn(
-        // Full-bleed list row, not a card: a sidebar list reads as one column
-        // when the rows share the panel's own edges.
-        "group relative flex w-full items-center gap-2 py-1 pl-2 pr-1",
+        // An inset rounded row, not a full-bleed line: each session is a
+        // separate running agent, so it reads better as an object in a list
+        // than as a line in a tree.
+        "group relative flex w-full items-center gap-2.5 rounded-xl py-2 pl-2 pr-2",
         "transition-colors",
-        props.active ? "bg-accent" : "hover:bg-accent/50"
+        props.active
+          ? "bg-primary/12 shadow-sm ring-1 ring-primary/30"
+          : "hover:bg-accent/60"
       )}
     >
-      {/* Slim active rule, matching the activity rail and the editor tabs. */}
-      <span
-        aria-hidden
-        className={cn(
-          "absolute inset-y-0 left-0 w-[2px] bg-primary transition-opacity",
-          props.active ? "opacity-100" : "opacity-0"
-        )}
-      />
-      <StatusDot status={session.status} />
+      {/* The tile carries the identity, the dot on its corner carries the
+          state — one object, two facts, instead of a bare dot in a column. */}
+      <span className="relative shrink-0">
+        <motion.span
+          className={cn(
+            "icon-tile icon-tile-sm",
+            props.active && "bg-primary/15 text-primary ring-1 ring-primary/25"
+          )}
+          animate={
+            props.active
+              ? { rotate: [0, -5, 5, 0], scale: [1, 1.08, 1] }
+              : { rotate: 0, scale: 1 }
+          }
+          transition={
+            props.active
+              ? { duration: 1.8, repeat: Infinity, ease: "easeInOut" }
+              : { duration: 0.16 }
+          }
+        >
+          <Bot className="h-3.5 w-3.5" />
+        </motion.span>
+        <StatusDot
+          status={session.status}
+          className="absolute -bottom-0.5 -right-0.5 rounded-full ring-2 ring-card"
+        />
+      </span>
 
       {renaming ? (
         <RenameField
@@ -141,11 +163,11 @@ function SessionRow(props: {
           onDoubleClick={() => setRenaming(true)}
           title={session.conversation.title}
           aria-current={props.active}
-          className="min-w-0 flex-1 text-left"
+          className="min-w-0 flex-1 pr-1 text-left group-hover:pr-14 group-focus-within:pr-14"
         >
           <span
             className={cn(
-              "block truncate text-xs",
+              "block truncate text-[13px] leading-snug",
               props.active ? "font-semibold" : "font-medium"
             )}
           >
@@ -172,7 +194,9 @@ function SessionRow(props: {
       {!renaming && (
         <span
           className={cn(
-            "flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity",
+            "absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5",
+            "rounded-lg opacity-0 transition-opacity",
+            props.active ? "bg-primary/10" : "bg-accent",
             "group-hover:opacity-100 group-focus-within:opacity-100",
             confirmDelete && "opacity-100"
           )}
@@ -255,8 +279,8 @@ function RenameField(props: {
       }}
       aria-label="Chat title"
       className={cn(
-        "min-w-0 flex-1 rounded border border-border bg-background",
-        "px-1.5 py-0.5 text-xs outline-none focus:border-primary"
+        "min-w-0 flex-1 rounded-lg border border-border bg-card",
+        "px-2 py-1 text-xs outline-none focus:border-primary"
       )}
     />
   );

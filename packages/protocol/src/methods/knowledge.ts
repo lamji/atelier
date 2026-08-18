@@ -7,6 +7,7 @@ import {
   Lesson,
   RetrievalResult,
 } from "../models/knowledge.js";
+import { WikiLintFinding, WikiPageInfo } from "../models/wiki.js";
 
 export const knowledgeMethods = {
   "knowledge.indexWorkspace": {
@@ -47,6 +48,14 @@ export const knowledgeMethods = {
   "knowledge.lessons.list": {
     params: z.object({ limit: z.number().optional() }).optional(),
     result: z.object({ lessons: z.array(Lesson) }),
+  },
+  /** Feature-wiki pages with live freshness, plus lint findings. */
+  "knowledge.wiki.list": {
+    params: z.object({}).optional(),
+    result: z.object({
+      pages: z.array(WikiPageInfo),
+      lint: z.array(WikiLintFinding),
+    }),
   },
   "knowledge.symbol": {
     params: z.object({ id: z.number() }),

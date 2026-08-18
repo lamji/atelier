@@ -36,38 +36,37 @@ export function IndexingWelcome({ vm, workspaceRoot }: IndexingWelcomeProps) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="absolute inset-0 z-20 flex items-center justify-center bg-background/80 backdrop-blur-sm"
+      className="absolute inset-0 z-20 flex items-center justify-center bg-background/75 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md px-6">
+      <div className="w-full max-w-lg px-6">
         <motion.div
           initial={{ scale: 0.96, y: 10 }}
           animate={{ scale: 1, y: 0 }}
-          className="rounded-2xl bg-card/80 p-6 shadow-xl ring-1 ring-border/50"
+          className="overflow-hidden rounded-lg border border-border-subtle bg-card shadow-pop"
         >
-          <div className="flex items-center gap-3">
-            <span className="orb flex h-11 w-11 items-center justify-center rounded-2xl">
-              <Database className="h-5 w-5 text-white" />
+          <div className="flex items-center gap-3 border-b border-border-subtle px-5 py-4">
+            <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Database className="h-5 w-5" />
             </span>
             <div className="min-w-0">
-              <p className="text-sm font-bold">Building knowledge</p>
+              <p className="text-sm font-semibold">Building knowledge</p>
               <p className="truncate text-[11px] text-muted-foreground">
                 {project}
               </p>
             </div>
             <button
               onClick={vm.dismissWelcome}
-              className="ml-auto flex items-center gap-1 rounded-lg bg-muted/60 px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="ml-auto flex h-8 items-center gap-1.5 rounded-lg bg-muted/60 px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <EyeOff className="h-3.5 w-3.5" />
               Hide
             </button>
           </div>
 
-          <div className="mt-5">
+          <div className="px-5 py-4">
             <div className="mb-1.5 flex items-center justify-between text-[11px]">
               <span className="font-medium text-foreground/80">
                 {progress ? (PHASE_LABEL[progress.phase] ?? "Indexing") : "Indexing"}
-                …
               </span>
               {progress && (
                 <span className="tabular-nums text-muted-foreground">
@@ -88,17 +87,13 @@ export function IndexingWelcome({ vm, workspaceRoot }: IndexingWelcomeProps) {
                 {progress.currentPath}
               </p>
             )}
-          </div>
 
-          <div className="mt-5 grid grid-cols-3 gap-2">
-            <Stat icon={FileCode2} label="Files" value={stats?.files} />
-            <Stat icon={Braces} label="Symbols" value={stats?.symbols} />
-            <Stat icon={Sparkles} label="Embedded" value={stats?.embedded} />
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              <Stat icon={FileCode2} label="Files" value={stats?.files} />
+              <Stat icon={Braces} label="Symbols" value={stats?.symbols} />
+              <Stat icon={Sparkles} label="Embedded" value={stats?.embedded} />
+            </div>
           </div>
-
-          <p className="mt-4 text-center text-[11px] text-muted-foreground/70">
-            You can start a task now — the index fills in live.
-          </p>
         </motion.div>
       </div>
     </motion.div>
@@ -111,7 +106,7 @@ function Stat(props: {
   value: number | undefined;
 }) {
   return (
-    <div className={cn("rounded-xl bg-muted/40 px-2.5 py-2 text-center")}>
+    <div className={cn("rounded-lg bg-muted/45 px-2.5 py-2 text-center")}>
       <props.icon className="mx-auto h-3.5 w-3.5 text-muted-foreground" />
       <p className="mt-1 text-sm font-semibold tabular-nums">
         {props.value ?? "—"}

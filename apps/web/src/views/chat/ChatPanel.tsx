@@ -3,20 +3,13 @@ import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  BrainCircuit,
-  FolderLock,
-  History,
   MessageSquareDashed,
-  Network,
-  Radar,
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { liveHeadline } from "@/lib/live-headline";
 import { useChatViewModel } from "@/hooks/useChatViewModel";
-import { useChangesRailViewModel } from "@/hooks/useChangesRailViewModel";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
-import { ChangesRail } from "./ChangesRail";
 import { ProcessCard } from "./ProcessCard";
 import { Composer } from "./Composer";
 import type { ChatItemVm } from "@/types";
@@ -27,12 +20,7 @@ export interface ChatPanelProps {
 }
 
 /**
- * The chat surface: transcript in the centre, changes rail on the right,
- * composer at the bottom.
- *
- * The turn reads left to right, once each: the conversation and the process
- * card in the stream, every file the agent touched in the rail beside it.
- * A diff is never rendered twice.
+ * The chat surface: transcript in the centre and composer at the bottom.
  *
  * Reads its own data (see {@link useChatViewModel}) instead of taking it as
  * props, and is memoized on the one prop it does take — so a shell re-render
@@ -41,7 +29,6 @@ export interface ChatPanelProps {
  */
 export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
   const vm = useChatViewModel();
-  const changes = useChangesRailViewModel(vm.items, vm.liveDiffs);
 
   // Follows the stream only while you're at the bottom; scroll up to read
   // and it stops yanking you back down. The process card lives in the stream
@@ -53,6 +40,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
     vm.stage,
     vm.actions,
     vm.plan,
+    vm.executions,
   ]);
 
   // The plan persists after a run so the turn's shape stays available; the
@@ -62,41 +50,53 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
   // one-step placeholder on every single turn — with that gone, a genuine
   // one-step plan is just a short task and deserves to show.
   const hasPlan = vm.plan !== null && vm.plan.steps.length > 0;
-  const showProcess = vm.busy || hasPlan;
+  const showProcess =
+    vm.busy || hasPlan || vm.actions.length > 0 || vm.liveDiffs.length > 0;
+  const workflowLogs = showProcess
+    ? currentTurnLogs(vm.items, vm.activeTaskId)
+    : [];
+  const workflowLogIds = new Set(workflowLogs.map((item) => item.id));
+  const timelineTaskIds = new Set(vm.executions.map((item) => item.taskId));
+  if (vm.activeTaskId) timelineTaskIds.add(vm.activeTaskId);
+  const activeRequest = vm.activeTaskId
+    ? vm.items.find(
+        (item) => item.taskId === vm.activeTaskId && item.role === "user"
+      )
+    : undefined;
   const status = vm.busy
     ? liveHeadline(vm.actions, vm.stage, vm.cancelling)
     : null;
+  const activeExecution = vm.activeTaskId
+    ? vm.executions.find((execution) => execution.taskId === vm.activeTaskId)
+    : undefined;
   const error = props.shellError ?? vm.lastError;
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2.5 px-4 py-2.5">
-        <span
-          className={cn(
-            "orb relative h-7 w-7 shrink-0 rounded-full",
-            vm.busy && "orb-spin"
-          )}
-        >
-          <span className="absolute inset-[3px] rounded-full bg-card/85 backdrop-blur" />
-          <Sparkles className="absolute inset-0 m-auto h-3.5 w-3.5 text-primary" />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold">
-          {vm.sessionTitle}
-        </span>
-        {vm.busy && (
-          <span className="text-shimmer text-xs font-semibold">
-            agent working…
+      <div className="px-4 pb-3 pt-4">
+        <div className="flex w-full items-center gap-3">
+          <span
+            className={cn(
+              "orb relative h-9 w-9 shrink-0 rounded-xl",
+              vm.busy && "orb-spin"
+            )}
+          >
+            <span className="absolute inset-[3px] rounded-[0.6rem] bg-card/85 backdrop-blur" />
+            <Sparkles className="absolute inset-0 m-auto h-4 w-4 text-primary" />
           </span>
-        )}
+          <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight">
+            {vm.sessionTitle}
+          </span>
+          {vm.busy && (
+            <span className="chip chip-accent">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+              <span className="text-shimmer font-semibold">working…</span>
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1">
-        {/*
-          min-w-0: a flex item's default min-width is its content, so without
-          it a wide code block in the transcript refuses to shrink, the row
-          grows past the window, and the rail is pushed off the right edge.
-          This column is the one that gives — the rail's width is fixed.
-        */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/*
             overflow-x-hidden is load-bearing: setting only overflow-y makes
@@ -109,37 +109,71 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             onScroll={onScroll}
             className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 [scrollbar-gutter:stable_both-edges]"
           >
-            <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4">
-              {vm.items.length === 0 && !vm.busy && (
+            <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-5">
+              {vm.items.length === 0 && vm.executions.length === 0 && !vm.busy && (
                 <EmptyState connected={vm.connected} />
               )}
               <AnimatePresence initial={false}>
                 {/*
-                  Diff items are skipped: every edit in this conversation is
-                  in the rail, one tab per file. The streaming assistant is
-                  skipped while the run is live — ThinkingBlock carries it.
+                  Diff payloads are not chat messages. The streaming assistant is
+                  skipped while the run is live — ProcessCard carries the live
+                  thinking state on the execution timeline.
                 */}
                 {vm.items.map((item) =>
                   item.role === "diff" ||
+                  item.role === "log" ||
+                  workflowLogIds.has(item.id) ||
+                  (item.taskId !== undefined &&
+                    timelineTaskIds.has(item.taskId) &&
+                    (item.role === "user" || item.role === "assistant")) ||
                   (vm.busy && item.role === "assistant" && item.streaming) ? null : (
                     <ChatMessage key={item.id} item={item} />
                   )
                 )}
+                {vm.executions
+                  .filter(
+                    (execution) =>
+                      execution.status !== "running" &&
+                      execution.status !== "queued"
+                  )
+                  .map((execution) => (
+                    <ProcessCard
+                      key={execution.taskId}
+                      request={execution.request}
+                      report={execution.report}
+                      images={execution.images ?? []}
+                      frontendReview={execution.frontendReview}
+                      requestedAt={execution.requestedAt}
+                      plan={execution.plan}
+                      busy={false}
+                      actions={execution.actions}
+                      diffs={execution.diffs}
+                      stage={null}
+                      startedAt={execution.startedAt}
+                      durationMs={execution.durationMs}
+                      cancelling={false}
+                      logs={execution.logs}
+                      thinking=""
+                      status=""
+                    />
+                  ))}
                 {showProcess && (
                   <ProcessCard
                     key="process"
+                    request={activeRequest?.text ?? activeExecution?.request ?? ""}
+                    report=""
+                    images={activeExecution?.images ?? activeRequest?.images ?? []}
+                    frontendReview={activeExecution?.frontendReview}
+                    requestedAt={activeRequest?.createdAt ?? vm.taskStartedAt}
                     plan={hasPlan ? vm.plan : null}
                     busy={vm.busy}
                     actions={vm.actions}
+                    diffs={vm.liveDiffs}
                     stage={vm.stage}
                     startedAt={vm.taskStartedAt}
                     cancelling={vm.cancelling}
-                  />
-                )}
-                {vm.busy && (
-                  <ThinkingBlock
-                    key="thinking"
-                    text={vm.thinking}
+                    logs={workflowLogs}
+                    thinking={vm.thinking}
                     status={status ?? ""}
                   />
                 )}
@@ -148,13 +182,13 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           </div>
 
           {error && (
-            <div className="px-4">
+            <div className="mx-auto w-full max-w-4xl px-4">
               <motion.p
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 className={cn(
-                  "mx-auto mb-2 w-full max-w-3xl rounded-lg bg-destructive/10",
-                  "px-3 py-2 text-xs text-destructive"
+                  "mb-2 w-full rounded-2xl bg-destructive/10",
+                  "px-4 py-2.5 text-xs text-destructive"
                 )}
               >
                 {error}
@@ -163,22 +197,33 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           )}
           <Composer />
         </div>
-
-        {/* Always mounted, never animated. A 420px column that arrives with
-            the first edit reflows the transcript at exactly the frame the
-            edit lands in, and framer-motion's layout projection on the
-            messages does not survive that. Holding the width from the start
-            costs the transcript nothing it wasn't going to give up anyway,
-            and the empty state carries the current step until a diff lands. */}
-        <ChangesRail vm={changes} status={status} />
       </div>
     </div>
   );
 });
 
+/** Logs emitted after the latest user request belong to its workflow card. */
+function currentTurnLogs(
+  items: ChatItemVm[],
+  activeTaskId: string | null
+): ChatItemVm[] {
+  if (activeTaskId) {
+    return items.filter(
+      (item) => item.taskId === activeTaskId && item.role === "log"
+    );
+  }
+  let latestUser = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index]?.role === "user") {
+      latestUser = index;
+      break;
+    }
+  }
+  return items.slice(latestUser + 1).filter((item) => item.role === "log");
+}
+
 const ChatMessage = memo(function ChatMessage({ item }: { item: ChatItemVm }) {
   const isUser = item.role === "user";
-  if (item.role === "log") return <LogLine item={item} />;
   return (
     <motion.div
       layout="position"
@@ -188,7 +233,7 @@ const ChatMessage = memo(function ChatMessage({ item }: { item: ChatItemVm }) {
       className={cn("flex", isUser ? "justify-end" : "justify-start")}
     >
       {isUser ? (
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground">
+        <div className="max-w-[78%] rounded-3xl rounded-br-lg bg-primary px-5 py-3 text-sm text-primary-foreground shadow-sm">
           {item.images && item.images.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {item.images.map((src, i) => (
@@ -205,13 +250,15 @@ const ChatMessage = memo(function ChatMessage({ item }: { item: ChatItemVm }) {
         </div>
       ) : (
         <div className="w-full max-w-full">
-          <div className="mb-1 flex items-center gap-1.5">
-            <Sparkles className="h-3 w-3 text-primary" />
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="mb-1.5 flex items-center gap-2">
+            <span className="icon-tile icon-tile-sm">
+              <Sparkles className="h-3.5 w-3.5" />
+            </span>
+            <span className="text-[12px] font-semibold text-muted-foreground">
               Atelier
             </span>
           </div>
-          <div className="chat-md rounded-2xl rounded-tl-md border border-border/50 bg-muted/40 px-4 py-3">
+          <div className="chat-md rounded-3xl rounded-tl-lg bg-muted/60 px-4 py-3.5">
             <AssistantText text={item.text} streaming={item.streaming} />
           </div>
         </div>
@@ -242,65 +289,6 @@ function AssistantText({
     );
   }
   return <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>;
-}
-
-/** Icon for a pinned knowledge/impact log line, by its source topic. */
-function logIcon(topic: string | undefined) {
-  if (topic === "knowledge.retrieved") return Network;
-  if (topic === "session.recalled") return History;
-  if (topic === "scope.locked") return FolderLock;
-  return Radar;
-}
-
-/** Knowledge / session recall / impact radius, pinned inline in the transcript. */
-const LogLine = memo(function LogLine({ item }: { item: ChatItemVm }) {
-  const Icon = logIcon(item.logTopic);
-  return (
-    <motion.div
-      layout="position"
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18 }}
-      className="flex items-start gap-1.5 rounded-lg bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground"
-    >
-      <Icon className="mt-0.5 h-3 w-3 shrink-0 text-primary/70" />
-      <span className="min-w-0 flex-1 truncate">{item.text}</span>
-    </motion.div>
-  );
-});
-
-/**
- * The centre's live block. Present for the WHOLE run, not only while the
- * model happens to be emitting thought: the transcript goes quiet during
- * retrieval, planning, and long tool stretches, and a blank centre next to
- * a ticking process card reads as a stall. Thinking text wins when there
- * is any; otherwise the block carries the current step.
- */
-function ThinkingBlock({ text, status }: { text: string; status: string }) {
-  const thinking = text.trim().length > 0;
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0 }}
-      className="rounded-xl bg-primary/[0.06] px-3 py-2"
-    >
-      <div className="mb-1 flex items-center gap-1.5">
-        <BrainCircuit className="h-3.5 w-3.5 animate-pulse text-primary/70" />
-        <span className="text-[11px] font-medium uppercase tracking-wider text-primary/70">
-          {thinking ? "thinking" : "working"}
-        </span>
-      </div>
-      <p
-        className={cn(
-          "whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground",
-          "text-shimmer truncate"
-        )}
-      >
-        {thinking ? text : status}
-      </p>
-    </motion.div>
-  );
 }
 
 function EmptyState({ connected }: { connected: boolean }) {

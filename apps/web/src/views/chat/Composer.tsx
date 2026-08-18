@@ -38,6 +38,7 @@ import {
 } from "@/lib/mention-tree";
 import { Tooltip } from "@/components/ui/tooltip";
 import { NoProviderModal } from "./NoProviderModal";
+import { OllamaVisionModal } from "./OllamaVisionModal";
 import { useMarkdownStore } from "@/state/markdown.store";
 import { createMarkdownFile } from "@/hooks/useMarkdownViewModel";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -199,6 +200,8 @@ export const Composer = memo(function Composer() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [providerAlert, setProviderAlert] = useState(false);
+  const [visionAlert, setVisionAlert] = useState(false);
+  const [pendingImageFiles, setPendingImageFiles] = useState<File[]>([]);
 
   /**
    * Send, unless there is nothing to send to. With every provider off the
@@ -206,6 +209,10 @@ export const Composer = memo(function Composer() {
    * instead — and keeps the draft.
    */
   const send = () => {
+    if (vm.images.length > 0 && selectedOllamaCannotSeeImages) {
+      setVisionAlert(true);
+      return;
+    }
     if (vm.noProvidersEnabled) {
       setProviderAlert(true);
       return;
@@ -264,6 +271,26 @@ export const Composer = memo(function Composer() {
     () => vm.models.find((model) => model.value === vm.model),
     [vm.models, vm.model]
   );
+  const selectedOllamaCannotSeeImages =
+    (selectedModel?.provider === "ollama" ||
+      selectedModel?.provider === "ollama-local") &&
+    selectedModel.supportsImages === false;
+  const stageImageFiles = (files: File[] | FileList) => {
+    const next = Array.from(files);
+    if (next.length === 0) return;
+    if (selectedOllamaCannotSeeImages) {
+      setPendingImageFiles(next);
+      setVisionAlert(true);
+      return;
+    }
+    vm.addImages(next);
+  };
+  const selectVisionModel = (value: string) => {
+    vm.changeModel(value as ModelChoice);
+    vm.addImages(pendingImageFiles);
+    setPendingImageFiles([]);
+    setVisionAlert(false);
+  };
   const reasoningOptions = useMemo(
     () => effortOptions(selectedModel),
     [selectedModel]
@@ -311,7 +338,7 @@ export const Composer = memo(function Composer() {
     const files = Array.from(e.clipboardData.files);
     if (files.length > 0) {
       e.preventDefault();
-      vm.addImages(files);
+      stageImageFiles(files);
     }
   };
 
@@ -320,7 +347,7 @@ export const Composer = memo(function Composer() {
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) {
       e.preventDefault();
-      vm.addImages(files);
+      stageImageFiles(files);
     }
   };
 
@@ -453,17 +480,26 @@ export const Composer = memo(function Composer() {
   };
 
   return (
-    <div className="px-4 pb-3">
+    <div className="mx-auto w-full max-w-4xl pb-3">
       <NoProviderModal
         open={providerAlert}
         onClose={() => setProviderAlert(false)}
       />
-      <div className="mx-auto w-full max-w-3xl">
+      <OllamaVisionModal
+        open={visionAlert}
+        currentModelLabel={selectedModel?.label ?? String(vm.model)}
+        onClose={() => {
+          setVisionAlert(false);
+          setPendingImageFiles([]);
+        }}
+        onSelectModel={selectVisionModel}
+      />
+      <div className="w-full">
         {vm.error && (
           <motion.p
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
-            className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            className="mb-2 rounded-2xl bg-destructive/10 px-4 py-2.5 text-xs text-destructive"
           >
             {vm.error}
           </motion.p>
@@ -473,7 +509,7 @@ export const Composer = memo(function Composer() {
             {vm.attachments.map((path) => (
               <span
                 key={path}
-                className="flex items-center gap-1 rounded-lg bg-accent px-2 py-0.5 font-mono text-[11px] text-accent-foreground"
+                className="chip font-mono"
               >
                 <Paperclip className="h-3 w-3" />
                 {path}
@@ -492,7 +528,7 @@ export const Composer = memo(function Composer() {
                 <img
                   src={img.dataUrl}
                   alt="attachment"
-                  className="h-16 w-16 rounded-lg border border-white/10 object-cover"
+                  className="h-16 w-16 rounded-lg border border-border object-cover"
                 />
                 <Tooltip content="Remove image">
                   <button
@@ -524,7 +560,7 @@ export const Composer = memo(function Composer() {
             multiple
             className="hidden"
             onChange={(e) => {
-              if (e.target.files) vm.addImages(e.target.files);
+              if (e.target.files) stageImageFiles(e.target.files);
               e.target.value = "";
             }}
           />
@@ -550,8 +586,12 @@ export const Composer = memo(function Composer() {
           </AnimatePresence>
           <div
             className={cn(
-              "rounded-2xl bg-white transition-colors dark:bg-muted/60",
-              "focus-within:bg-white dark:focus-within:bg-muted",
+              // The transcript sits on a white card now, so the composer can
+              // no longer separate itself by being white too — it takes a
+              // hairline and a shadow instead, and deepens both on focus.
+              "rounded-3xl border border-border bg-card shadow-sm",
+              "transition-[box-shadow,border-color]",
+              "focus-within:border-primary/40 focus-within:shadow-card",
               dragging && "ring-2 ring-primary/60"
             )}
           >
@@ -580,7 +620,7 @@ export const Composer = memo(function Composer() {
                 onPaste={onPaste}
                 className={cn(
                   "max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5",
-                  "text-sm text-black outline-none placeholder:text-muted-foreground/70 dark:text-foreground",
+                  "text-sm text-foreground outline-none placeholder:text-muted-foreground/70",
                   "disabled:opacity-60"
                 )}
               />
@@ -599,7 +639,7 @@ export const Composer = memo(function Composer() {
                   }
                   onClick={send}
                   className={cn(
-                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
                     "transition-opacity hover:opacity-90 disabled:opacity-30",
                     vm.busy
                       ? "bg-muted text-foreground"
@@ -625,7 +665,7 @@ export const Composer = memo(function Composer() {
                     whileTap={{ scale: 0.92 }}
                     onClick={vm.cancel}
                     className={cn(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
                       "text-white hover:opacity-90",
                       vm.cancelling ? "bg-destructive/60" : "bg-destructive"
                     )}
@@ -639,8 +679,10 @@ export const Composer = memo(function Composer() {
                 </Tooltip>
               )}
             </div>
+          </div>
+          <div className="mt-1.5 px-2">
             {vm.queuedCount > 0 && (
-              <div className="flex items-center gap-2 px-3 pb-1 text-[11px] text-muted-foreground">
+              <div className="flex items-center gap-2 pb-1 text-[11px] text-muted-foreground">
                 <ListPlus className="h-3 w-3" />
                 <span>
                   {vm.queuedCount} follow-up{vm.queuedCount > 1 ? "s" : ""} queued
@@ -654,13 +696,13 @@ export const Composer = memo(function Composer() {
                 </button>
               </div>
             )}
-            <div className="flex items-center gap-1 px-2.5 pb-2 pt-0.5">
+            <div className="flex items-center gap-1">
               <Tooltip content="Attach an image (or paste / drop a screenshot)">
                 <button
                   type="button"
                   disabled={!vm.connected}
                   onClick={() => fileInputRef.current?.click()}
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
+                  className="tool-btn disabled:opacity-35"
                 >
                   <Paperclip className="h-3.5 w-3.5" />
                 </button>
@@ -794,7 +836,7 @@ function SlashMenu(props: {
       transition={{ duration: 0.12 }}
       className={cn(
         "absolute bottom-full left-0 right-0 z-40 mb-2 max-h-64",
-        "overflow-y-auto rounded-xl border border-white/10 bg-card p-1 shadow-xl"
+        "overflow-y-auto rounded-xl border border-border bg-card p-1 shadow-pop"
       )}
     >
       {props.matches.map((command, index) => (
@@ -819,7 +861,7 @@ function SlashMenu(props: {
             </span>
             <span
               className={cn(
-                "shrink-0 rounded px-1 py-px text-[9px] uppercase tracking-wide",
+                "shrink-0 rounded px-1 py-px text-[10px]",
                 command.kind === "skill"
                   ? "bg-primary/15 text-primary"
                   : "bg-muted text-muted-foreground"
@@ -912,7 +954,7 @@ function MentionMenu(props: {
       transition={{ duration: 0.12 }}
       className={cn(
         "absolute bottom-full left-0 right-0 z-40 mb-2",
-        "rounded-xl border border-white/10 bg-card shadow-xl"
+        "rounded-xl border border-border bg-card shadow-pop"
       )}
     >
       <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-1.5">
@@ -1099,7 +1141,7 @@ function ComposerChecks(props: {
             transition={{ duration: 0.12 }}
             className={cn(
               "absolute bottom-full left-0 z-50 mb-1 w-64 rounded-lg",
-              "border border-border bg-card p-1 shadow-xl"
+              "border border-border bg-card p-1 shadow-pop"
             )}
           >
             {props.items.map((item) => (
@@ -1252,14 +1294,14 @@ function ComposerMenu(props: {
             className={cn(
               "absolute bottom-full left-0 z-50 mb-1 max-h-64 w-56",
               "overflow-y-auto rounded-lg border border-border bg-card p-1",
-              "shadow-xl"
+              "shadow-pop"
             )}
           >
             {props.options.map((option) =>
               isSeparator(option) ? (
                 <li
                   key={option.value}
-                  className="px-2 pb-0.5 pt-1.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 first:pt-0.5"
+                  className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold text-muted-foreground/60 first:pt-0.5"
                 >
                   {option.label}
                 </li>
@@ -1417,7 +1459,7 @@ function PromptFileMenu(props: {
             transition={{ duration: 0.12 }}
             className={cn(
               "absolute bottom-full left-0 z-50 mb-1 w-64 max-w-[80vw]",
-              "overflow-hidden rounded-lg border border-border bg-card p-1 shadow-xl"
+              "overflow-hidden rounded-lg border border-border bg-card p-1 shadow-pop"
             )}
           >
             <input

@@ -36,7 +36,7 @@ export function McpTab() {
 
   return (
     <section className="space-y-1.5">
-      <h3 className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+      <h3 className="px-0.5 text-[11px] font-semibold text-muted-foreground/60">
         MCP servers · {servers.length}
       </h3>
       <p className="px-0.5 text-[10px] leading-relaxed text-muted-foreground/60">
@@ -69,7 +69,7 @@ function ScopeChip({ scope }: { scope: McpServerInfo["scope"] }) {
   return (
     <span
       className={cn(
-        "shrink-0 rounded px-1 py-0.5 text-[9px] uppercase tracking-wide",
+        "shrink-0 rounded px-1 py-0.5 text-[10px]",
         scope === "builtin"
           ? "bg-primary/15 text-primary"
           : "bg-muted text-muted-foreground/70"

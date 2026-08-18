@@ -30,11 +30,26 @@ export function registerPlanTools(
       return { ok: false, error: "A plan needs at least one titled step" };
     }
     const goal = typeof input?.goal === "string" ? input.goal.trim() : "";
+    const existing = tracker.get(ctx.taskId);
+    if (existing) {
+      const appended = tracker.extend(ctx.taskId, drafts);
+      return appended.length > 0
+        ? {
+            ok: true,
+            mode: "appended",
+            steps: appended.map((step) => ({ id: step.id, title: step.title })),
+          }
+        : {
+            ok: false,
+            error: "No new timeline steps were appended (duplicate steps or 12-step limit)",
+          };
+    }
     const plan = tracker.adopt(ctx.taskId, goal || "Task", drafts);
     // The ids go straight back, so the model can mark the first step
     // in-progress on its very next call instead of asking where they are.
     return {
       ok: true,
+      mode: "created",
       steps: plan.steps.map((step) => ({ id: step.id, title: step.title })),
     };
   });
@@ -42,15 +57,12 @@ export function registerPlanTools(
   registry.register(
     "update_plan_step",
     async (input: UpdatePlanStepInput, ctx) => {
-      const updated = tracker.updateStep(
+      return tracker.transitionStep(
         ctx.taskId,
         input.stepId,
         input.status,
         input.note
       );
-      return updated
-        ? { ok: true }
-        : { ok: false, error: "Unknown step id for this task" };
     }
   );
 }

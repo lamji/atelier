@@ -22,8 +22,17 @@ export interface SessionScope {
    * persisted: it grants exactly what was named, and does not widen the lock.
    */
   allowed: string[];
+  /**
+   * Files this turn's own text points at — "@" mentions and typed paths
+   * alike. The subject of THIS message, as opposed to `anchors`, which is
+   * everything the conversation has ever touched. When this is non-empty
+   * the anchors stop being the working set and become mere history: the
+   * file the user just named outranks the file the agent happened to edit
+   * three turns ago.
+   */
+  named: string[];
   /** How the current roots were decided. */
-  source: "mention" | "explicit" | "inherited" | "none";
+  source: "mention" | "explicit" | "feature" | "inherited" | "none";
   /** True when this turn's mentions changed the lock. */
   changed: boolean;
 }
@@ -32,6 +41,7 @@ export const EMPTY_SCOPE: SessionScope = {
   roots: [],
   anchors: [],
   allowed: [],
+  named: [],
   source: "none",
   changed: false,
 };
@@ -106,6 +116,11 @@ export class SessionScopeStore {
       if (!mention.isDir) mentionedFiles.push(mention.path);
     }
 
+    // Everything this message points at, however it was written. Typed
+    // paths and "@" mentions differ in what they LOCK; they do not differ
+    // in what the turn is about.
+    const named = capAnchors([...mentionedFiles, ...allowed]);
+
     // A mention that resolves to no project (single-project workspace, or
     // a path at the root) is a real mention but not a lock: there is no
     // narrower world to lock to, and locking to "src" would be wrong.
@@ -126,16 +141,14 @@ export class SessionScopeStore {
       const changed = !sameRoots(roots, stored?.roots ?? []);
       const anchors = capAnchors([...mentionedFiles, ...(stored?.anchors ?? [])]);
       this.write(conversationId, roots, anchors);
-      return { roots, anchors, allowed, source: "mention", changed };
+      return { roots, anchors, allowed, named, source: "mention", changed };
     }
 
     if (!stored) {
-      if (mentionedFiles.length === 0 && allowed.length === 0) {
-        return EMPTY_SCOPE;
-      }
+      if (named.length === 0) return EMPTY_SCOPE;
       const anchors = capAnchors(mentionedFiles);
       this.write(conversationId, [], anchors);
-      return { roots: [], anchors, allowed, source: "none", changed: false };
+      return { roots: [], anchors, allowed, named, source: "none", changed: false };
     }
 
     const anchors = capAnchors([...mentionedFiles, ...stored.anchors]);
@@ -146,6 +159,7 @@ export class SessionScopeStore {
       roots: stored.roots,
       anchors,
       allowed,
+      named,
       source: stored.roots.length > 0 ? "inherited" : "none",
       changed: false,
     };
@@ -185,7 +199,56 @@ export class SessionScopeStore {
     const anchors = capAnchors(stored?.anchors ?? []);
     const changed = !sameRoots(roots, stored?.roots ?? []);
     this.write(conversationId, roots, anchors);
-    return { roots, anchors, allowed: [], source: "explicit", changed };
+    return { roots, anchors, allowed: [], named: [], source: "explicit", changed };
+  }
+
+  /**
+   * Narrows a conversation from a product feature match, not a typed path.
+   *
+   * Plain-language follow-ups like "fix the dashboard spacing too" do not
+   * mention a file, but the feature model knows the owner files. Persisting
+   * those files as anchors keeps the session on the same feature; resolving
+   * their owning projects gives the tool guard a hard boundary when possible.
+   */
+  focusFiles(
+    conversationId: string,
+    featureFiles: string[],
+    profile: WorkspaceProfile
+  ): SessionScope {
+    const stored = this.read(conversationId);
+    const files = [
+      ...new Set(
+        featureFiles
+          .map((file) => toPosix(file).replace(/^\.\/|\/+$/g, ""))
+          .filter(Boolean)
+      ),
+    ];
+    if (files.length === 0) {
+      return stored
+        ? {
+            roots: stored.roots,
+            anchors: stored.anchors,
+            allowed: [],
+            named: [],
+            source: stored.roots.length > 0 ? "inherited" : "none",
+            changed: false,
+          }
+        : EMPTY_SCOPE;
+    }
+
+    const mentionedRoots = new Set<string>();
+    for (const file of files) {
+      const owner = projectFor(file, profile);
+      if (owner) mentionedRoots.add(owner);
+    }
+    const roots =
+      mentionedRoots.size > 0
+        ? [...mentionedRoots].sort()
+        : (stored?.roots ?? []);
+    const anchors = capAnchors([...files, ...(stored?.anchors ?? [])]);
+    const changed = !sameRoots(roots, stored?.roots ?? []);
+    this.write(conversationId, roots, anchors);
+    return { roots, anchors, allowed: [], named: [], source: "feature", changed };
   }
 
   /** Records a file the agent actually touched, so follow-ups anchor to it. */
@@ -205,6 +268,7 @@ export class SessionScopeStore {
       anchors: stored.anchors,
       // A read of the stored lock, with no prompt to read grants out of.
       allowed: [],
+      named: [],
       source: stored.roots.length > 0 ? "inherited" : "none",
       changed: false,
     };
@@ -260,6 +324,59 @@ export class SessionScopeStore {
         Date.now()
       );
   }
+}
+
+/** Anchors inherited by a turn that produced no evidence of its own. */
+const RECENT_FALLBACK = 4;
+
+/**
+ * The files THIS turn is actually about, drawn out of everything the
+ * conversation has ever touched.
+ *
+ * `anchors` is append-only and newest-first, and that is the whole problem:
+ * one edit to the wrong file puts it at the top of the list, from where it
+ * is fed to the ranker as a target and printed to the model as "files this
+ * conversation is already working on" for the rest of the session. A single
+ * mistake compounds into every later turn, which is exactly the drift users
+ * report as "it keeps touching the wrong file" and "where is that context
+ * coming from".
+ *
+ * So membership expires unless the turn re-earns it. An anchor stays when
+ * the user named it, or when this turn's own retrieval independently
+ * surfaced it — evidence from now, not a receipt from earlier. Recency is
+ * the fallback only for a turn that produced no evidence at all (nothing
+ * named, nothing retrieved), which is the genuine "keep going" follow-up
+ * the anchors exist for; even then it is a short tail, not the whole list.
+ *
+ * A turn that retrieved real files but confirmed no anchor gets an EMPTY
+ * working set on purpose. Those files are already in the retrieved-context
+ * block; repeating stale history beside them is what the model mistook for
+ * direction.
+ */
+export function workingSet(
+  scope: SessionScope,
+  retrievedPaths: Iterable<string>,
+  max = 12
+): string[] {
+  const retrieved = new Set<string>();
+  for (const path of retrievedPaths) retrieved.add(toPosix(path));
+
+  const confirmed = scope.anchors.filter((anchor) =>
+    retrieved.has(toPosix(anchor))
+  );
+  const noEvidence =
+    scope.named.length === 0 && confirmed.length === 0 && retrieved.size === 0;
+  const ordered = noEvidence
+    ? scope.anchors.slice(0, RECENT_FALLBACK)
+    : [...scope.named, ...confirmed];
+
+  const seen: string[] = [];
+  for (const path of ordered) {
+    if (!path || seen.includes(path)) continue;
+    seen.push(path);
+    if (seen.length >= max) break;
+  }
+  return seen;
 }
 
 /**

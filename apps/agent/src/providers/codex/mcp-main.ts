@@ -141,10 +141,9 @@ tool("analyze_impact", "Find what depends on whole files or symbols.", {
   symbols: z.array(z.string()).optional(),
   depth: z.number().optional(),
 });
-tool("set_plan", "Publish the plan for this task — the checklist the user " +
-  "watches while you work. Call it ONCE, before you start changing things, " +
-  "for anything beyond a single trivial edit. Returns the step ids — drive " +
-  "them with update_plan_step as you go.", {
+tool("set_plan", "Create the execution timeline before editing. Later calls " +
+  "append newly discovered necessary steps and cannot replace existing work. " +
+  "Execute every returned id in order with update_plan_step.", {
   goal: z.string(),
   steps: z.array(
     z.object({
@@ -154,7 +153,8 @@ tool("set_plan", "Publish the plan for this task — the checklist the user " +
     })
   ),
 });
-tool("update_plan_step", "Report progress on the current task plan.", {
+tool("update_plan_step", "Start and explicitly finish the current timeline " +
+  "step. Order is enforced and only done clears the final-report gate.", {
   stepId: z.string(),
   status: z.enum([
     "pending",
@@ -166,6 +166,15 @@ tool("update_plan_step", "Report progress on the current task plan.", {
   ]),
   note: z.string().optional(),
 });
+tool(
+  "preview_review",
+  "Debug a local Page preview in headless Chromium. Returns status/decision, " +
+    "chronological DevTools console, page errors, failed HTTP requests, DOM/layout, " +
+    "and screenshots. Obey decision: unavailable = ask user to start/reopen preview " +
+    "and stop without retrying or starting a server; issues = report evidence then " +
+    "fix if allowed or skip; failed = report and skip. Localhost only.",
+  { url: z.string() }
+);
 tool("run_terminal", "Run a shell command only when no semantic Atelier tool fits.", {
   command: z.string(),
   cwd: z.string().optional(),

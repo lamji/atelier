@@ -35,6 +35,7 @@ export const DIRECT_TOOLS = [
   "search_text",
   "list_dir",
   "git",
+  "preview_review",
   "run_terminal",
 ];
 

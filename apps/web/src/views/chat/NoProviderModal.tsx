@@ -30,7 +30,7 @@ export function NoProviderModal({ open, onClose }: NoProviderModalProps) {
   }, [open, onClose]);
 
   const openSettings = () => {
-    useWorkspaceStore.getState().setActivityView("settings");
+    useWorkspaceStore.getState().openSettings();
     onClose();
   };
 
@@ -50,7 +50,7 @@ export function NoProviderModal({ open, onClose }: NoProviderModalProps) {
             exit={{ opacity: 0, scale: 0.96, y: 8 }}
             transition={{ type: "spring", stiffness: 300, damping: 28 }}
             onClick={(event) => event.stopPropagation()}
-            className="island flex w-full max-w-sm flex-col overflow-hidden"
+            className="modal-surface island flex w-full max-w-sm flex-col overflow-hidden"
           >
             <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
               <PlugZap className="h-4 w-4 text-primary" />

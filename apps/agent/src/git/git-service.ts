@@ -6,6 +6,8 @@ import { simpleGit, type SimpleGit } from "simple-git";
 import type {
   GitBranch,
   GitCommit,
+  GitLineStat,
+  GitMergeState,
   GitRepo,
   GitStatus,
 } from "@atelier/protocol";
@@ -34,7 +36,24 @@ interface GitSnapshot {
   branch: string;
   isClean: boolean;
   changedFiles: number;
+  conflicts: number;
+  mergeKind: GitMergeState["kind"] | null;
 }
+
+/**
+ * The .git entries whose presence means an operation is mid-flight. Watched
+ * alongside HEAD/index/refs so a `git pull` run from a terminal — not from
+ * Atelier — still flips the UI into merge mode the moment it conflicts.
+ */
+const MERGE_STATE_FILES = [
+  "MERGE_HEAD",
+  "MERGE_MSG",
+  "REBASE_HEAD",
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "rebase-merge",
+  "rebase-apply",
+];
 
 const REFRESH_DEBOUNCE_MS = 400;
 
@@ -44,6 +63,15 @@ const REFRESH_DEBOUNCE_MS = 400;
  * the file count and status marks still carry the change.
  */
 const MAX_CONTENT_MARKED_FILES = 200;
+
+/**
+ * Untracked files have no diff to count, so their "added" lines are read
+ * off disk. Bounded twice — how many files, and how big each may be —
+ * because a fresh checkout can list thousands of them and a status call
+ * must not turn into a full-tree read.
+ */
+const MAX_UNTRACKED_COUNTED = 200;
+const MAX_UNTRACKED_BYTES = 512 * 1024;
 
 /**
  * simple-git wrapper. Emits git.state.changed whenever the observable repo
@@ -247,6 +275,7 @@ export class GitService {
         path.join(gitDir, "HEAD"),
         path.join(gitDir, "index"),
         path.join(gitDir, "refs"),
+        ...MERGE_STATE_FILES.map((name) => path.join(gitDir, name)),
       ],
       { ignoreInitial: true, depth: 3 }
     );
@@ -290,25 +319,138 @@ export class GitService {
 
   async status(repo?: string): Promise<GitStatus> {
     const { git, root } = this.resolveRepo(repo);
-    const [s, remotes] = await Promise.all([git.status(), git.getRemotes()]);
+    const [s, remotes, indexStats, workStats] = await Promise.all([
+      git.status(),
+      git.getRemotes(),
+      this.numstat(root, true),
+      this.numstat(root, false),
+    ]);
+    const branch = s.current ?? "HEAD";
+    const untrackedStats = this.untrackedLineStats(root, s.files);
     return {
-      branch: s.current ?? "HEAD",
+      branch,
       hasRemote: remotes.length > 0,
       ahead: s.ahead,
       behind: s.behind,
+      conflicts: s.conflicted.map((p) => this.toWorkspaceRel(root, p)),
+      mergeState: this.readMergeState(root, branch),
       // Repo-relative on the way out would be ambiguous across checkouts,
       // and these paths come straight back to us in stage/unstage/diff.
-      files: s.files.map((f) => ({
-        path: this.toWorkspaceRel(root, f.path),
-        index: f.index.trim(),
-        workingDir: f.working_dir.trim(),
-        // Cheap per-file "content moved" mark. The changes rail measures a
-        // CLI session against it, so it must be read the same way for every
-        // file — see contentMark.
-        mark: this.contentMark(root, f.path),
-      })),
+      files: s.files.map((f) => {
+        const key = toPosix(f.path);
+        const indexStat = indexStats.get(key);
+        const workStat = untrackedStats.get(key) ?? workStats.get(key);
+        return {
+          path: this.toWorkspaceRel(root, f.path),
+          index: f.index.trim(),
+          workingDir: f.working_dir.trim(),
+          ...(indexStat ? { indexStat } : {}),
+          ...(workStat ? { workStat } : {}),
+          // Cheap per-file "content moved" mark. The changes rail measures
+          // a CLI session against it, so it must be read the same way for
+          // every file — see contentMark.
+          mark: this.contentMark(root, f.path),
+        };
+      }),
       isClean: s.isClean(),
     };
+  }
+
+  /**
+   * Per-file added/removed counts, keyed by REPO-relative path.
+   *
+   * `-z` output because a path is not safe to split on: it can contain
+   * spaces, quotes, or a rename arrow. Each record is
+   * `added \t removed \t path NUL`, and a rename writes an empty path
+   * followed by the old and new paths as their own NUL-terminated fields.
+   */
+  private async numstat(
+    root: string,
+    staged: boolean
+  ): Promise<Map<string, GitLineStat>> {
+    const out = new Map<string, GitLineStat>();
+    let raw: string;
+    try {
+      raw = await this.clientFor(root).raw([
+        "diff",
+        "--numstat",
+        "-z",
+        ...(staged ? ["--cached"] : []),
+      ]);
+    } catch {
+      // Unborn branch, or a repo mid-operation: no counts this round.
+      return out;
+    }
+    const parts = raw.split("\0");
+    for (let i = 0; i < parts.length; i++) {
+      const record = parts[i];
+      if (!record) continue;
+      const match = /^(\d+|-)\t(\d+|-)\t([\s\S]*)$/.exec(record);
+      if (!match) continue;
+      let path = match[3] ?? "";
+      if (path === "") {
+        // Rename/copy: the old and new paths are the next two fields.
+        const oldPath = parts[++i] ?? "";
+        const newPath = parts[++i] ?? "";
+        path = newPath || oldPath;
+      }
+      if (!path) continue;
+      const binary = match[1] === "-" || match[2] === "-";
+      out.set(toPosix(path), {
+        added: binary ? 0 : Number(match[1]),
+        removed: binary ? 0 : Number(match[2]),
+        ...(binary ? { binary: true } : {}),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Line counts for untracked files, which no diff reports: they are
+   * entirely new, so every line is an addition. Bounded — see the
+   * constants — because a fresh checkout can list thousands of them.
+   */
+  private untrackedLineStats(
+    root: string,
+    files: Array<{ index: string; path: string }>
+  ): Map<string, GitLineStat> {
+    const out = new Map<string, GitLineStat>();
+    let seen = 0;
+    for (const f of files) {
+      if (f.index !== "?") continue;
+      if (++seen > MAX_UNTRACKED_COUNTED) break;
+      const stat = this.countNewFileLines(root, f.path);
+      if (stat) out.set(toPosix(f.path), stat);
+    }
+    return out;
+  }
+
+  /** Line count of an untracked file, or a binary/too-big marker. */
+  private countNewFileLines(
+    root: string,
+    repoRel: string
+  ): GitLineStat | undefined {
+    const abs = path.join(root, repoRel);
+    try {
+      const stat = fs.statSync(abs);
+      if (stat.isDirectory()) return undefined;
+      if (stat.size > MAX_UNTRACKED_BYTES) {
+        return { added: 0, removed: 0, binary: true };
+      }
+      const buffer = fs.readFileSync(abs);
+      // Same test git uses to call a file binary: a NUL in the first 8k.
+      if (buffer.subarray(0, 8000).includes(0)) {
+        return { added: 0, removed: 0, binary: true };
+      }
+      if (buffer.length === 0) return { added: 0, removed: 0 };
+      let lines = 0;
+      for (const byte of buffer) if (byte === 10) lines++;
+      // A final line without a trailing newline still counts.
+      if (buffer[buffer.length - 1] !== 10) lines++;
+      return { added: lines, removed: 0 };
+    } catch {
+      return undefined;
+    }
   }
 
   async log(maxCount = 50, repo?: string): Promise<GitCommit[]> {
@@ -472,10 +614,13 @@ export class GitService {
     try {
       const root = this.activeRoot;
       const s = await this.clientFor(root).status();
+      const mergeState = this.readMergeState(root, s.current ?? "HEAD");
       const snapshot: GitSnapshot = {
         branch: s.current ?? "HEAD",
         isClean: s.isClean(),
         changedFiles: s.files.length,
+        conflicts: s.conflicted.length,
+        mergeKind: mergeState?.kind ?? null,
       };
       // Key includes per-file index/workingDir so stage/unstage moves —
       // which keep the same file count — still register as changes, and a
@@ -488,6 +633,8 @@ export class GitService {
         s.ahead,
         s.behind,
         s.files.length,
+        snapshot.conflicts,
+        snapshot.mergeKind ?? "",
         ...s.files
           .slice(0, MAX_CONTENT_MARKED_FILES)
           .map(
@@ -509,6 +656,105 @@ export class GitService {
         void this.refresh();
       }
     }
+  }
+
+  /**
+   * What operation, if any, the checkout is in the middle of. Read straight
+   * off .git — the same files the watcher listens to — so a conflict made
+   * by any client (Atelier, a terminal, another IDE) reports the same way.
+   *
+   * Labels name the two sides the way the resolver shows them. For a
+   * rebase git swaps the meaning: "ours" is the branch being rebased ONTO
+   * and "theirs" is your own commit being replayed — the labels say so,
+   * because a resolver that calls your own work "theirs" without warning
+   * is how the wrong side gets kept.
+   */
+  private readMergeState(root: string, branch: string): GitMergeState | null {
+    const gitDir = path.join(root, ".git");
+    const exists = (name: string) => fs.existsSync(path.join(gitDir, name));
+    const readTrim = (name: string): string => {
+      try {
+        return fs.readFileSync(path.join(gitDir, name), "utf8").trim();
+      } catch {
+        return "";
+      }
+    };
+    if (exists("MERGE_HEAD")) {
+      const message = readTrim("MERGE_MSG");
+      // "Merge branch 'main' of <url>" is what a pull writes: the branch
+      // came from the remote, so it is shown as origin/main rather than a
+      // second "main" that reads as the branch we are already on.
+      const pulled = message.match(/^Merge branch '([^']+)' of \S+/);
+      const theirs =
+        (pulled ? `origin/${pulled[1]}` : undefined) ??
+        message.match(/^Merge (?:remote-tracking )?branch '([^']+)'/)?.[1] ??
+        message.match(/^Merge (?:commit|tag) '([^']+)'/)?.[1] ??
+        readTrim("MERGE_HEAD").slice(0, 7);
+      return {
+        kind: "merge",
+        ours: branch,
+        theirs,
+        ...(message ? { message } : {}),
+      };
+    }
+    if (exists("rebase-merge") || exists("rebase-apply")) {
+      const dir = exists("rebase-merge") ? "rebase-merge" : "rebase-apply";
+      const headName = readTrim(`${dir}/head-name`).replace(/^refs\/heads\//, "");
+      const onto = readTrim(`${dir}/onto`).slice(0, 7);
+      return {
+        kind: "rebase",
+        ours: onto ? `${onto} (rebasing onto)` : "upstream (rebasing onto)",
+        theirs: `${headName || branch} (your commit)`,
+      };
+    }
+    if (exists("CHERRY_PICK_HEAD")) {
+      return {
+        kind: "cherry-pick",
+        ours: branch,
+        theirs: `${readTrim("CHERRY_PICK_HEAD").slice(0, 7)} (cherry-pick)`,
+      };
+    }
+    if (exists("REVERT_HEAD")) {
+      return {
+        kind: "revert",
+        ours: branch,
+        theirs: `revert of ${readTrim("REVERT_HEAD").slice(0, 7)}`,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * One index stage of a path (:1: base, :2: ours, :3: theirs), or "" when
+   * that side does not exist — added on one side only, deleted on the
+   * other. Public so the conflict ops can build the resolver payload
+   * without re-deriving repo routing.
+   */
+  async stageContent(
+    relPath: string,
+    stage: 1 | 2 | 3,
+    repo?: string
+  ): Promise<string> {
+    const { root } = this.resolveRepo(repo, relPath);
+    return this.showOrEmpty(root, `:${stage}:${this.toRepoRel(root, relPath)}`);
+  }
+
+  /** Repo-relative path for `relPath`, and the checkout root that owns it. */
+  locate(relPath: string, repo?: string): { root: string; repoRel: string } {
+    const { root } = this.resolveRepo(repo, relPath);
+    return { root, repoRel: this.toRepoRel(root, relPath) };
+  }
+
+  /** Raw working-tree bytes of a workspace-relative path ("" if missing). */
+  readWorking(relPath: string): string {
+    return this.readWorkingFile(relPath);
+  }
+
+  /** Writes a workspace-relative path in place (the resolver's save). */
+  writeWorking(relPath: string, content: string): void {
+    const abs = path.join(this.workspaceRoot, relPath);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content, "utf8");
   }
 
   /**

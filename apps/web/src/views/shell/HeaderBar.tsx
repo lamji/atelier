@@ -1,135 +1,78 @@
-import { Activity, Sidebar, TerminalSquare } from "lucide-react";
-import { cn } from "@/lib/cn";
-import { BrandMark } from "@/components/BrandMark";
-import { Tooltip } from "@/components/ui/tooltip";
-import type { RightTab } from "@/state/workspace.store";
-import { CommandCenter } from "./CommandCenter";
+import { Bot, Monitor, Square } from "lucide-react";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
-export interface HeaderBarProps {
-  workingCount: number;
-  rightTab: RightTab;
-  terminalCount: number;
-  workbenchVisible: boolean;
-  /** Whether the terminal dock is expanded. */
-  bottomOpen: boolean;
-  onSelectTab: (tab: RightTab) => void;
-  onToggleWorkbench: () => void;
-  /** Opens the command palette; the query seeds its mode. */
-  onOpenCommands: (initialQuery: string) => void;
+export type AgentSurface = "agent" | "preview";
+
+interface HeaderBarProps {
+  activeAgentSurface: AgentSurface | null;
+  pagePreviewRunning: boolean;
+  onSelectAgent: () => void;
+  onSelectPagePreview: () => void;
+  onStopPagePreview: () => void;
 }
 
 /**
- * Title-bar content: identity and workspace on the left, layout controls on
- * the right.
- *
- * The pane tabs used to live here; they now sit in the editor region's own
- * tab bar, which is the region they act on. What stays is genuinely global or
- * layout-scoped: which workspace is open, the command center, and the two
- * toggles. Both are aria-pressed toggles rather than tabs: Terminal shows or
- * hides the bottom dock, Activity raises the execution timeline in the editor
- * area.
+ * The app header: identity, workspace, and the two Agent-screen surfaces.
+ * Workspace tools stay in the bottom dock; the title-bar tabs only switch
+ * between the conversation workbench and its runtime-backed page preview.
  */
 export function HeaderBar(props: HeaderBarProps) {
   return (
-    <div className="flex h-full items-center gap-2 pl-2.5 pr-1">
-      <div className="flex min-w-0 items-center gap-2">
-        <BrandMark className="h-[18px] w-[18px]" title="Atelier" />
-        <p className="shrink-0 text-xs font-semibold tracking-tight">Atelier</p>
-        {props.workingCount > 0 && (
-          <Tooltip
-            content={`${props.workingCount} agent${
-              props.workingCount > 1 ? "s" : ""
-            } working in this workspace`}
-          >
-            <span
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5",
-                "text-[10px] font-semibold tabular-nums text-primary"
-              )}
-              style={{ background: "var(--atelier-brand-soft)" }}
-            >
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-              {props.workingCount} working
-            </span>
-          </Tooltip>
-        )}
+    <div className="flex h-full items-center gap-3 px-4">
+      <div className="app-no-drag flex min-w-0 shrink-0 items-center gap-2.5">
+        <p className="hidden shrink-0 text-sm font-semibold tracking-tight sm:block">
+          Atelier
+        </p>
       </div>
 
-      <div className="app-no-drag ml-1 min-w-0">
+      <div className="app-no-drag min-w-0 shrink-0">
         <WorkspaceSwitcher />
       </div>
 
-      {/*
-       * Centred command center. The wrapper is what centres it: `mx-auto` on a
-       * width-capped flex item keeps it near the middle of the bar without
-       * pinning it to an exact centre it would have to fight the two side
-       * groups for at narrow widths.
-       */}
-      <div className="mx-auto hidden min-w-0 max-w-[26rem] flex-1 px-2 md:block">
-        <CommandCenter onOpen={props.onOpenCommands} />
-      </div>
-
-      <div className="app-no-drag flex shrink-0 items-center gap-0.5">
-        <Tooltip
-          content={
-            props.workbenchVisible ? "Hide pane tabs" : "Show pane tabs"
-          }
+      <div className="app-no-drag ml-1 flex min-w-0 items-center gap-1">
+        <div
+          className="segmented min-w-0"
+          role="tablist"
+          aria-label="Agent workspace tabs"
         >
           <button
             type="button"
-            onClick={props.onToggleWorkbench}
-            aria-label={
-              props.workbenchVisible ? "Hide pane tabs" : "Show pane tabs"
+            role="tab"
+            aria-selected={props.activeAgentSurface === "agent"}
+            className="segment min-w-0"
+            onClick={props.onSelectAgent}
+          >
+            <Bot className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">Agent</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={props.activeAgentSurface === "preview"}
+            title={
+              props.pagePreviewRunning
+                ? "Return to the running page preview"
+                : "Preview a full application page at real device viewport sizes"
             }
-            aria-pressed={props.workbenchVisible}
-            className={cn(
-              "tool-btn",
-              props.workbenchVisible && "text-primary"
-            )}
+            className="segment min-w-0"
+            onClick={props.onSelectPagePreview}
           >
-            <Sidebar className="h-4 w-4" />
+            <Monitor className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">Page preview</span>
           </button>
-        </Tooltip>
-        <Tooltip content="Toggle terminal panel (Ctrl+`)">
+        </div>
+        {props.pagePreviewRunning && (
           <button
             type="button"
-            onClick={() => props.onSelectTab("terminal")}
-            aria-label="Toggle terminal panel"
-            aria-pressed={props.bottomOpen}
-            className={cn(
-              "tool-btn relative",
-              props.bottomOpen && "text-primary"
-            )}
+            title="Stop the page preview server"
+            aria-label="Stop page preview server"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-destructive/25 bg-destructive/10 px-3 text-xs font-medium text-destructive transition-colors hover:bg-destructive/15"
+            onClick={props.onStopPagePreview}
           >
-            <TerminalSquare className="h-4 w-4" />
-            {props.terminalCount > 0 && (
-              <span
-                className={cn(
-                  "absolute -right-0.5 -top-0.5 min-w-[13px] rounded-full",
-                  "bg-primary px-[3px] text-[9px] font-semibold leading-[13px]",
-                  "tabular-nums text-primary-foreground"
-                )}
-              >
-                {props.terminalCount}
-              </span>
-            )}
+            <Square className="h-3 w-3 fill-current" />
+            <span className="hidden sm:inline">Stop</span>
           </button>
-        </Tooltip>
-        <Tooltip content="Show the execution timeline">
-          <button
-            type="button"
-            onClick={() => props.onSelectTab("activity")}
-            aria-label="Show the execution timeline"
-            aria-pressed={props.rightTab === "activity"}
-            className={cn(
-              "tool-btn",
-              props.rightTab === "activity" && "text-primary"
-            )}
-          >
-            <Activity className="h-4 w-4" />
-          </button>
-        </Tooltip>
+        )}
       </div>
     </div>
   );

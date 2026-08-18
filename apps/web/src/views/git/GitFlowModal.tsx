@@ -84,7 +84,7 @@ export function GitFlowModal({ vm }: { vm: GitFlowViewModel }) {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 8 }}
             transition={{ type: "spring", stiffness: 300, damping: 28 }}
-            className="island flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden"
+            className="modal-surface island flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden"
           >
             <Header vm={vm} />
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">

@@ -64,6 +64,11 @@ export class ConversationRepo {
       this.db
         .prepare("DELETE FROM context_sent_chunks WHERE conversation_id = ?")
         .run(convId);
+      this.db
+        .prepare(
+          "DELETE FROM conversation_working_memory WHERE conversation_id = ?"
+        )
+        .run(convId);
       return this.db
         .prepare("DELETE FROM conversations WHERE id = ?")
         .run(convId).changes;
@@ -71,13 +76,15 @@ export class ConversationRepo {
     return drop(id) > 0;
   }
 
-  setSdkSessionId(id: string, sdkSessionId: string): void {
-    this.db
-      .prepare(
-        "UPDATE conversations SET sdk_session_id = ?, updated_at = ? WHERE id = ?"
-      )
-      .run(sdkSessionId, Date.now(), id);
-  }
+  // Deliberately NO setSdkSessionId. A conversation must never remember a
+  // provider-side session: every prompt opens a fresh one, and continuity
+  // is carried by Atelier's own context (RAG chunks, session memory, the
+  // recent exchange) which every provider receives identically. Persisting
+  // a provider session id here would resume a growing transcript instead —
+  // the context-window problem this design exists to avoid, and a model
+  // switch mid-conversation would have nothing to resume anyway. The
+  // sdk_session_id column is legacy and stays NULL; see
+  // scripts/session-isolation-smoke.ts.
 
   touch(id: string): void {
     this.db
@@ -87,8 +94,14 @@ export class ConversationRepo {
 
   addMessage(msg: ChatMessage): void {
     const meta =
-      msg.logTopic !== undefined || msg.diff !== undefined
-        ? JSON.stringify({ logTopic: msg.logTopic, diff: msg.diff })
+      msg.logTopic !== undefined ||
+      msg.diff !== undefined ||
+      msg.logDetail !== undefined
+        ? JSON.stringify({
+            logTopic: msg.logTopic,
+            logDetail: msg.logDetail,
+            diff: msg.diff,
+          })
         : null;
     // OR REPLACE: re-pinning the same event id (a replayed or duplicated
     // publish) should update the row, never abort the task that wrote it.
@@ -125,6 +138,7 @@ export class ConversationRepo {
         text: r.text,
         createdAt: r.created_at,
         logTopic: meta?.logTopic,
+        logDetail: meta?.logDetail,
         diff: meta?.diff,
       };
     });
@@ -155,11 +169,33 @@ export class ConversationRepo {
       .run(status, endedAt ?? null, taskId);
   }
 
-  listTasks(activeOnly?: boolean): TaskInfo[] {
-    const sql = activeOnly
-      ? "SELECT * FROM tasks WHERE status = 'running' ORDER BY started_at DESC"
-      : "SELECT * FROM tasks ORDER BY started_at DESC LIMIT 100";
-    const rows = this.db.prepare(sql).all() as TaskRow[];
+  /**
+   * A fresh agent process owns no live tasks. Rows still marked running came
+   * from a process that closed mid-turn; make them reviewable history rather
+   * than letting the renderer mistake them for work that is still alive.
+   */
+  markStaleTasksInterrupted(at = Date.now()): number {
+    return this.db
+      .prepare(
+        "UPDATE tasks SET status = 'error', ended_at = ? " +
+          "WHERE status = 'running' AND ended_at IS NULL"
+      )
+      .run(at).changes;
+  }
+
+  listTasks(activeOnly?: boolean, conversationId?: string): TaskInfo[] {
+    const filters: string[] = [];
+    const params: unknown[] = [];
+    if (activeOnly) filters.push("status = 'running'");
+    if (conversationId) {
+      filters.push("conversation_id = ?");
+      params.push(conversationId);
+    }
+    const where = filters.length > 0 ? ` WHERE ${filters.join(" AND ")}` : "";
+    const limit = conversationId ? "" : " LIMIT 100";
+    const rows = this.db
+      .prepare(`SELECT * FROM tasks${where} ORDER BY started_at DESC${limit}`)
+      .all(...params) as TaskRow[];
     return rows.map((r) => ({
       id: r.id,
       conversationId: r.conversation_id,
@@ -191,6 +227,7 @@ interface MessageRow {
 
 interface StoredMeta {
   logTopic?: string;
+  logDetail?: string;
   diff?: ChatMessage["diff"];
 }
 

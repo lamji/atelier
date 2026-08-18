@@ -3,6 +3,7 @@ import { useConnectionStore } from "@/state/connection.store";
 import {
   useSessionsStore,
   type AgentAction,
+  type ExecutionTimelineVm,
   type LiveDiff,
   type SessionVm,
 } from "@/state/sessions.store";
@@ -12,6 +13,7 @@ import type { ChatItemVm } from "@/types";
 const NO_ITEMS: ChatItemVm[] = [];
 const NO_ACTIONS: AgentAction[] = [];
 const NO_DIFFS: LiveDiff[] = [];
+const NO_EXECUTIONS: ExecutionTimelineVm[] = [];
 
 export interface ChatViewModel {
   /** Bridge is up AND a session is selected. */
@@ -21,6 +23,8 @@ export interface ChatViewModel {
   thinking: string;
   actions: AgentAction[];
   liveDiffs: LiveDiff[];
+  executions: ExecutionTimelineVm[];
+  activeTaskId: string | null;
   plan: Plan | null;
   stage: PipelineStage | null;
   taskStartedAt: number | null;
@@ -46,6 +50,8 @@ export function useChatViewModel(): ChatViewModel {
   const thinking = useSessionsStore((s) => pick(s, (v) => v.thinking));
   const actions = useSessionsStore((s) => pick(s, (v) => v.actions));
   const liveDiffs = useSessionsStore((s) => pick(s, (v) => v.liveDiffs));
+  const executions = useSessionsStore((s) => pick(s, (v) => v.executions));
+  const activeTaskId = useSessionsStore((s) => pick(s, (v) => v.activeTaskId));
   const plan = useSessionsStore((s) => pick(s, (v) => v.plan));
   const stage = useSessionsStore((s) => pick(s, (v) => v.stage));
   const taskStartedAt = useSessionsStore((s) => pick(s, (v) => v.taskStartedAt));
@@ -60,6 +66,8 @@ export function useChatViewModel(): ChatViewModel {
     thinking: thinking ?? "",
     actions: actions ?? NO_ACTIONS,
     liveDiffs: liveDiffs ?? NO_DIFFS,
+    executions: executions ?? NO_EXECUTIONS,
+    activeTaskId: activeTaskId ?? null,
     plan: plan ?? null,
     stage: stage ?? null,
     taskStartedAt: taskStartedAt ?? null,

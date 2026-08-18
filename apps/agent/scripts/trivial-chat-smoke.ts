@@ -1,4 +1,19 @@
+/**
+ * What SHAPE a turn is, decided without a model call: small talk, a
+ * question to be answered, or work to be done. Getting the middle one
+ * wrong is expensive in both directions — a question answered with an
+ * implementation, or a change request answered with prose.
+ *
+ *   pnpm --filter @atelier/agent smoke:trivial-chat
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { isTrivialChat } from "../src/orchestrator/trivial-chat.js";
+import {
+  ANSWER_ONLY_RULES,
+  readIntent,
+} from "../src/orchestrator/pipeline-executor.js";
 
 const CASES: Array<[string, boolean]> = [
   ["hi", true],
@@ -16,6 +31,12 @@ const CASES: Array<[string, boolean]> = [
 ];
 
 let failed = 0;
+
+function check(label: string, ok: boolean, detail = ""): void {
+  if (!ok) failed += 1;
+  console.log(`${ok ? "  ok " : "FAIL "} ${label}${detail ? ` — ${detail}` : ""}`);
+}
+
 for (const [prompt, want] of CASES) {
   const got = isTrivialChat(prompt, false);
   if (got !== want) {
@@ -23,4 +44,51 @@ for (const [prompt, want] of CASES) {
     console.log(`MISMATCH ${JSON.stringify(prompt)} want=${want} got=${got}`);
   }
 }
-console.log(failed === 0 ? "all cases pass" : `${failed} mismatch(es)`);
+
+/**
+ * Answer-only routing. The left column is verbatim from a session where
+ * every one of these was answered with another round of edits instead of
+ * an answer, which is what the question intent now prevents.
+ */
+const INTENT: Array<[string, "question" | "work"]> = [
+  ["where did you put it?", "question"],
+  ["are you really changing the right file?", "question"],
+  ["what is your context?", "question"],
+  ["did you follow the task?", "question"],
+  ["explain the 422 middleware", "question"],
+  ["show me where the resolver lives", "question"],
+  // Imperative in form or in effect: these still owe a change. A question
+  // mark is punctuation, not intent.
+  ["fix the Spend by Region card", "work"],
+  ["can you center the login?", "work"],
+  ["remove the retry in tag coverage", "work"],
+  ["apply that to all api", "work"],
+  ["add the same approach to gke-kpi", "work"],
+];
+
+for (const [prompt, want] of INTENT) {
+  const got = readIntent(prompt).kind;
+  check(`${JSON.stringify(prompt)} -> ${want}`, got === want, got);
+}
+
+check(
+  "the answer-only block forbids the timeline",
+  ANSWER_ONLY_RULES.includes("set_plan") &&
+    ANSWER_ONLY_RULES.includes("DO NOT IMPLEMENT")
+);
+
+// The block only helps if the pipeline actually withholds the execution
+// contract from a question turn; requiring a plan is what makes the model
+// open a checklist in the first place.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const source = fs.readFileSync(
+  path.join(here, "../src/orchestrator/pipeline-executor.ts"),
+  "utf8"
+);
+check(
+  "a question turn is not given the timeline contract",
+  source.includes("if (!answerOnly) this.deps.planTracker.requirePlan(ctx.taskId);")
+);
+
+console.log(failed === 0 ? "\nall cases pass" : `\n${failed} mismatch(es)`);
+process.exit(failed === 0 ? 0 : 1);

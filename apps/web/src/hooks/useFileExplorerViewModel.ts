@@ -3,6 +3,9 @@ import { pathBasename, pathDirname } from "@atelier/shared";
 import { bridge } from "@/services/bridge-client";
 import { useConnectionStore } from "@/state/connection.store";
 import { useGitStore } from "@/state/git.store";
+import { useGitMergeStore } from "@/state/git-merge.store";
+import { openConflictFile } from "@/hooks/useMergeConflictViewModel";
+import { isImagePath } from "@/lib/image-file";
 import { useProjectsStore } from "@/state/projects.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 
@@ -85,8 +88,26 @@ export function useFileExplorerViewModel() {
   }, [epoch]);
 
   const openFile = useCallback(async (path: string) => {
+    // A conflicted file opens in the merge resolver, not the read-only
+    // viewer: the markers are the thing to act on, and the resolver is
+    // where the actions are.
+    if (useGitStore.getState().status?.conflicts.includes(path)) {
+      openConflictFile(path);
+      useWorkspaceStore.getState().setRightTab("editor");
+      return;
+    }
+    // Any other file closes the resolver so the editor pane is the file.
+    if (useGitMergeStore.getState().openPath !== null) {
+      useGitMergeStore.getState().closeConflict();
+    }
     try {
-      const file = await bridge.rpc("fs.readFile", { path });
+      const file = isImagePath(path)
+        ? await bridge.rpc("fs.readImage", { path }).then((image) => ({
+            path: image.path,
+            content: image.dataUrl,
+            mtime: image.mtime,
+          }))
+        : await bridge.rpc("fs.readFile", { path });
       useGitStore.getState().setGitDiff(null); // git diff no longer covers editor
       useWorkspaceStore
         .getState()

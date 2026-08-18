@@ -1,12 +1,18 @@
 import type { Plan, PlanStep, PlanStepStatus } from "@atelier/protocol";
 import { newId } from "@atelier/shared";
 import type { EventBus } from "../events/event-bus.js";
+import type { PlanCheckpointStore } from "./plan-checkpoint-store.js";
 
 /** A step as the model states it, before ids exist. */
 export interface DraftStep {
   title: string;
   detail?: string;
   files?: string[];
+}
+
+export interface PlanStepTransition {
+  ok: boolean;
+  error?: string;
 }
 
 /** Steps past this are a task that should have been split, not a checklist. */
@@ -19,11 +25,40 @@ const MAX_STEPS = 12;
  */
 export class PlanTracker {
   private plans = new Map<string, Plan>();
+  private planRequired = new Set<string>();
+  /** Step ids that received a real edit.applied event in this task. */
+  private editedSteps = new Map<string, Set<string>>();
 
-  constructor(private bus: EventBus) {}
+  constructor(
+    private bus: EventBus,
+    private checkpoints?: PlanCheckpointStore
+  ) {}
+
+  bindTask(conversationId: string, taskId: string, request: string): void {
+    this.checkpoints?.bind(conversationId, taskId, request);
+  }
+
+  resumeContext(conversationId: string, excludeTaskId: string): string {
+    return this.checkpoints?.resumeContext(conversationId, excludeTaskId) ?? "";
+  }
+
+  removeConversation(conversationId: string): void {
+    this.checkpoints?.removeConversation(conversationId);
+  }
 
   setPlan(plan: Plan): void {
     this.plans.set(plan.taskId, plan);
+    this.editedSteps.delete(plan.taskId);
+    this.checkpoints?.save(plan);
+  }
+
+  /** Marks a pipeline task whose workspace edits must belong to a live step. */
+  requirePlan(taskId: string): void {
+    this.planRequired.add(taskId);
+  }
+
+  requiresPlan(taskId: string): boolean {
+    return this.planRequired.has(taskId);
   }
 
   /**
@@ -40,15 +75,7 @@ export class PlanTracker {
    * it needs for `update_plan_step`.
    */
   adopt(taskId: string, goal: string, drafts: DraftStep[]): Plan {
-    const steps: PlanStep[] = drafts.slice(0, MAX_STEPS).map((draft) => ({
-      id: newId("step"),
-      title: draft.title,
-      ...(typeof draft.detail === "string" && draft.detail
-        ? { detail: draft.detail }
-        : {}),
-      files: Array.isArray(draft.files) ? draft.files.map(String) : [],
-      status: "pending" as const,
-    }));
+    const steps = mintSteps(drafts.slice(0, MAX_STEPS));
     const plan: Plan = {
       id: newId("plan"),
       taskId,
@@ -57,8 +84,37 @@ export class PlanTracker {
       createdAt: Date.now(),
     };
     this.plans.set(taskId, plan);
+    this.editedSteps.delete(taskId);
+    this.checkpoints?.save(plan);
     this.bus.publish("plan.created", plan, taskId);
     return plan;
+  }
+
+  /**
+   * Appends newly discovered work without allowing a second set_plan call to
+   * erase, reorder, or silently complete the execution contract already shown
+   * to the user. Re-publishing the full Plan lets every UI consumer replace
+   * its snapshot atomically while preserving the existing step ids/statuses.
+   */
+  extend(taskId: string, drafts: DraftStep[]): PlanStep[] {
+    const plan = this.plans.get(taskId);
+    if (!plan) return [];
+    const existing = new Set(plan.steps.map(stepKey));
+    const unique: DraftStep[] = [];
+    for (const draft of drafts) {
+      const key = draftKey(draft);
+      if (existing.has(key)) continue;
+      existing.add(key);
+      unique.push(draft);
+    }
+    const appended = mintSteps(
+      unique.slice(0, Math.max(0, MAX_STEPS - plan.steps.length))
+    );
+    if (appended.length === 0) return [];
+    plan.steps.push(...appended);
+    this.checkpoints?.save(plan);
+    this.bus.publish("plan.created", plan, taskId);
+    return appended;
   }
 
   get(taskId: string): Plan | undefined {
@@ -77,6 +133,7 @@ export class PlanTracker {
     if (!step) return false;
     step.status = status;
     if (note) step.note = note;
+    this.checkpoints?.save(plan);
     this.bus.publish(
       "plan.step.updated",
       { planId: plan.id, stepId, status, note },
@@ -86,43 +143,92 @@ export class PlanTracker {
   }
 
   /**
-   * Advances the plan from a real edit, so progress shows even when the
-   * model never calls update_plan_step. Monotonic: the step that owns the
-   * edited file goes in-progress and every earlier unfinished step is
-   * marked done. Never regresses a step the model already completed.
+   * Model-facing transition guard. A timeline is executed in order, and a
+   * checkmark is explicit: pending cannot jump straight to done, and later
+   * steps cannot start while an earlier step is anything other than done.
+   */
+  transitionStep(
+    taskId: string,
+    stepId: string,
+    status: PlanStepStatus,
+    note?: string
+  ): PlanStepTransition {
+    const plan = this.plans.get(taskId);
+    if (!plan) return { ok: false, error: "No active plan for this task" };
+    const index = plan.steps.findIndex((step) => step.id === stepId);
+    if (index < 0) {
+      return { ok: false, error: "Unknown step id for this task" };
+    }
+    const step = plan.steps[index]!;
+    if (status === "done" && step.status === "done") return { ok: true };
+
+    const current = plan.steps.findIndex((candidate) => candidate.status !== "done");
+    if (index !== current) {
+      const title = current >= 0 ? plan.steps[current]!.title : "the completed plan";
+      return {
+        ok: false,
+        error: `Timeline order is enforced; finish the current step first: ${title}`,
+      };
+    }
+    if (status === "done" && step.status !== "in-progress") {
+      return {
+        ok: false,
+        error: "Start this step with in-progress before checking it done",
+      };
+    }
+    if (
+      status === "done" &&
+      implementationStepNeedsEdit(step) &&
+      !this.editedSteps.get(taskId)?.has(step.id)
+    ) {
+      return {
+        ok: false,
+        error:
+          "This implementation step has 0 applied edits. Change one of its files before checking it done.",
+      };
+    }
+    if (
+      (status === "failed" || status === "cancelled" || status === "skipped") &&
+      step.status !== "in-progress"
+    ) {
+      return {
+        ok: false,
+        error: `Start this step before marking it ${status}; only done clears the completion gate`,
+      };
+    }
+    this.updateStep(taskId, stepId, status, note);
+    return { ok: true };
+  }
+
+  /**
+   * A real edit may start the current step, but it never manufactures a
+   * checkmark and never advances past an earlier unfinished timeline item.
    */
   noteFileEdited(taskId: string, relPath: string): void {
     const plan = this.plans.get(taskId);
     if (!plan) return;
+    const index = plan.steps.findIndex((step) => step.status !== "done");
+    if (index < 0) return;
+    const step = plan.steps[index]!;
     const target = normPath(relPath);
-    const owns = (step: (typeof plan.steps)[number]): boolean =>
-      step.files.some((f) => pathsMatch(normPath(f), target));
-
-    // Prefer the earliest not-yet-done step that owns the file.
-    let idx = plan.steps.findIndex((s) => s.status !== "done" && owns(s));
-    if (idx < 0) idx = plan.steps.findIndex(owns);
-    if (idx < 0) return;
-
-    for (let i = 0; i < idx; i++) {
-      const s = plan.steps[i]!;
-      if (s.status === "pending" || s.status === "in-progress") {
-        this.updateStep(taskId, s.id, "done");
-      }
+    const owns = step.files.some((file) => pathsMatch(normPath(file), target));
+    if (owns && step.status !== "in-progress") {
+      this.updateStep(taskId, step.id, "in-progress");
     }
-    if (plan.steps[idx]!.status === "pending") {
-      this.updateStep(taskId, plan.steps[idx]!.id, "in-progress");
+    // The plan-edit hook already guarantees that pipeline mutations belong
+    // to the active step. Count the emitted edit even when the model's file
+    // metadata was incomplete, otherwise a real patch can deadlock on a
+    // guessed path list.
+    if (step.status === "in-progress") {
+      const edited = this.editedSteps.get(taskId) ?? new Set<string>();
+      edited.add(step.id);
+      this.editedSteps.set(taskId, edited);
     }
   }
 
-  /** Task finished cleanly: everything still open is marked done. */
-  completeAll(taskId: string): void {
-    const plan = this.plans.get(taskId);
-    if (!plan) return;
-    for (const step of plan.steps) {
-      if (step.status === "pending" || step.status === "in-progress") {
-        this.updateStep(taskId, step.id, "done");
-      }
-    }
+  /** Every state except an explicit checkmark remains live work. */
+  unfinishedSteps(taskId: string): PlanStep[] {
+    return this.plans.get(taskId)?.steps.filter((step) => step.status !== "done") ?? [];
   }
 
   /** Cancellation: everything not finished flips to cancelled. */
@@ -138,7 +244,41 @@ export class PlanTracker {
 
   clear(taskId: string): void {
     this.plans.delete(taskId);
+    this.planRequired.delete(taskId);
+    this.editedSteps.delete(taskId);
+    this.checkpoints?.release(taskId);
   }
+}
+
+function mintSteps(drafts: DraftStep[]): PlanStep[] {
+  return drafts.map((draft) => ({
+    id: newId("step"),
+    title: draft.title.trim(),
+    ...(typeof draft.detail === "string" && draft.detail.trim()
+      ? { detail: draft.detail.trim() }
+      : {}),
+    files: Array.isArray(draft.files) ? draft.files.map(String) : [],
+    status: "pending" as const,
+  }));
+}
+
+function draftKey(draft: DraftStep): string {
+  // The title is the visible step identity. Providers may repeat set_plan
+  // with richer or missing file metadata; that must update neither the
+  // execution contract nor the checklist with a duplicate-looking row.
+  return draft.title.trim().toLowerCase();
+}
+
+function stepKey(step: PlanStep): string {
+  return draftKey(step);
+}
+
+const IMPLEMENTATION_STEP =
+  /\b(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|redesign|rebuild|make|put|set|use|replace|adjust|convert|wire)\b/i;
+
+/** File-bearing change steps cannot manufacture a green checkmark from reads. */
+function implementationStepNeedsEdit(step: PlanStep): boolean {
+  return step.files.length > 0 && IMPLEMENTATION_STEP.test(step.title);
 }
 
 function normPath(p: string): string {

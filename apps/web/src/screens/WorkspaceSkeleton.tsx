@@ -18,43 +18,43 @@ import { cn } from "@/lib/cn";
 export function WorkspaceSkeleton() {
   return (
     <div
-      className="flex h-full flex-col overflow-hidden bg-background"
+      className="app-canvas flex h-full flex-col overflow-hidden"
       aria-busy="true"
       aria-live="polite"
       aria-label="Opening workspace"
     >
-      <BareTitleBar />
-
-      <div className="flex min-h-0 flex-1">
-        <div
-          className={cn(
-            "flex w-[var(--activitybar-w)] shrink-0 flex-col items-center",
-            "gap-1 border-r border-border bg-activity py-1"
-          )}
-        >
-          {Array.from({ length: 7 }).map((_, index) => (
+      {/* The nav is drawn, not just reserved: it is the header the shell will
+          fill, and an empty strip there reads as a broken window. */}
+      <div className="flex h-[var(--topnav-h)] shrink-0 items-center gap-3 px-4">
+        <BrandMark className="h-7 w-7" tile />
+        <span className="hidden h-2.5 w-16 rounded-full bg-muted-foreground/20 sm:block" />
+        <div className="ml-2 hidden items-center gap-5 md:flex" aria-hidden>
+          {[44, 36, 52, 40].map((width, index) => (
             <span
               key={index}
-              className="h-11 w-11 shrink-0 p-[13px]"
-              aria-hidden
-            >
-              <span className="block h-full w-full rounded bg-muted-foreground/15" />
-            </span>
+              className="block h-2 rounded-full bg-muted-foreground/15"
+              style={{ width }}
+            />
           ))}
         </div>
+        <div className="ml-auto">
+          <BareTitleBar />
+        </div>
+      </div>
 
-        <div className="w-[clamp(190px,22%,20rem)] shrink-0 border-r border-border bg-sidebar">
+      <div className="flex min-h-0 flex-1 gap-[var(--shell-gap)] px-[var(--shell-gap)] pb-[var(--shell-gap)]">
+        <div className="island w-[clamp(210px,22%,20rem)] shrink-0">
           <div
-            className="flex items-center border-b border-border-subtle px-3"
+            className="flex items-center px-4"
             style={{ height: "var(--panel-header-h)" }}
           >
-            <span className="h-2 w-20 rounded bg-muted-foreground/20" />
+            <span className="h-2.5 w-20 rounded-full bg-muted-foreground/20" />
           </div>
-          <div className="space-y-3 p-3">
+          <div className="space-y-3 px-4 pb-4">
             {[92, 76, 84, 64, 88].map((width, index) => (
               <span
                 key={index}
-                className="block h-2 rounded bg-muted-foreground/12"
+                className="block h-2 rounded-full bg-muted-foreground/12"
                 style={{ width: `${width}%` }}
               />
             ))}
@@ -63,23 +63,22 @@ export function WorkspaceSkeleton() {
 
         {/* Centre: the one place a progress signal belongs, since it is the
             region the user is waiting on. */}
-        <div className="flex min-w-0 flex-1 flex-col bg-editor">
+        <div className="island flex min-w-0 flex-1 flex-col">
           <div
-            className="shrink-0 border-b border-border bg-panel"
+            className="flex shrink-0 items-center px-3"
             style={{ height: "var(--tabbar-h)" }}
-          />
+          >
+            <span className="h-8 w-44 rounded-full bg-muted-foreground/10" />
+          </div>
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3">
-            <BrandMark className="h-9 w-9 opacity-90" />
+            <BrandMark className="h-10 w-10 opacity-90" />
             <p className="text-xs text-muted-foreground">Opening workspace…</p>
           </div>
         </div>
       </div>
 
       <div
-        className={cn(
-          "flex shrink-0 items-center gap-3 border-t border-border",
-          "bg-titlebar px-2"
-        )}
+        className={cn("flex shrink-0 items-center gap-3 px-4")}
         style={{ height: "var(--statusbar-h)" }}
       >
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />

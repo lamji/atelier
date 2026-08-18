@@ -16,6 +16,14 @@ export interface SharedSessionContextInput {
   excludeTaskIds?: string[];
   /** Token cap for the whole block. */
   maxTokens?: number;
+  /**
+   * How many of the newest turns the provider already carries verbatim, as
+   * real conversation messages. Ollama seeds its transcript with them (see
+   * the agent loop), and a summary of a turn sitting beside the turn itself
+   * is pure duplication — the budget it frees goes to the task summaries,
+   * which nothing else carries.
+   */
+  verbatimTurns?: number;
 }
 
 export interface SharedSessionContext {
@@ -71,7 +79,7 @@ export class SharedSessionContextBuilder {
         (summary) =>
           summary.taskId !== input.currentTaskId && !excluded.has(summary.taskId)
       );
-    const messages = this.deps.conversations
+    const recent = this.deps.conversations
       .getMessages(input.conversationId)
       .filter(
         (message) =>
@@ -79,6 +87,12 @@ export class SharedSessionContextBuilder {
           (message.role === "user" || message.role === "assistant")
       )
       .slice(-10);
+    // Drop the tail the provider is sending verbatim, keep the older turns
+    // it is not. Trimming the whole block instead would lose turns 5-10,
+    // which nothing else in the turn carries.
+    const carried = Math.max(0, input.verbatimTurns ?? 0);
+    const messages =
+      carried > 0 ? recent.slice(0, Math.max(0, recent.length - carried)) : recent;
 
     const renderedTurns =
       messages.length > 0

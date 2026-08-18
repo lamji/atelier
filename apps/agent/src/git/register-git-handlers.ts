@@ -93,10 +93,29 @@ export function registerGitHandlers(
   });
 
   router.register("git.pushRun", async (params, ctx) => {
-    const result = await ops.pushRun(git.root, params.flags, {
-      onChunk: (chunk) => ctx.progress({ chunk }),
-      signal: ctx.signal,
-    });
+    const result = await ops.pushRun(
+      git.root,
+      params.flags,
+      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal },
+      {
+        remote: params.remote,
+        branch: params.branch,
+        setUpstream: params.setUpstream,
+      }
+    );
+    await git.refresh();
+    return { result };
+  });
+
+  router.register("git.refs", async () => ({ refs: await ops.refs(git.root) }));
+
+  router.register("git.checkoutRun", async (params, ctx) => {
+    const result = await ops.checkoutRun(
+      git.root,
+      params.ref,
+      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal },
+      { create: params.create, track: params.track, from: params.from }
+    );
     await git.refresh();
     return { result };
   });
@@ -130,6 +149,62 @@ export function registerGitHandlers(
       params.body,
       { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal }
     );
+    return { result };
+  });
+
+  // ── Sync + merge-conflict resolution ──────────────────────────────────
+
+  router.register("git.fetch", async () => {
+    const counts = await ops.fetchRun(git);
+    await git.refresh();
+    return counts;
+  });
+
+  router.register("git.pullRun", async (params, ctx) => {
+    const outcome = await ops.pullRun(
+      git,
+      params.mode ?? "merge",
+      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal },
+      { remote: params.remote, branch: params.branch }
+    );
+    await git.refresh();
+    return outcome;
+  });
+
+  router.register("git.conflictFile", async (params) => ({
+    file: await ops.conflictFile(git, params.path),
+  }));
+
+  router.register("git.resolveConflict", async (params) => {
+    await ops.resolveConflict(git, params.path, params.content, params.stage);
+    return {};
+  });
+
+  router.register("git.resolveConflictWith", async (params) => {
+    await ops.resolveConflictWith(git, params.paths, params.side);
+    return {};
+  });
+
+  router.register("git.restoreConflict", async (params) => {
+    await ops.restoreConflict(git, params.path);
+    return {};
+  });
+
+  router.register("git.scanConflictMarkers", async (params) =>
+    ops.scanConflictMarkers(git, params.paths)
+  );
+
+  router.register("git.mergeAbort", async () => {
+    await ops.mergeAbort(git);
+    return {};
+  });
+
+  router.register("git.mergeContinueRun", async (params, ctx) => {
+    const result = await ops.mergeContinueRun(git, params.message, {
+      onChunk: (chunk) => ctx.progress({ chunk }),
+      signal: ctx.signal,
+    });
+    await git.refresh();
     return { result };
   });
 }

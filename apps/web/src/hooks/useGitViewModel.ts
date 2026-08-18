@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { GitRepo } from "@atelier/protocol";
 import { bridge } from "@/services/bridge-client";
 import { errorText } from "@/lib/error-text";
+import { alert } from "@/state/alerts.store";
 import { useConnectionStore } from "@/state/connection.store";
 import { useGitStore } from "@/state/git.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -67,8 +68,33 @@ export function useGitViewModel() {
     };
   }, [connected, stateVersion]);
 
+  /**
+   * Every git operation reports its outcome as an alert — success and
+   * failure — so an action fired from a panel the user has already left
+   * still surfaces. Errors are re-thrown for the caller's inline message.
+   */
+  const reportGit = useCallback(
+    async <T,>(
+      run: () => Promise<T>,
+      done: (result: T) => [string, string?] | null,
+      failTitle: string
+    ): Promise<T> => {
+      try {
+        const result = await run();
+        const msg = done(result);
+        if (msg) alert.success(msg[0], msg[1]);
+        return result;
+      } catch (err) {
+        alert.danger(failTitle, shortErr(err));
+        throw err;
+      }
+    },
+    []
+  );
+
   const selectRepo = useCallback(async (repo: string) => {
     await bridge.rpc("git.selectRepo", { repo });
+    alert.info(`Git panel now on ${repo}`);
     // Clears the stale "not a git repository" state so switching from an
     // unselected workspace lands on data, not the previous error.
     useGitStore.getState().setError(null);
@@ -85,62 +111,123 @@ export function useGitViewModel() {
    * lands on a real repo.
    */
   const initRepo = useCallback(async () => {
-    await bridge.rpc("git.init", {});
+    const { root } = await reportGit(
+      () => bridge.rpc("git.init", {}),
+      (r) => ["Repository initialized", r.root === "." ? undefined : r.root],
+      "Could not initialize repository"
+    );
+    void root;
     useGitStore.getState().setError(null);
     useGitStore.getState().bumpStateVersion();
-  }, []);
+  }, [reportGit]);
 
-  const stage = useCallback(async (paths: string[]) => {
-    await bridge.rpc("git.stage", { paths });
-  }, []);
+  const stage = useCallback(
+    async (paths: string[]) => {
+      await reportGit(
+        () => bridge.rpc("git.stage", { paths }),
+        () => [`Staged ${describe(paths)}`],
+        "Stage failed"
+      );
+    },
+    [reportGit]
+  );
 
-  const unstage = useCallback(async (paths: string[]) => {
-    await bridge.rpc("git.unstage", { paths });
-  }, []);
+  const unstage = useCallback(
+    async (paths: string[]) => {
+      await reportGit(
+        () => bridge.rpc("git.unstage", { paths }),
+        () => [`Unstaged ${describe(paths)}`],
+        "Unstage failed"
+      );
+    },
+    [reportGit]
+  );
 
-  const discard = useCallback(async (paths: string[]) => {
-    await bridge.rpc("git.discard", { paths });
-  }, []);
+  const discard = useCallback(
+    async (paths: string[]) => {
+      await reportGit(
+        () => bridge.rpc("git.discard", { paths }),
+        () => [`Discarded changes in ${describe(paths)}`],
+        "Discard failed"
+      );
+    },
+    [reportGit]
+  );
 
-  const commit = useCallback(async (message: string) => {
-    await bridge.rpc("git.commit", { message });
-  }, []);
+  const commit = useCallback(
+    async (message: string) => {
+      await reportGit(
+        () => bridge.rpc("git.commit", { message }),
+        (r) => ["Committed", `${r.hash.slice(0, 7)} · ${firstLine(message)}`],
+        "Commit failed"
+      );
+    },
+    [reportGit]
+  );
 
-  const checkout = useCallback(async (ref: string) => {
-    await bridge.rpc("git.checkout", { ref });
-  }, []);
+  const checkout = useCallback(
+    async (ref: string) => {
+      await reportGit(
+        () => bridge.rpc("git.checkout", { ref }),
+        () => [`Switched to ${ref}`],
+        `Could not switch to ${ref}`
+      );
+    },
+    [reportGit]
+  );
 
   /**
    * Creates a private GitHub repo via the agent (gh CLI) and sets it as
    * origin, then refetches so the panel swaps off the no-remote state.
    */
   const connectGitHub = useCallback(async () => {
-    await bridge.rpc("git.connectRemote", {});
+    await reportGit(
+      () => bridge.rpc("git.connectRemote", {}),
+      (r) => ["Connected to GitHub", r.url],
+      "Could not connect to GitHub"
+    );
     useGitStore.getState().bumpStateVersion();
-  }, []);
+  }, [reportGit]);
 
   /**
    * Asks the agent to draft a commit message from the current changes
    * (Claude Haiku). The caller puts it in the editable commit box.
    */
   const generateCommitMessage = useCallback(async () => {
-    const result = await bridge.rpc("git.generateCommitMessage", {});
+    const result = await reportGit(
+      () => bridge.rpc("git.generateCommitMessage", {}),
+      () => ["Commit message drafted", "review it before committing"],
+      "Could not draft a commit message"
+    );
     return result.message;
-  }, []);
+  }, [reportGit]);
 
-  /** Loads a single-file diff and shows it in the editor pane. */
+  /**
+   * Loads a single-file diff. The pending path is published first so the
+   * diff surface can open immediately and show a spinner — a click that
+   * appears to do nothing for a second reads as a broken button.
+   */
   const openDiff = useCallback(async (path: string, staged: boolean) => {
-    const result = await bridge.rpc("git.diff", { path, staged });
-    useGitStore.getState().setGitDiff({
-      path,
-      staged,
-      before: result.before ?? "",
-      after: result.after ?? "",
-    });
-    useWorkspaceStore.getState().setRightTab("editor");
+    useGitStore.getState().setGitDiffLoading(path);
+    try {
+      const result = await bridge.rpc("git.diff", { path, staged });
+      // The user may have closed it, or clicked another file, meanwhile.
+      if (useGitStore.getState().gitDiffLoading !== path) return;
+      useGitStore.getState().setGitDiff({
+        path,
+        staged,
+        before: result.before ?? "",
+        after: result.after ?? "",
+      });
+      useWorkspaceStore.getState().setRightTab("editor");
+    } catch (err) {
+      useGitStore.getState().setGitDiffLoading(null);
+      alert.danger(`Could not open the diff of ${path}`, shortErr(err));
+    }
   }, []);
 
   const closeDiff = useCallback(() => {
+    useGitStore.getState().setGitDiffLoading(null);
     useGitStore.getState().setGitDiff(null);
   }, []);
 
@@ -168,3 +255,16 @@ export function useGitViewModel() {
 }
 
 export type GitViewModel = ReturnType<typeof useGitViewModel>;
+
+function describe(paths: string[]): string {
+  if (paths.length === 1) return paths[0] ?? "1 file";
+  return `${paths.length} files`;
+}
+
+function firstLine(text: string): string {
+  return (text.split("\n")[0] ?? "").trim().slice(0, 72);
+}
+
+function shortErr(err: unknown): string {
+  return errorText(err).replace(/^Error:\s*/, "").slice(0, 160);
+}

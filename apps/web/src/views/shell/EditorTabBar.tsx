@@ -33,10 +33,12 @@ function basename(path: string): string {
 }
 
 /**
- * VS Code-style tab strip for the editor region. It lists the panes the
- * central area can show and nothing else — the bottom dock owns its own
- * Terminal/Timeline tabs, and the shell's layout toggles live in the title
- * bar, so no action appears in two places.
+ * Pane switcher for the main region — a segmented control, not a tab strip.
+ *
+ * The distinction matters: document tabs promise that each one is a file you
+ * opened and can close, which was never true here. These are three fixed
+ * views of one workspace, so a segmented control states the truth and stops
+ * the main region from reading as an editor with files open in it.
  *
  * Graph and RAG are reached from the Knowledge view rather than opened here,
  * so they only appear once they are the active pane: enough to show where you
@@ -90,49 +92,28 @@ export function EditorTabBar(props: EditorTabBarProps) {
 
   return (
     <div
-      role="tablist"
-      aria-label="Editor panes"
-      className={cn(
-        "flex shrink-0 items-stretch overflow-x-auto border-b border-border",
-        "bg-panel"
-      )}
+      className="flex shrink-0 items-center px-3"
       style={{ height: "var(--tabbar-h)" }}
     >
-      {tabs.map((tab) => {
-        const active = props.rightTab === tab.id;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            title={tab.title}
-            onClick={() => props.onSelectTab(tab.id)}
-            className={cn(
-              "group relative flex max-w-[16rem] shrink-0 items-center gap-1.5",
-              "border-r border-border-subtle px-3 text-xs transition-colors",
-              active
-                ? "bg-editor text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {/* Slim top rule instead of a filled block — the active tab is
-                identified by its surface matching the editor below it. */}
-            <span
-              aria-hidden
-              className={cn(
-                "absolute inset-x-0 top-0 h-[2px] bg-primary transition-opacity",
-                active ? "opacity-100" : "opacity-0"
-              )}
-            />
-            <tab.icon className="h-4 w-4 shrink-0 opacity-80" />
-            <span className="truncate">{tab.label}</span>
-          </button>
-        );
-      })}
-      {/* Empty run of the strip: same surface, so tabs read as sitting in a
-          bar rather than floating. */}
-      <span aria-hidden className="min-w-0 flex-1" />
+      <div role="tablist" aria-label="Workspace panes" className="segmented">
+        {tabs.map((tab) => {
+          const active = props.rightTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              title={tab.title}
+              onClick={() => props.onSelectTab(tab.id)}
+              className={cn("segment max-w-[14rem]")}
+            >
+              <tab.icon className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{tab.label}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

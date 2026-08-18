@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { FileTreeNode, SlashCommand } from "@atelier/protocol";
-import type { ActivityView } from "@/views/shell/ActivityBar";
+import type { ActivityView } from "@/views/shell/dock/dock-items";
 
 export type RightTab =
   | "chat"
@@ -40,10 +40,18 @@ interface WorkspaceStore {
   workspaceEpoch: number;
   /** Whether the bottom dock (the integrated terminal) is expanded. */
   bottomPanel: boolean;
+  settingsOpen: boolean;
   skillDetail: { command: SlashCommand; content: string } | null;
+  /** The active file-name search in the explorer; the editor reads it so it
+   *  can highlight the same matches inside the open file. Lifted out of the
+   *  panel's local state because Monaco lives in a different view tree. */
+  searchQuery: string;
   setActivityView: (view: ActivityView) => void;
   setBottomPanel: (open: boolean) => void;
+  openSettings: () => void;
+  closeSettings: () => void;
   openBottom: () => void;
+  setSearchQuery: (query: string) => void;
   setTree: (tree: FileTreeNode) => void;
   bumpTreeVersion: () => void;
   toggleExpanded: (path: string) => void;
@@ -71,10 +79,14 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   workbenchVisible: false,
   workspaceEpoch: 0,
   bottomPanel: false,
+  settingsOpen: false,
   skillDetail: null,
+  searchQuery: "",
 
   setActivityView: (activityView) => set({ activityView }),
   setBottomPanel: (bottomPanel) => set({ bottomPanel }),
+  openSettings: () => set({ settingsOpen: true }),
+  closeSettings: () => set({ settingsOpen: false }),
   openBottom: () => set({ bottomPanel: true }),
   setTree: (tree) => set({ tree }),
   bumpTreeVersion: () => set((s) => ({ treeVersion: s.treeVersion + 1 })),
@@ -105,4 +117,5 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   setWorkbenchVisible: (workbenchVisible) => set({ workbenchVisible }),
   openSkillDetail: (skillDetail) => set({ skillDetail, rightTab: "chat" }),
   closeSkillDetail: () => set({ skillDetail: null, rightTab: "chat" }),
+  setSearchQuery: (searchQuery) => set({ searchQuery }),
 }));

@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { PipelineStage, Plan, PlanStepStatus } from "@atelier/protocol";
+import type {
+  PipelineStage,
+  Plan,
+  PlanStepStatus,
+  TaskStatus,
+} from "@atelier/protocol";
 import type { ChatItemVm, Conversation } from "@/types";
 
 export type SessionStatus = "idle" | "working" | "error";
@@ -29,6 +34,12 @@ export interface AgentAction {
    * an icon tells you nothing about what went wrong.
    */
   error?: string;
+  /** Plan step that was active when this tool call began. */
+  stepId?: string;
+  /** Persisted/streamed tool output, clipped for the review UI. */
+  output?: string;
+  /** Completed tool result, shaped for review rather than raw JSON. */
+  result?: string;
   /** Feed ordering, shared with LiveDiff so diffs slot in chronologically. */
   seq: number;
 }
@@ -44,6 +55,30 @@ export interface LiveDiff {
   path: string;
   before: string;
   after: string;
+  /** Plan step that was active when the edit landed. */
+  stepId?: string;
+}
+
+/** One task reconstructed from the agent's persisted SQLite timeline. */
+export interface ExecutionTimelineVm {
+  taskId: string;
+  request: string;
+  report: string;
+  /** Original request time, distinct from a queued task's later start time. */
+  requestedAt: number;
+  status: TaskStatus;
+  startedAt: number;
+  endedAt: number | null;
+  /** Total wall time of the task execution in milliseconds. */
+  durationMs: number | null;
+  plan: Plan | null;
+  actions: AgentAction[];
+  diffs: LiveDiff[];
+  logs: ChatItemVm[];
+  /** Identifies a standalone Page preview review execution. */
+  frontendReview?: boolean;
+  /** Persisted screenshot evidence restored from the review request metadata. */
+  images?: string[];
 }
 
 /**
@@ -73,6 +108,10 @@ export interface SessionVm {
   actions: AgentAction[];
   /** Diffs from the running task, shown inline in the live feed. */
   liveDiffs: LiveDiff[];
+  /** Completed and restored task timelines, newest first. */
+  executions: ExecutionTimelineVm[];
+  /** Last persisted/live text used by the sidebar before full hydration. */
+  previewText: string | null;
   /** Current task plan (pipeline stage 4) with live step statuses. */
   plan: Plan | null;
   /** Pipeline stage the running task is in — the live progress line. */
@@ -105,6 +144,7 @@ interface SessionsStore {
   /** Drops a chat locally; the agent delete is issued by the ViewModel. */
   removeSession: (conversationId: string) => void;
   renameSession: (conversationId: string, title: string) => void;
+  setPreview: (conversationId: string, previewText: string | null) => void;
   hydrate: (conversationId: string, items: ChatItemVm[]) => void;
   mapTask: (taskId: string, conversationId: string) => void;
   conversationForTask: (taskId: string) => string | undefined;
@@ -120,7 +160,8 @@ interface SessionsStore {
     conversationId: string,
     id: string,
     topic: string,
-    text: string
+    text: string,
+    detail?: string
   ) => void;
   /** Pins an agent file edit into the chat transcript as an inline diff. */
   pinDiff: (
@@ -138,7 +179,8 @@ interface SessionsStore {
   completeAssistantMessage: (
     conversationId: string,
     messageId: string,
-    text: string
+    text: string,
+    taskId?: string
   ) => void;
   appendThinking: (conversationId: string, delta: string) => void;
   actionStarted: (
@@ -153,7 +195,13 @@ interface SessionsStore {
     id: string,
     status: "done" | "failed",
     error?: string,
-    durationMs?: number
+    durationMs?: number,
+    result?: string
+  ) => void;
+  actionOutput: (conversationId: string, id: string, chunk: string) => void;
+  setExecutions: (
+    conversationId: string,
+    executions: ExecutionTimelineVm[]
   ) => void;
   setStage: (conversationId: string, stage: PipelineStage) => void;
   taskCancelling: (conversationId: string) => void;
@@ -226,6 +274,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
             lastError: null,
             actions: [],
             liveDiffs: [],
+            executions: [],
+            previewText: null,
             plan: null,
             stage: null,
             taskStartedAt: null,
@@ -253,6 +303,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           lastError: null,
           actions: [],
           liveDiffs: [],
+          executions: [],
+          previewText: null,
           plan: null,
           stage: null,
           taskStartedAt: null,
@@ -290,10 +342,16 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       })),
     })),
 
+  setPreview: (conversationId, previewText) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, () => ({ previewText })),
+    })),
+
   hydrate: (conversationId, items) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, () => ({
         items,
+        previewText: previewFromItems(items),
         hydrated: true,
       })),
     })),
@@ -308,15 +366,33 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         items: [
           ...session.items,
-          { id, role: "user", text, ...(images?.length ? { images } : {}) },
+          {
+            id,
+            role: "user",
+            text,
+            createdAt: Date.now(),
+            ...(images?.length ? { images } : {}),
+          },
         ],
+        previewText: text,
       })),
     })),
 
-  pinLog: (conversationId, id, topic, text) =>
+  pinLog: (conversationId, id, topic, text, detail) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
-        items: [...session.items, { id, role: "log", text, logTopic: topic }],
+        items: [
+          ...session.items,
+          {
+            id,
+            taskId: session.activeTaskId ?? undefined,
+            role: "log",
+            text,
+            logTopic: topic,
+            ...(detail ? { logDetail: detail } : {}),
+          },
+        ],
+        previewText: text,
       })),
     })),
 
@@ -328,7 +404,13 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // the diff belongs between the edit and any later assistant message).
         const items = [
           ...session.items,
-          { id, role: "diff" as const, text: path, diff },
+          {
+            id,
+            taskId: session.activeTaskId ?? undefined,
+            role: "diff" as const,
+            text: path,
+            diff,
+          },
         ];
         // While the task runs the transcript copy is hidden (ChatPanel skips
         // ids in liveDiffs) and this live copy renders inside the activity
@@ -337,9 +419,18 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // the top. On task end liveDiffs clears and the transcript takes over.
         const liveDiffs = [
           ...session.liveDiffs,
-          { id, seq: feedSeq++, path, before, after },
+          {
+            id,
+            seq: feedSeq++,
+            path,
+            before,
+            after,
+            stepId:
+              activePlanStepId(session.plan) ??
+              lastOwnedStepId(session.actions),
+          },
         ];
-        return { items, liveDiffs };
+        return { items, liveDiffs, previewText: path };
       }),
     })),
 
@@ -356,6 +447,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           updated[lastIndex] = { ...last, text: last.text + delta };
           return {
             items: updated,
+            previewText: updated[lastIndex]?.text ?? session.previewText,
             thinking: session.activeTaskId
               ? liveStatusLine(session.thinking, delta)
               : session.thinking,
@@ -368,6 +460,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           updated[index] = { ...found, text: found.text + delta };
           return {
             items: updated,
+            previewText: updated[index]?.text ?? session.previewText,
             thinking: session.activeTaskId
               ? liveStatusLine(session.thinking, delta)
               : session.thinking,
@@ -380,6 +473,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           thinking: session.activeTaskId
             ? liveStatusLine(session.thinking, delta)
             : session.thinking,
+          previewText: session.activeTaskId ? session.previewText : delta,
           items: session.activeTaskId
             ? items
             : [
@@ -400,23 +494,32 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
    * since it is persisted with the task's end time; this makes the live
    * transcript agree with that order instead of asking for a scroll up.
    */
-  completeAssistantMessage: (conversationId, messageId, text) =>
+  completeAssistantMessage: (conversationId, messageId, text, taskId) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => {
         const rest = session.items.filter((i) => i.id !== messageId);
         const existing = session.items.find((i) => i.id === messageId);
+        const owner = taskId ?? session.activeTaskId ?? existing?.taskId;
         return {
           items: [
             ...rest,
             {
               ...(existing ?? { id: messageId, role: "assistant" as const }),
               id: messageId,
+              taskId: owner,
+              createdAt: existing?.createdAt ?? Date.now(),
               role: "assistant" as const,
               text,
               streaming: false,
             },
           ],
+          previewText: text,
           thinking: "",
+          executions: owner
+            ? session.executions.map((execution) =>
+                execution.taskId === owner ? { ...execution, report: text } : execution
+              )
+            : session.executions,
         };
       }),
     })),
@@ -436,16 +539,35 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           // covered barely the tail of one. This is a per-conversation
           // in-memory list of small objects; the render decides what to show.
           ...session.actions.slice(-(MAX_ACTIONS - 1)),
-          { id, label, name, detail, status: "running", seq: feedSeq++ },
+          {
+            id,
+            label,
+            name,
+            detail,
+            status: "running",
+            seq: feedSeq++,
+            stepId: activePlanStepId(session.plan),
+          },
         ],
       })),
     })),
 
-  actionFinished: (conversationId, id, status, error, durationMs) =>
+  actionOutput: (conversationId, id, chunk) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, (session) => ({
+        actions: session.actions.map((action) =>
+          action.id === id
+            ? { ...action, output: appendOutput(action.output, chunk) }
+            : action
+        ),
+      })),
+    })),
+
+  actionFinished: (conversationId, id, status, error, durationMs, result) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         actions: session.actions.map((a) =>
-          a.id === id ? { ...a, status, error, durationMs } : a
+          a.id === id ? { ...a, status, error, durationMs, result } : a
         ),
       })),
     })),
@@ -463,11 +585,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
   taskQueued: (conversationId, taskId) =>
     set((s) => ({
-      sessions: patch(s.sessions, conversationId, (session) =>
-        session.queuedTaskIds.includes(taskId)
-          ? {}
-          : { queuedTaskIds: [...session.queuedTaskIds, taskId] }
-      ),
+      sessions: patch(s.sessions, conversationId, (session) => ({
+        queuedTaskIds: session.queuedTaskIds.includes(taskId)
+          ? session.queuedTaskIds
+          : [...session.queuedTaskIds, taskId],
+        items: tagLatestRequest(session.items, taskId),
+      })),
       taskMap: { ...s.taskMap, [taskId]: conversationId },
     })),
 
@@ -476,6 +599,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         // Its turn came: it leaves the line and takes the live feed.
         queuedTaskIds: session.queuedTaskIds.filter((id) => id !== taskId),
+        items: tagLatestRequest(session.items, taskId),
         activeTaskId: taskId,
         status: "working",
         lastError: null,
@@ -524,19 +648,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions: patch(s.sessions, conversationId, (session) =>
         taskId && session.queuedTaskIds.includes(taskId)
           ? { queuedTaskIds: session.queuedTaskIds.filter((id) => id !== taskId) }
-          : {
-              activeTaskId: null,
-              thinking: "",
-              stage: null,
-              taskStartedAt: null,
-              cancelling: false,
-              // Run over: drop the live copies so the (chronologically-placed)
-              // transcript diffs become the visible record again.
-              liveDiffs: [],
-              status: outcome === "error" ? "error" : "idle",
-              lastError:
-                outcome === "error" ? (error ?? "task failed") : null,
-            }
+          : finishExecution(session, outcome, error, taskId)
       ),
     })),
 
@@ -560,7 +672,119 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           : null,
       })),
     })),
+
+  setExecutions: (conversationId, executions) =>
+    set((s) => ({
+      sessions: patch(s.sessions, conversationId, () => ({
+        executions: sortExecutions(executions),
+      })),
+    })),
 }));
+
+const MAX_REVIEW_OUTPUT = 4_000;
+
+function appendOutput(current: string | undefined, chunk: string): string {
+  return `${current ?? ""}${chunk}`.slice(-MAX_REVIEW_OUTPUT);
+}
+
+function activePlanStepId(plan: Plan | null): string | undefined {
+  return plan?.steps.find((step) => step.status === "in-progress")?.id;
+}
+
+function lastOwnedStepId(actions: AgentAction[]): string | undefined {
+  for (let index = actions.length - 1; index >= 0; index -= 1) {
+    if (actions[index]?.stepId) return actions[index]?.stepId;
+  }
+  return undefined;
+}
+
+function tagLatestRequest(items: ChatItemVm[], taskId: string): ChatItemVm[] {
+  let index = -1;
+  for (let cursor = items.length - 1; cursor >= 0; cursor -= 1) {
+    const item = items[cursor];
+    if (item?.role === "user" && item.taskId === undefined) {
+      index = cursor;
+      break;
+    }
+  }
+  if (index < 0) return items;
+  const next = items.slice();
+  next[index] = { ...next[index]!, taskId };
+  return next;
+}
+
+function previewFromItems(items: ChatItemVm[]): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const text = items[index]?.text?.replaceAll("\n", " ").trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+function finishExecution(
+  session: SessionVm,
+  outcome: "completed" | "cancelled" | "error",
+  error?: string,
+  taskId?: string
+): Partial<SessionVm> {
+  const owner = taskId ?? session.activeTaskId;
+  const request = owner
+    ? session.items.find((item) => item.taskId === owner && item.role === "user")
+        ?.text ?? ""
+    : "";
+  const requestedAt = owner
+    ? session.items.find((item) => item.taskId === owner && item.role === "user")
+        ?.createdAt ?? session.taskStartedAt ?? Date.now()
+    : session.taskStartedAt ?? Date.now();
+  const report = owner
+    ? [...session.items]
+        .reverse()
+        .find((item) => item.taskId === owner && item.role === "assistant")
+        ?.text ?? ""
+    : "";
+  const execution = owner
+    ? {
+        taskId: owner,
+        request,
+        report,
+        requestedAt,
+        status: outcome,
+        startedAt: session.taskStartedAt ?? Date.now(),
+        endedAt: Date.now(),
+        durationMs: session.taskStartedAt ? Date.now() - session.taskStartedAt : null,
+        plan: session.plan,
+        actions: session.actions,
+        diffs: session.liveDiffs,
+        logs: session.items.filter(
+          (item) => item.taskId === owner && item.role === "log"
+        ),
+      }
+    : null;
+  return {
+    activeTaskId: null,
+    thinking: "",
+    stage: null,
+    taskStartedAt: null,
+    cancelling: false,
+    actions: [],
+    liveDiffs: [],
+    plan: null,
+    executions: execution
+      ? sortExecutions([
+          ...session.executions.filter((item) => item.taskId !== owner),
+          execution,
+        ])
+      : session.executions,
+    status: outcome === "error" ? "error" : "idle",
+    lastError: outcome === "error" ? (error ?? "task failed") : null,
+  };
+}
+
+function sortExecutions(executions: ExecutionTimelineVm[]): ExecutionTimelineVm[] {
+  return [...executions].sort(
+    (left, right) => left.requestedAt - right.requestedAt
+  );
+}
 
 /** Below this, a freshly started sentence keeps the previous one for company. */
 const MIN_LIVE_CHARS = 24;

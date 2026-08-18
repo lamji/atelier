@@ -29,7 +29,9 @@ export function useTerminalViewModel() {
   const sessions = useTerminalStore((s) => s.sessions);
   const labels = useTerminalStore((s) => s.labels);
   const activeTermId = useTerminalStore((s) => s.activeTermId);
+  const profile = useTerminalStore((s) => s.profile);
   const setActive = useTerminalStore((s) => s.setActive);
+  const setProfile = useTerminalStore((s) => s.setProfile);
   const theme = useThemeStore((s) => s.theme);
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -100,6 +102,10 @@ export function useTerminalViewModel() {
     terminalRegistry.setTheme(theme === "dark");
   }, [theme]);
 
+  useEffect(() => {
+    terminalRegistry.setProfile(profile);
+  }, [profile]);
+
   const create = useCallback(async () => {
     try {
       const name = nextTerminalName(currentNames());
@@ -135,7 +141,8 @@ export function useTerminalViewModel() {
   // to re-run (a new mount reference would wrongly re-trigger effects).
   const mount = useCallback((termId: string, container: HTMLElement) => {
     const dark = useThemeStore.getState().theme === "dark";
-    terminalRegistry.mount(termId, container, dark);
+    const profile = useTerminalStore.getState().profile;
+    terminalRegistry.mount(termId, container, dark, { profile });
   }, []);
 
   const refit = useCallback((termId: string) => {
@@ -159,8 +166,10 @@ export function useTerminalViewModel() {
     sessions: labelled,
     activeTermId,
     isDark: theme === "dark",
+    profile,
     searchOpen,
     setActive,
+    setProfile,
     create,
     kill,
     rename,

@@ -2,6 +2,8 @@ import { useConnectionStore } from "./connection.store";
 import { useDbApprovalStore } from "./db-approval.store";
 import { useGitStore } from "./git.store";
 import { useGitFlowStore } from "./git-flow.store";
+import { useGitMergeStore } from "./git-merge.store";
+import { useAlertsStore } from "./alerts.store";
 import { useKnowledgeStore } from "./knowledge.store";
 import { useMarkdownStore } from "./markdown.store";
 import { useSessionsStore } from "./sessions.store";
@@ -31,9 +33,12 @@ export function resetWorkspaceStores(): void {
     stateVersion: 0,
     live: null,
     gitDiff: null,
+    gitDiffLoading: null,
     error: null,
   });
   useGitFlowStore.getState().close();
+  useGitMergeStore.getState().reset();
+  useAlertsStore.getState().clear();
   // clear(), not setState: the store keeps a module-level dedupe index of
   // "topic:seq" keys, and each agent's seq restarts low — leaving it would
   // make the new project's first events look like duplicates and vanish.
@@ -50,7 +55,13 @@ export function resetWorkspaceStores(): void {
   useTerminalStore.setState({ sessions: [], activeTermId: null });
   useDbApprovalStore.setState({ requests: [] });
   useUsageStore.setState({
-    usage: { available: false, status: null, windows: [], updatedAt: null },
+    usage: {
+      available: false,
+      status: null,
+      windows: [],
+      ollamaCloudUsage: [],
+      updatedAt: null,
+    },
   });
   useContextStore.setState({ requests: [] });
   useWorkspaceStore.setState((s) => ({

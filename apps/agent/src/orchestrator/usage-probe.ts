@@ -95,12 +95,19 @@ export async function probeUsage(cwd: string): Promise<UsageSnapshot | null> {
 
     const response = await read.call(session);
     if (!response?.rate_limits_available || !response.rate_limits) {
-      return { available: false, status: null, windows: [], updatedAt: Date.now() };
+      return {
+        available: false,
+        status: null,
+        windows: [],
+        ollamaCloudUsage: [],
+        updatedAt: Date.now(),
+      };
     }
     return {
       available: true,
       status: null,
       windows: toWindows(response.rate_limits),
+      ollamaCloudUsage: [],
       updatedAt: Date.now(),
     };
   } catch {

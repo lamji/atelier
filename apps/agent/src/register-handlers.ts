@@ -9,6 +9,7 @@ import type { RetrieverLike } from "./context/cache/index.js";
 import type { ValidationRunners } from "./validation/runners.js";
 import type { EventBus } from "./events/event-bus.js";
 import type { SettingsRepo } from "./storage/repositories/settings.js";
+import { inspectWiki, type WikiStore } from "./knowledge/wiki/index.js";
 
 /**
  * Wires RPC handlers that are already real in Phase 1. Everything not
@@ -26,7 +27,8 @@ export function registerMiscHandlers(
   lessons: LessonStore,
   validators: ValidationRunners,
   bus: EventBus,
-  settings: SettingsRepo
+  settings: SettingsRepo,
+  wiki?: WikiStore
 ): void {
   const runValidation = async (
     kind: "lint" | "test" | "typecheck"
@@ -60,6 +62,9 @@ export function registerMiscHandlers(
   router.register("knowledge.lessons.list", (params) => ({
     lessons: lessons.list(params?.limit ?? 50),
   }));
+  router.register("knowledge.wiki.list", () =>
+    wiki ? inspectWiki(wiki) : { pages: [], lint: [] }
+  );
   router.register("knowledge.symbol", (params) => ({
     symbol: knowledge.symbol(params.id),
   }));

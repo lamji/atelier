@@ -2,7 +2,13 @@ import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GitFlowInfo, GitOpResult } from "@atelier/protocol";
+import type {
+  GitConflictFile,
+  GitFlowInfo,
+  GitOpResult,
+  GitPullMode,
+  GitRefs,
+} from "@atelier/protocol";
 import type { GitService } from "./git-service.js";
 
 /**
@@ -39,8 +45,17 @@ function assertPushFlags(flags: string[]): void {
 /** Retained output is capped to this tail; streaming is unaffected. */
 const MAX_OUTPUT_CHARS = 64_000;
 
-/** Fail fast instead of hanging on an interactive credential prompt. */
-const NO_PROMPT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+/**
+ * Fail fast instead of hanging on an interactive credential prompt, and
+ * never open an editor: `:` is git's documented no-op editor, so a merge
+ * commit or `rebase --continue` takes the prepared message as-is instead
+ * of blocking on a vim nobody can see.
+ */
+const NO_PROMPT_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_EDITOR: ":",
+};
 // Strips CSI (colors/cursor) and OSC (title/link) escape sequences.
 const ANSI_RE = /\u001b\[[0-9;?]*[A-Za-z]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
 
@@ -133,12 +148,21 @@ export async function commitRun(
 export async function pushRun(
   root: string,
   flags: string[],
-  io: OpIo
+  io: OpIo,
+  target?: { remote?: string; branch?: string; setUpstream?: boolean }
 ): Promise<GitOpResult> {
   assertPushFlags(flags);
 
   const args = ["push", ...flags];
   const branch = await currentBranch(root);
+  if (target?.remote) {
+    // Explicit target from the "Push to" picker: current branch to
+    // <remote>/<branch>, optionally adopting it as upstream.
+    const remoteBranch = target.branch || branch;
+    if (target.setUpstream) args.push("-u");
+    args.push(target.remote, `${branch}:${remoteBranch}`);
+    return runStreaming("git", args, root, io);
+  }
   if ((await upstreamBranch(root, branch)) !== branch) {
     args.push("-u", "origin", branch);
   }
@@ -485,6 +509,96 @@ export async function checkConflicts(
   return { mergeable: false, conflicts };
 }
 
+/**
+ * Local + remote refs from the ref store — what the pull/push/checkout
+ * pickers list. No network: a stale list is refreshed by Fetch, and a
+ * picker that blocks on the network is a picker nobody opens twice.
+ */
+export async function refs(root: string): Promise<GitRefs> {
+  const [current, remotesOut, localOut, remoteOut] = await Promise.all([
+    currentBranch(root).catch(() => "HEAD"),
+    capture("git", ["remote", "-v"], root),
+    capture(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)%09%(upstream:short)", "refs/heads"],
+      root
+    ),
+    capture(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+      root
+    ),
+  ]);
+  const remotes = new Map<string, string>();
+  for (const line of remotesOut.out.split("\n")) {
+    const m = line.match(/^(\S+)\s+(\S+)\s+\(fetch\)$/);
+    if (m) remotes.set(m[1] ?? "", m[2] ?? "");
+  }
+  const local = localOut.out
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [name = "", upstream = ""] = line.split("\t");
+      return { name, upstream: upstream || null };
+    });
+  const remote = remoteOut.out
+    .split("\n")
+    .filter((ref) => ref && !/\/HEAD$/.test(ref))
+    .map((ref) => {
+      const slash = ref.indexOf("/");
+      return {
+        ref,
+        remote: slash === -1 ? "" : ref.slice(0, slash),
+        branch: slash === -1 ? ref : ref.slice(slash + 1),
+      };
+    });
+  return {
+    current,
+    remotes: [...remotes.entries()].map(([name, url]) => ({ name, url })),
+    local,
+    remote,
+  };
+}
+
+/**
+ * Streamed checkout. `--track <remote>/<b>` checks out a remote branch as a
+ * local tracking one; `-b <ref> [start]` branches out, from `opts.from`
+ * when the caller picked a base and from HEAD otherwise.
+ *
+ * Branching out of a REMOTE base gets `--no-track`: git would otherwise
+ * make the new branch track the base, so a later push would target
+ * someone else's branch instead of creating this one.
+ */
+export async function checkoutRun(
+  root: string,
+  ref: string,
+  io: OpIo,
+  opts?: { create?: boolean; track?: string; from?: string }
+): Promise<GitOpResult> {
+  const args = ["checkout"];
+  if (opts?.track) {
+    args.push("--track", opts.track);
+  } else if (opts?.create) {
+    const from = opts.from?.trim();
+    if (from && (await isRemoteRef(root, from))) args.push("--no-track");
+    args.push("-b", ref);
+    if (from) args.push(from);
+  } else {
+    args.push(ref);
+  }
+  return runStreaming("git", args, root, io);
+}
+
+/** True when `name` resolves to a remote-tracking ref ("origin/main"). */
+async function isRemoteRef(root: string, name: string): Promise<boolean> {
+  const { code } = await capture(
+    "git",
+    ["rev-parse", "--verify", "--quiet", `refs/remotes/${name}`],
+    root
+  );
+  return code === 0;
+}
+
 /** Snapshot the wizard uses to pick its starting stage. */
 export async function flowInfo(git: GitService): Promise<GitFlowInfo> {
   const root = git.root;
@@ -549,4 +663,195 @@ async function defaultBranch(root: string): Promise<string> {
     return sym.out.slice("origin/".length);
   }
   return "main";
+}
+
+// ── Sync + merge-conflict resolution ─────────────────────────────────────
+
+/** Quiet `git fetch`, then the fresh ahead/behind of the current branch. */
+export async function fetchRun(
+  git: GitService
+): Promise<{ ahead: number; behind: number }> {
+  const root = git.root;
+  const fetched = await capture("git", ["fetch", "--prune"], root);
+  if (fetched.code !== 0) throw new Error(fetched.out || "git fetch failed");
+  const status = await git.status();
+  return { ahead: status.ahead, behind: status.behind };
+}
+
+const PULL_MODE_FLAG: Record<GitPullMode, string> = {
+  merge: "--no-rebase",
+  rebase: "--rebase",
+  "ff-only": "--ff-only",
+};
+
+/**
+ * Streamed `git pull`. The reconcile mode is always explicit: modern git
+ * refuses a bare `pull` on a diverged branch until pull.rebase is set,
+ * and the panel should never fail on a config the user has not touched.
+ *
+ * A conflicted exit is an expected outcome — the caller reads
+ * `conflicts` and opens the resolver — so it resolves rather than throws.
+ */
+export async function pullRun(
+  git: GitService,
+  mode: GitPullMode,
+  io: OpIo,
+  source?: { remote?: string; branch?: string }
+): Promise<{ result: GitOpResult; conflicts: string[] }> {
+  const root = git.root;
+  const args = ["pull", PULL_MODE_FLAG[mode], "--no-edit"];
+  if (source?.remote) {
+    args.push(source.remote);
+    if (source.branch) args.push(source.branch);
+  }
+  const result = await runStreaming("git", args, root, io);
+  const conflicts = result.ok ? [] : await unmergedPaths(git);
+  return { result, conflicts };
+}
+
+async function unmergedPaths(git: GitService): Promise<string[]> {
+  try {
+    return (await git.status()).conflicts;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * All three sides of one conflicted file plus its marked-up working copy.
+ * The labels travel with the payload so the resolver names the sides the
+ * same way the merge banner does.
+ */
+export async function conflictFile(
+  git: GitService,
+  relPath: string
+): Promise<GitConflictFile> {
+  const status = await git.status();
+  const [base, ours, theirs] = await Promise.all([
+    git.stageContent(relPath, 1),
+    git.stageContent(relPath, 2),
+    git.stageContent(relPath, 3),
+  ]);
+  return {
+    path: relPath,
+    base,
+    ours,
+    theirs,
+    current: git.readWorking(relPath),
+    oursLabel: status.mergeState?.ours ?? status.branch,
+    theirsLabel: status.mergeState?.theirs ?? "incoming",
+    resolved: !status.conflicts.includes(relPath),
+  };
+}
+
+/**
+ * Persists the resolver's buffer. Staging is what tells git the conflict
+ * is settled, so it is a separate, explicit step from autosave.
+ */
+export async function resolveConflict(
+  git: GitService,
+  relPath: string,
+  content: string,
+  stage: boolean
+): Promise<void> {
+  git.writeWorking(relPath, content);
+  if (stage) await git.stage([relPath]);
+  else git.scheduleRefresh();
+}
+
+/**
+ * Take one whole side. `checkout --ours/--theirs` needs that side to
+ * exist in the index; when it does not (deleted on that side, added on
+ * the other) taking it means removing the file — which is what
+ * `git rm` does, and what the user asked for.
+ */
+export async function resolveConflictWith(
+  git: GitService,
+  relPaths: string[],
+  side: "ours" | "theirs"
+): Promise<void> {
+  const stage = side === "ours" ? 2 : 3;
+  for (const relPath of relPaths) {
+    const { root, repoRel } = git.locate(relPath);
+    const exists = (await git.stageContent(relPath, stage)) !== "";
+    if (exists) {
+      const out = await capture(
+        "git",
+        ["checkout", `--${side}`, "--", repoRel],
+        root
+      );
+      if (out.code !== 0) throw new Error(out.out || `checkout --${side} failed`);
+      const added = await capture("git", ["add", "--", repoRel], root);
+      if (added.code !== 0) throw new Error(added.out || "git add failed");
+    } else {
+      const removed = await capture("git", ["rm", "-q", "--", repoRel], root);
+      if (removed.code !== 0) throw new Error(removed.out || "git rm failed");
+    }
+  }
+  await git.refresh();
+}
+
+/** Puts the markers back so a resolution can be redone from scratch. */
+export async function restoreConflict(
+  git: GitService,
+  relPath: string
+): Promise<void> {
+  const { root, repoRel } = git.locate(relPath);
+  const out = await capture("git", ["checkout", "-m", "--", repoRel], root);
+  if (out.code !== 0) throw new Error(out.out || "Could not restore conflict");
+  await git.refresh();
+}
+
+const MARKER_RE = /^(?:<{7}(?: |$)|={7}$|>{7}(?: |$)|\|{7}(?: |$))/m;
+
+/** Splits `paths` by whether conflict markers are still on disk. */
+export function scanConflictMarkers(
+  git: GitService,
+  relPaths: string[]
+): { clean: string[]; dirty: string[] } {
+  const clean: string[] = [];
+  const dirty: string[] = [];
+  for (const relPath of relPaths) {
+    const text = git.readWorking(relPath);
+    (MARKER_RE.test(text) ? dirty : clean).push(relPath);
+  }
+  return { clean, dirty };
+}
+
+/** Rolls back whichever operation is mid-flight. */
+export async function mergeAbort(git: GitService): Promise<void> {
+  const status = await git.status();
+  const kind = status.mergeState?.kind;
+  if (!kind) {
+    throw new Error("No merge, rebase, cherry-pick or revert is in progress");
+  }
+  const out = await capture("git", [kind, "--abort"], git.root);
+  if (out.code !== 0) throw new Error(out.out || `git ${kind} --abort failed`);
+  await git.refresh();
+}
+
+/**
+ * Finishes the operation in flight. A merge is completed by committing —
+ * with the user's message when they edited it, else the MERGE_MSG git
+ * prepared; the others continue. git refuses on its own while paths are
+ * still unmerged, and that refusal streams to the UI like any other run.
+ */
+export async function mergeContinueRun(
+  git: GitService,
+  message: string | undefined,
+  io: OpIo
+): Promise<GitOpResult> {
+  const status = await git.status();
+  const kind = status.mergeState?.kind;
+  if (!kind) {
+    throw new Error("No merge, rebase, cherry-pick or revert is in progress");
+  }
+  const trimmed = message?.trim();
+  const args =
+    kind === "merge"
+      ? trimmed
+        ? ["commit", "-m", trimmed]
+        : ["commit", "--no-edit"]
+      : [kind, "--continue"];
+  return runStreaming("git", args, git.root, io);
 }

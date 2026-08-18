@@ -26,9 +26,9 @@ export function OpeningScreen() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="relative flex h-full flex-col bg-background">
       <BareTitleBar />
-      <main className="flex min-h-0 flex-1 items-center justify-center px-6 pb-10">
+      <main className="flex min-h-0 flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md">
           {switching ? (
             <div className="flex items-center gap-2.5 text-[13px] text-muted-foreground">

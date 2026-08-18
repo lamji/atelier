@@ -47,6 +47,10 @@ fs.copyFileSync(
   path.join(root, "src", "storage", "schema.sql"),
   path.join(outDir, "schema.sql"),
 );
+fs.cpSync(path.join(root, "skills"), path.join(outDir, "skills"), {
+  recursive: true,
+  force: true,
+});
 
 if (watch) {
   const ctx = await esbuild.context(options);

@@ -18,6 +18,7 @@ export async function probeGrokModels(): Promise<ModelOption[]> {
       description: describe(model),
       provider: "grok" as const,
       supportsEffort: true,
+      supportsImages: model.inputModalities.includes("image"),
       reasoningLevels: ["low", "medium", "high"] as ModelOption["reasoningLevels"],
     }));
 }

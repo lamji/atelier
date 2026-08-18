@@ -20,6 +20,8 @@ export const ModelOption = z.object({
   /** Canonical wire id the value resolves to, when the SDK reports it. */
   resolvedModel: z.string().optional(),
   supportsEffort: z.boolean().optional(),
+  /** Whether this row accepts image attachments as model input. */
+  supportsImages: z.boolean().optional(),
   /** Exact reasoning effort values this row supports, when the provider reports them. */
   reasoningLevels: z.array(ReasoningEffort).optional(),
   /** Which backend serves this row. */

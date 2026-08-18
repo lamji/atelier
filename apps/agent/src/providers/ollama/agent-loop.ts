@@ -1,8 +1,9 @@
+import { approxTokens } from "@atelier/shared";
 import type { ImageAttachment } from "@atelier/protocol";
 import type { ToolRegistry } from "../../tools/registry.js";
 import { shapeToolOutput } from "../../context/tool-output/index.js";
 import type { OllamaTarget } from "../model-routing.js";
-import { setModelSubscriptionRequired } from "../credentials.js";
+import { OLLAMA_CLOUD, setModelSubscriptionRequired } from "../credentials.js";
 import {
   editsOf,
   explainEditFailure,
@@ -18,7 +19,7 @@ import {
   resolveNumCtx,
   supportsThinking,
 } from "./client.js";
-import { recordUsage } from "./usage.js";
+import { recordCloudUsage } from "./usage.js";
 
 /**
  * Idle cap, not a total cap. With streaming on, "no bytes for two minutes"
@@ -34,6 +35,29 @@ const TOOL_BUDGET_FINAL_INSTRUCTION =
   "tools. Give the user a concise final response stating what you completed, " +
   "what remains, and any blocker.";
 
+/**
+ * Verbatim chat turns seeded into a task's first Ollama call.
+ *
+ * Ollama has no session id to resume, so without this the model meets every
+ * follow-up ("it's still not fixed") with no idea what it answered a minute
+ * ago. The compressed recall block in the system prompt is a summary of the
+ * exchange; these are the exchange.
+ */
+const MAX_PRIOR_TURNS = 6;
+
+/** How far a single seeded turn is quoted. */
+const MAX_PRIOR_TURN_CHARS = 1_600;
+
+/**
+ * Share of the model's window the carried history may take.
+ *
+ * The rest pays for the system prompt, the tool schemas and this call's own
+ * tool loop. Ollama truncates an over-long prompt daemon-side, in silence
+ * and from the front, so the budget has to be enforced here where the
+ * original request can be protected.
+ */
+const HISTORY_SHARE = 0.3;
+
 type JsonSchema = Record<string, unknown>;
 
 interface OllamaToolCall {
@@ -43,7 +67,7 @@ interface OllamaToolCall {
   };
 }
 
-interface OllamaMessage {
+export interface OllamaMessage {
   role: "system" | "user" | "assistant" | "tool";
   content?: string;
   /** Reasoning models stream their hidden pass here, apart from content. */
@@ -61,6 +85,35 @@ interface OllamaChatResponse {
   total_duration?: number;
 }
 
+/** One earlier exchange in the chat, as it was actually written. */
+export interface PriorTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/**
+ * One task's live Ollama transcript, owned by the caller.
+ *
+ * Claude keeps this inside the SDK and Atelier resumes it by id. Ollama's
+ * /api/chat is stateless, so the array itself is the session: the pipeline
+ * holds one per task and hands it back on every call the task makes — the
+ * execute pass, a nudge to implement, a completion-gate retry, a validation
+ * fix round. Without it each of those restarts from an empty transcript and
+ * re-reads every file the pass before it had already read.
+ */
+export interface OllamaTranscript {
+  /** Everything but the system message, which is rebuilt per call. */
+  messages: OllamaMessage[];
+  /**
+   * Files this task has already read, across passes. The blind-edit guard is
+   * per-pass by design, but once the transcript carries over, a pass that can
+   * SEE its own earlier read would still be refused the edit tools and have
+   * to read the file again to earn them — the exact read/plan/read loop the
+   * carried transcript exists to end.
+   */
+  readPaths?: string[];
+}
+
 export interface OllamaAgentLoopOptions {
   model: string;
   /** Which endpoint serves this model — the daemon here, or the cloud. */
@@ -68,6 +121,17 @@ export interface OllamaAgentLoopOptions {
   system: string;
   prompt: string;
   images?: ImageAttachment[];
+  /**
+   * The chat before this turn, oldest first. Seeds a task's FIRST call; a
+   * later call in the same task inherits them through `transcript`.
+   */
+  priorTurns?: PriorTurn[];
+  /**
+   * The task's transcript. Present = continue it and write this call's
+   * messages back into it. Absent = a deliberately independent session,
+   * which is what the review stage runs.
+   */
+  transcript?: OllamaTranscript;
   tools: ToolRegistry;
   /**
    * Read side of the workspace, for the edit-repair pass. It is the same
@@ -82,6 +146,13 @@ export interface OllamaAgentLoopOptions {
    */
   toolNames?: string[];
   /**
+   * Files whose exact current content the system context already carries
+   * (the pipeline's "previously gathered" block). They count as read for
+   * the blind-edit guard: demanding a read_file of bytes the model is
+   * already holding was the loop that made every follow-up start over.
+   */
+  preGrounded?: string[];
+  /**
    * The task's reasoning-effort pick. On a model with the thinking
    * capability this decides the hidden pass: high effort turns it on,
    * everything else turns it OFF. Thinking is where a reasoning model
@@ -93,8 +164,64 @@ export interface OllamaAgentLoopOptions {
   taskId: string;
   signal: AbortSignal;
   emitText: (delta: string) => void;
+  /**
+   * Live evidence checked before a no-tool response may become the final
+   * report. The pipeline owns the evidence; the provider loop only enforces
+   * the verdict while it still has the same transcript and tool results.
+   */
+  completionGate?: () => string;
+  /** Announces a refused report on the shared hook rail. */
+  onCompletionBlocked?: (reason: string) => void;
   /** Thinking deltas, for the same live surface Claude's thinking uses. */
   emitThinking?: (delta: string) => void;
+  /**
+   * Called before EVERY /api/chat round with what is about to be sent.
+   * The pipeline turns it into the timeline's "sent to model" row; the
+   * loop only knows the numbers (window, transcript size, tools offered).
+   */
+  onRequest?: (info: OllamaRequestInfo) => void;
+}
+
+export interface OllamaRequestInfo {
+  /** 0 is the opening request; every tool round after it counts up. */
+  round: number;
+  /** The context window this request asks for (num_ctx). */
+  contextWindow: number;
+  toolsOffered: number;
+  /** One entry per message in the replayed transcript, sized. */
+  transcript: Array<{ role: string; chars: number; label?: string }>;
+  /** Total characters of the transcript, for a token estimate. */
+  transcriptChars: number;
+  /** Older tool results whose bodies were elided to fit the window. */
+  elided: number;
+}
+
+/**
+ * Sizes the transcript for the request row without copying it. Tool
+ * results carry the tool's name and assistant messages the tools they
+ * called, which is enough to see WHICH round blew the window and why.
+ */
+export function describeTranscript(
+  messages: OllamaMessage[]
+): Pick<OllamaRequestInfo, "transcript" | "transcriptChars"> {
+  let transcriptChars = 0;
+  const transcript = messages.map((message) => {
+    const chars =
+      (message.content?.length ?? 0) +
+      (message.thinking?.length ?? 0) +
+      (message.tool_calls ? safeJson(message.tool_calls).length : 0);
+    transcriptChars += chars;
+    const label =
+      message.role === "tool"
+        ? message.tool_name
+        : message.tool_calls && message.tool_calls.length > 0
+          ? `calls ${message.tool_calls
+              .map((call) => call.function?.name ?? "?")
+              .join(", ")}`
+          : undefined;
+    return { role: message.role, chars, ...(label ? { label } : {}) };
+  });
+  return { transcript, transcriptChars };
 }
 
 /**
@@ -106,29 +233,70 @@ export interface OllamaAgentLoopOptions {
 export async function runOllamaAgentLoop(
   opts: OllamaAgentLoopOptions
 ): Promise<string> {
-  const messages: OllamaMessage[] = [
-    { role: "system", content: opts.system },
-    userMessage(opts.prompt, opts.images),
-  ];
-  let text = "";
-  /** Failing calls, by signature — see noteFailure. */
-  const failures = new Map<string, number>();
-  // Ollama does not have the SDK's persistent working-set awareness. Keep a
-  // small, per-turn proof ledger so stale retrieval or session summaries can
-  // inform investigation but can never authorize a blind patch.
-  const grounding: EditGrounding = {
-    required: true,
-    discovered: false,
-    readPaths: new Set<string>(),
-  };
-  const callDeps: ToolCallDeps = { ...opts, grounding };
-
   const offered = atelierToolsFor(opts.toolNames);
   const target = opts.target ?? "ollama-cloud";
   // Sized from the model, once per run. The tool loop replays every result
   // on every turn, so this is the number that decides whether the rules and
   // the assembled context survive to the end of the task.
   const numCtx = await resolveNumCtx(opts.model, target);
+  const messages = buildMessages({
+    system: opts.system,
+    prompt: opts.prompt,
+    numCtx,
+    ...(opts.images ? { images: opts.images } : {}),
+    ...(opts.priorTurns ? { priorTurns: opts.priorTurns } : {}),
+    ...(opts.transcript ? { transcript: opts.transcript } : {}),
+  });
+  // Ollama does not have the SDK's persistent working-set awareness. Keep a
+  // small proof ledger so stale retrieval or session summaries can inform
+  // investigation but can never authorize a blind patch. It spans the task's
+  // passes with the transcript, and nothing wider.
+  const grounding: EditGrounding = {
+    required: true,
+    discovered: false,
+    readPaths: new Set<string>(),
+    // Repeated-read detection stays per-pass: a fresh pass opening with a
+    // verification read of a file it changed is doing the right thing.
+    readCalls: new Set<string>(),
+  };
+  for (const path of [
+    ...(opts.preGrounded ?? []),
+    ...(opts.transcript?.readPaths ?? []),
+  ]) {
+    grounding.readPaths.add(pathKey(path));
+    grounding.discovered = true;
+  }
+  // The transcript is this task's session. Committed in a finally so a
+  // cancelled or failed pass still leaves its reads to the pass that
+  // follows — re-reading the same files is the cost this exists to avoid.
+  const commit = (): void => {
+    if (!opts.transcript) return;
+    opts.transcript.messages = messages.slice(1);
+    opts.transcript.readPaths = [...grounding.readPaths];
+  };
+  try {
+    return await toolLoop(opts, messages, grounding, offered, target, numCtx);
+  } finally {
+    commit();
+  }
+}
+
+async function toolLoop(
+  opts: OllamaAgentLoopOptions,
+  messages: OllamaMessage[],
+  grounding: EditGrounding,
+  offered: JsonSchema[],
+  target: OllamaTarget,
+  numCtx: number
+): Promise<string> {
+  let text = "";
+  /** Failing calls, by signature — see noteFailure. */
+  const failures = new Map<string, number>();
+  /** Tool calls run, and the last report the gate refused — see endOfTurn. */
+  let toolCalls = 0;
+  let refused = "";
+  const callDeps: ToolCallDeps = { ...opts, grounding };
+
   // Only sent to models that advertise the capability — /api/chat rejects
   // `think` on anything else. High effort opts in; the default is OFF,
   // because the hidden pass re-runs before every tool round and is the
@@ -139,28 +307,58 @@ export async function runOllamaAgentLoop(
     : undefined;
 
   for (let turn = 0; turn < MAX_TOOL_ROUNDS; turn++) {
-    // Streamed, and the deltas go straight to the UI as they arrive — the
-    // same behavior the Claude path has always had. Before this the whole
-    // response was buffered, so an Ollama turn read as "nothing, nothing,
-    // everything" however fast the model actually was.
+    // Buffer visible text until the response boundary reveals whether this
+    // is a tool call, an incomplete report the completion hook must refuse,
+    // or the one final report that is safe to render.
+    let roundText = "";
+    const roundTools = groundedToolsFor(offered, grounding);
+    // Ollama drops whatever does not fit the window on its own terms —
+    // oldest messages first, then the front of the token stream, which is
+    // the rules. Eliding old tool results HERE keeps the drop deliberate
+    // and visible instead of silent, and keeps the rules intact.
+    const elided = fitToWindow(messages, numCtx, roundTools.length);
+    announceRound(opts, turn, messages, roundTools, numCtx, elided);
     const message = await ollamaChatStreaming(
       opts.model,
       target,
       messages,
-      groundedToolsFor(offered, grounding),
+      roundTools,
       numCtx,
       think,
       opts.signal,
       (delta) => {
-        text += delta;
-        opts.emitText(delta);
+        roundText += delta;
       },
       opts.emitThinking
     );
     messages.push(message);
 
     const calls = message.tool_calls?.filter((call) => call.function?.name) ?? [];
-    if (calls.length === 0) return text;
+    if (calls.length === 0) {
+      const outstanding = opts.completionGate?.() ?? "";
+      if (outstanding) {
+        // Ollama has no native Stop hook. Treat a no-tool answer as its Stop
+        // boundary, keep the candidate report off chat, and feed the live
+        // reason back into this SAME transcript so the model can still use
+        // every read and tool result it already paid for.
+        opts.onCompletionBlocked?.(outstanding);
+        // Kept, not shown. If the rounds run out before the gate clears, this
+        // is the only account of what the model believed it had done, and a
+        // turn that reports nothing at all is worse than one that reports
+        // unfinished work with the verdict attached.
+        if (roundText.trim()) refused = roundText;
+        messages.push({ role: "user", content: outstanding });
+        continue;
+      }
+      text += roundText;
+      if (roundText) opts.emitText(roundText);
+      return endOfTurn(opts, text, {
+        rounds: turn + 1,
+        toolCalls,
+        refused,
+        outstanding: "",
+      });
+    }
 
     // A round whose calls are ALL read-only runs them concurrently — the
     // model batched them because it needs the results together, and each
@@ -179,6 +377,7 @@ export async function runOllamaAgentLoop(
           )
         )
       : await runSequential(named, callDeps);
+    toolCalls += named.length;
     named.forEach((call, i) => {
       messages.push({
         role: "tool",
@@ -188,11 +387,24 @@ export async function runOllamaAgentLoop(
     });
   }
 
-  // This budget belongs only to this invocation; the next follow-up calls
-  // runOllamaAgentLoop again with a new transcript and starts at round zero.
-  // If this prompt used every tool round, force one tool-free completion so
-  // the user gets a useful handoff instead of a misleading red loop error.
+  // This budget belongs only to this invocation; the pipeline's next pass
+  // starts at round zero (with the transcript, not the rounds, carried over).
+  // Never spend the forced tool-free handoff on an incomplete implementation:
+  // the pipeline can start another bounded pass, but it cannot retract a
+  // partial report once chat has rendered it.
+  const outstanding = opts.completionGate?.() ?? "";
+  if (outstanding) {
+    opts.onCompletionBlocked?.(outstanding);
+    return endOfTurn(opts, text, {
+      rounds: MAX_TOOL_ROUNDS,
+      toolCalls,
+      refused,
+      outstanding,
+    });
+  }
   messages.push({ role: "system", content: TOOL_BUDGET_FINAL_INSTRUCTION });
+  let finalText = "";
+  announceRound(opts, MAX_TOOL_ROUNDS, messages, [], numCtx, fitToWindow(messages, numCtx, 0));
   await ollamaChatStreaming(
     opts.model,
     target,
@@ -202,12 +414,144 @@ export async function runOllamaAgentLoop(
     think,
     opts.signal,
     (delta) => {
-      text += delta;
-      opts.emitText(delta);
+      finalText += delta;
     },
     opts.emitThinking
   );
-  return text;
+  text += finalText;
+  if (finalText) opts.emitText(finalText);
+  return endOfTurn(opts, text, {
+    rounds: MAX_TOOL_ROUNDS,
+    toolCalls,
+    refused,
+    outstanding: "",
+  });
+}
+
+/**
+ * A turn must never end silently.
+ *
+ * An empty return renders as "No final report was recorded for this request",
+ * and — the part that actually compounds — it is what the task summary stores,
+ * so the NEXT turn recalls a task with no record of what was done. The user is
+ * then the only one who remembers, which is how a session turns into "is it
+ * fixed?" / "it's not" four times over. Every silent ending has an account
+ * available: the rounds spent, the tools run, and the report the completion
+ * gate refused.
+ */
+function endOfTurn(
+  opts: OllamaAgentLoopOptions,
+  text: string,
+  run: {
+    rounds: number;
+    toolCalls: number;
+    refused: string;
+    outstanding: string;
+  }
+): string {
+  if (text.trim()) return text;
+  const lines = [
+    "_This turn produced no final report._",
+    `- ${run.rounds} tool round(s) spent, ${run.toolCalls} tool call(s) run`,
+  ];
+  if (run.outstanding) {
+    lines.push(`- work still outstanding: ${run.outstanding}`);
+  }
+  if (run.refused.trim()) {
+    lines.push(
+      "- the model's last progress note, refused as a final report because " +
+        "the work above was unfinished:",
+      `> ${clipReport(run.refused).replaceAll("\n", "\n> ")}`
+    );
+  }
+  const note = lines.join("\n");
+  opts.emitText(note);
+  return note;
+}
+
+/** Enough of a refused report to recognise the work, never the whole thing. */
+function clipReport(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > 800 ? `${trimmed.slice(0, 800)}…` : trimmed;
+}
+
+function announceRound(
+  opts: OllamaAgentLoopOptions,
+  round: number,
+  messages: OllamaMessage[],
+  tools: JsonSchema[],
+  numCtx: number,
+  elided: number
+): void {
+  if (!opts.onRequest) return;
+  try {
+    opts.onRequest({
+      round,
+      contextWindow: numCtx,
+      toolsOffered: tools.length,
+      elided,
+      ...describeTranscript(messages),
+    });
+  } catch {
+    // A reporting problem must never stop the round.
+  }
+}
+
+/**
+ * Share of the window a request may fill before old tool results go. The
+ * rest is headroom for the answer and for the estimate being rough.
+ */
+const WINDOW_FILL = 0.85;
+/** The newest tool results are what the model is reasoning about; kept. */
+const KEEP_RECENT_TOOL_RESULTS = 4;
+/** Rough cost of one offered tool schema, in tokens. */
+const TOOL_SCHEMA_TOKENS = 60;
+const ELIDED_MARK = "[elided";
+
+/**
+ * Keeps the request inside the context window by eliding the BODIES of
+ * older tool results, oldest first, until it fits. The system prompt, the
+ * user's request, every assistant message and the newest tool results are
+ * never touched.
+ *
+ * Without this the transcript of a long tool loop simply outgrew the
+ * window and Ollama truncated it silently: the model then answered from
+ * rules it could no longer see and file contents it no longer had — the
+ * confident, wrong turn that reads as hallucination. An elided result says
+ * it was elided and how to get it back, which is a very different thing
+ * from a result that vanished. Returns how many results were elided.
+ */
+export function fitToWindow(
+  messages: OllamaMessage[],
+  numCtx: number,
+  toolsOffered: number
+): number {
+  const limit = Math.floor(numCtx * WINDOW_FILL) - toolsOffered * TOOL_SCHEMA_TOKENS;
+  let total = messages.reduce((sum, message) => sum + messageTokens(message), 0);
+  if (total <= limit) return 0;
+  const toolIndexes = messages
+    .map((message, index) => (message.role === "tool" ? index : -1))
+    .filter((index) => index >= 0);
+  const candidates = toolIndexes.slice(
+    0,
+    Math.max(0, toolIndexes.length - KEEP_RECENT_TOOL_RESULTS)
+  );
+  let elided = 0;
+  for (const index of candidates) {
+    if (total <= limit) break;
+    const message = messages[index]!;
+    const body = message.content ?? "";
+    if (body.length < 400 || body.startsWith(ELIDED_MARK)) continue;
+    const before = messageTokens(message);
+    const head = body.slice(0, 160).replace(/\s+/g, " ");
+    message.content =
+      `${ELIDED_MARK} to fit the ${numCtx}-token context window: this ` +
+      `${message.tool_name ?? "tool"} result was ${body.length} chars and ` +
+      `began "${head}…". Call the tool again if you need it.]`;
+    total -= before - messageTokens(message);
+    elided += 1;
+  }
+  return elided;
 }
 
 /** Tools that cannot mutate the workspace, safe to run concurrently. */
@@ -229,7 +573,10 @@ const PARALLEL_SAFE = new Set([
  * runtime, a raw /api/chat model has no native search-first behavior: if
  * mutation schemas are visible beside retrieved summaries it can jump from
  * an old summary straight to a plausible patch. Keep every mutation route
- * out of the schema until this turn has both located live code and read it.
+ * out of the schema until this turn has grounded at least one live file.
+ * A successful direct read counts as both location and current-code proof;
+ * forcing a redundant search after an exact anchored path strands local
+ * models on a read/update-plan loop with no edit schema to call.
  */
 const MUTATION_TOOLS = new Set([
   "write_file",
@@ -242,8 +589,12 @@ export function groundedToolsFor(
   tools: JsonSchema[],
   grounding: EditGrounding
 ): JsonSchema[] {
-  if (grounding.discovered && grounding.readPaths.size > 0) return tools;
+  if (editGrounded(grounding)) return tools;
   return tools.filter((schema) => !MUTATION_TOOLS.has(toolNameOf(schema)));
+}
+
+function editGrounded(grounding: EditGrounding): boolean {
+  return grounding.discovered && grounding.readPaths.size > 0;
 }
 
 async function runSequential(
@@ -271,6 +622,8 @@ export interface EditGrounding {
   required: boolean;
   discovered: boolean;
   readPaths: Set<string>;
+  /** Exact successful reads in this unchanged workspace state. */
+  readCalls: Set<string>;
 }
 
 /**
@@ -284,6 +637,11 @@ export async function runCall(
   opts: ToolCallDeps
 ): Promise<string> {
   if (!isEditTool(name)) {
+    const repeatedRead = repeatedReadFailure(opts.grounding, name, input);
+    if (repeatedRead) return repeatedRead;
+
+    const editsWereLocked =
+      opts.grounding?.required === true && !editGrounded(opts.grounding);
     const result = await runTool(
       opts.tools,
       name,
@@ -292,11 +650,29 @@ export async function runCall(
       opts.signal
     );
     recordGrounding(opts.grounding, name, input, result);
+    if (
+      editsWereLocked &&
+      opts.grounding &&
+      editGrounded(opts.grounding)
+    ) {
+      return (
+        result +
+        "\n\nGrounding complete: replace_code and replace_many are now " +
+        "available. Keep the existing timeline, ensure its current step is " +
+        "in-progress, and make the requested edit now. Do not repeat this " +
+        "read or rewrite the plan."
+      );
+    }
     return result;
   }
+  const malformed = malformedEditInput(name, input);
+  if (malformed) return malformed;
   const edits = editsOf(name, input);
   // Arguments this module does not recognise stay the registry's problem;
-  // its schema errors are better than anything guessed here.
+  // its schema errors are better than anything guessed here. Required edit
+  // strings are the exception: validate the whole call before expanding a
+  // batch so one malformed entry cannot be silently dropped while its
+  // siblings mutate files.
   if (edits.length === 0) {
     return runTool(opts.tools, name, input, opts.taskId, opts.signal);
   }
@@ -310,7 +686,13 @@ export async function runCall(
   // ones stay on disk, and the UI shows one honest row per edit.
   const results: string[] = [];
   for (const edit of edits) {
-    results.push(await runEdit(edit, opts));
+    const result = await runEdit(edit, opts);
+    results.push(result);
+    if (!/(^|\n)Error:/.test(result) && !result.startsWith("Already applied")) {
+      // The file changed, so a same-input read is useful again as
+      // verification rather than a loop.
+      opts.grounding?.readCalls.clear();
+    }
   }
   return results.join("\n");
 }
@@ -332,17 +714,46 @@ function recordGrounding(
   if (DISCOVERY_TOOLS.has(name)) grounding.discovered = true;
 
   const value = input as Record<string, unknown> | undefined;
+  const readCall = readCallKey(name, input);
   if (name === "read_file" && typeof value?.path === "string") {
     grounding.readPaths.add(pathKey(value.path));
+    if (readCall) grounding.readCalls.add(readCall);
+    grounding.discovered = true;
     return;
   }
   if (name !== "read_many_files" || !Array.isArray(value?.files)) return;
+  let readAny = false;
   for (const entry of value.files) {
     const path = (entry as { path?: unknown })?.path;
     if (typeof path !== "string") continue;
     // The compact read-many shaper emits a header only for successful reads.
-    if (result.includes(`### ${path}`)) grounding.readPaths.add(pathKey(path));
+    if (result.includes(`### ${path}`)) {
+      grounding.readPaths.add(pathKey(path));
+      grounding.discovered = true;
+      readAny = true;
+    }
   }
+  if (readAny && readCall) grounding.readCalls.add(readCall);
+}
+
+function repeatedReadFailure(
+  grounding: EditGrounding | undefined,
+  name: string,
+  input: unknown
+): string | null {
+  if (!grounding?.required) return null;
+  const key = readCallKey(name, input);
+  if (!key || !grounding.readCalls.has(key)) return null;
+  return (
+    `Error: this exact ${name} input already succeeded and the workspace ` +
+    "has not changed since. Do not read it again. Use replace_code or " +
+    "replace_many now to execute the active timeline step."
+  );
+}
+
+function readCallKey(name: string, input: unknown): string | null {
+  if (name !== "read_file" && name !== "read_many_files") return null;
+  return `${name}:${safeJson(input)}`;
 }
 
 function groundingFailure(
@@ -373,11 +784,83 @@ function pathKey(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/**
+ * Names the missing string fields when an edit tool's `input` is not the
+ * shape the model should have sent — undefined, null, or a non-object.
+ * `editsOf` returns `[]` for these inputs, so without this guard the call
+ * falls through to the shared tool and surfaces a generic schema error
+ * only after the file has been read. Failing here is cheap, and the model
+ * sees a message that points at the field it has to add, not at the file
+ * it has to re-read.
+ */
+function malformedEditInput(name: string, input: unknown): string | null {
+  const fields = ["path", "oldString", "newString"];
+  if (name === "replace_code") {
+    return missingEditFields("replace_code", fields, input);
+  }
+  if (name !== "replace_many") return null;
+  const value = input as { edits?: unknown } | null | undefined;
+  if (!value || typeof value !== "object" || !Array.isArray(value.edits)) {
+    return (
+      `Error: replace_many missing or non-array "edits". Re-send the call ` +
+      "with edits as an array of objects, each having path, oldString, " +
+      "and newString as strings."
+    );
+  }
+  for (let index = 0; index < value.edits.length; index += 1) {
+    const missing = missingEditFields(
+      `replace_many edits[${index}]`,
+      fields,
+      value.edits[index]
+    );
+    if (missing) return missing;
+  }
+  return null;
+}
+
+function missingEditFields(
+  name: string,
+  fields: string[],
+  input: unknown
+): string | null {
+  if (!input || typeof input !== "object") {
+    return (
+      `Error: ${name} called with non-object input (got ` +
+      `${input === undefined ? "undefined" : input === null ? "null" : typeof input}). ` +
+      `Re-send the call with an object containing ${fields.join(", ")} ` +
+      "as strings."
+    );
+  }
+  const value = input as Record<string, unknown>;
+  const missing = fields.filter((field) => typeof value[field] !== "string");
+  if (missing.length === 0) return null;
+  return (
+    `Error: ${name} missing required string field(s): ${missing.join(", ")}. ` +
+    `Re-send the call with ${fields.join(", ")} all as strings.`
+  );
+}
+
 /** Repair, run, and on a miss answer with something actionable. */
 async function runEdit(
   edit: EditInput,
   opts: ToolCallDeps
 ): Promise<string> {
+  // The model sometimes drops one of the required string fields. The shared
+  // tool throws a specific message for that, but only AFTER the tool has
+  // read the file from disk; do the same shape check up front so a
+  // malformed call short-circuits before any I/O and before prepareEdit
+  // runs matchEdit against an undefined oldString.
+  const missing: string[] = [];
+  if (typeof edit.path !== "string") missing.push("path");
+  if (typeof edit.oldString !== "string") missing.push("oldString");
+  if (typeof edit.newString !== "string") missing.push("newString");
+  if (missing.length > 0) {
+    return (
+      `Error: replace_code missing required string field(s): ` +
+      `${missing.join(", ")}. Re-send the call with path, oldString, and ` +
+      "newString all as strings."
+    );
+  }
   let input = edit;
   try {
     const prepared = await prepareEdit(opts.files, edit);
@@ -438,6 +921,96 @@ function safeJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/**
+ * The message array for one /api/chat call.
+ *
+ * The system message is rebuilt every time — the assembled context, the scope
+ * lock and the plan all move between passes — while everything after it is
+ * conversation and carries over. Within a task that history is the task's own
+ * transcript (reads, tool results, what the model already said); on the task's
+ * first call there is none yet, so the chat turns stand in for it.
+ */
+export function buildMessages(input: {
+  system: string;
+  prompt: string;
+  numCtx: number;
+  images?: ImageAttachment[];
+  priorTurns?: PriorTurn[];
+  transcript?: OllamaTranscript;
+}): OllamaMessage[] {
+  const carried = input.transcript?.messages ?? [];
+  const history =
+    carried.length > 0
+      ? capHistory(carried, Math.floor(input.numCtx * HISTORY_SHARE))
+      : priorTurnMessages(input.priorTurns);
+  return [
+    { role: "system", content: input.system },
+    ...history,
+    userMessage(input.prompt, input.images),
+  ];
+}
+
+/** The chat before this task, as real turns rather than a summary of them. */
+export function priorTurnMessages(turns: PriorTurn[] | undefined): OllamaMessage[] {
+  return (turns ?? [])
+    .filter((turn) => turn.text.trim())
+    .slice(-MAX_PRIOR_TURNS)
+    .map((turn) => ({
+      role: turn.role,
+      content: clipTurn(turn.text.trim()),
+    }));
+}
+
+/**
+ * Keeps the carried transcript inside its share of the window.
+ *
+ * Drops from the front, because the newest rounds are the ones the current
+ * request continues — with one exception: the task's opening request is
+ * pinned. It is the shortest message in the transcript and the only one
+ * stating what the whole task is for, and dropping it is how a long tool
+ * loop ends up confidently finishing the wrong job.
+ */
+export function capHistory(
+  messages: OllamaMessage[],
+  maxTokens: number
+): OllamaMessage[] {
+  const pinned = messages[0]?.role === "user" ? messages.slice(0, 1) : [];
+  let budget = maxTokens - messageTokens(pinned[0]);
+  const kept: OllamaMessage[] = [];
+  for (let i = messages.length - 1; i >= pinned.length; i--) {
+    const cost = messageTokens(messages[i]);
+    if (cost > budget) break;
+    budget -= cost;
+    kept.unshift(messages[i]!);
+  }
+  // A tool result whose calling message was just dropped is an answer to a
+  // question the transcript no longer contains; some chat templates reject
+  // the pair outright, and every model reads it as noise.
+  while (kept.length > 0 && kept[0]!.role === "tool") kept.shift();
+  if (kept.length === messages.length - pinned.length) return messages;
+  return [...pinned, ...kept];
+}
+
+function messageTokens(message: OllamaMessage | undefined): number {
+  if (!message) return 0;
+  return approxTokens(
+    (message.content ?? "") +
+      (message.tool_calls ? safeJson(message.tool_calls) : "")
+  );
+}
+
+/**
+ * Keeps both ends of a long turn: the head carries the subject, the tail
+ * carries the conclusion a follow-up is usually reacting to.
+ */
+function clipTurn(text: string): string {
+  if (text.length <= MAX_PRIOR_TURN_CHARS) return text;
+  const marker = "\n… [middle omitted] …\n";
+  const available = MAX_PRIOR_TURN_CHARS - marker.length;
+  const head = Math.floor(available * 0.4);
+  return `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`;
 }
 
 function userMessage(prompt: string, images?: ImageAttachment[]): OllamaMessage {
@@ -562,13 +1135,14 @@ async function ollamaChatStreaming(
         assembled.content += delta;
         onDelta(delta);
       }
-      // The hidden pass, live. Dropping it (the old behavior) made a
-      // reasoning model look hung for exactly as long as it was thinking.
-      const thinking = chunk.message?.thinking ?? "";
+      // The hidden pass, live. Some models expose their internal channel
+      // markers here as well; those are transport syntax, not user-facing
+      // thought, so keep them out of the shared thinking surface.
+      const thinking = cleanOllamaThinking(chunk.message?.thinking ?? "");
       if (thinking) onThinking?.(thinking);
       if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls);
       // The final chunk carries the run's token counts.
-      if (chunk.done) recordResponseUsage(chunk);
+      if (chunk.done) recordResponseUsage(target, chunk);
     };
 
     for (;;) {
@@ -602,14 +1176,30 @@ async function ollamaChatStreaming(
   }
 }
 
+/**
+ * Removes Harmony-style control syntax that a few Ollama reasoning models
+ * include in their `thinking` field. The labels are protocol routing
+ * metadata; displaying them made the activity rail read as repeated
+ * "`<|channel|>thought`" instead of the model's actual reasoning.
+ */
+export function cleanOllamaThinking(value: string): string {
+  return value.replace(
+    /<\|channel\|>\s*(?:analysis|commentary|final|thought)?[ \t]*|<\/?channel>\s*(?:analysis|commentary|final|thought)?[ \t]*/gi,
+    ""
+  );
+}
+
 function authHeaders(target: OllamaTarget): Record<string, string> {
   const key = ollamaApiKey(target);
   return key ? { authorization: `Bearer ${key}` } : {};
 }
 
-function recordResponseUsage(body: OllamaChatResponse): void {
+function recordResponseUsage(target: OllamaTarget, body: OllamaChatResponse): void {
+  // The Cloud section must never be inflated by requests served by the local
+  // daemon, even when that daemon happens to proxy a cloud-tagged model.
+  if (target !== OLLAMA_CLOUD) return;
   try {
-    recordUsage({
+    recordCloudUsage({
       prompt_eval_count: body.prompt_eval_count,
       eval_count: body.eval_count,
       total_duration: body.total_duration,
@@ -724,10 +1314,10 @@ const ATELIER_TOOLS = [
     symbols: arraySchema(stringSchema("Symbol name")),
     depth: numberSchema("Ripple depth"),
   }),
-  tool("set_plan", "Publish the plan for this task — the checklist the user " +
-    "watches while you work. Call it ONCE, before you start changing " +
-    "things, for anything beyond a single trivial edit. Returns the step " +
-    "ids — drive them with update_plan_step as you go.", {
+  tool("set_plan", "Create the execution timeline before editing. If new " +
+    "necessary work is discovered later, call set_plan again with ONLY the " +
+    "new steps; they append and cannot replace existing steps. Execute every " +
+    "returned id in order with update_plan_step.", {
     goal: stringSchema("One line: what this task delivers"),
     steps: arraySchema({
       type: "object",
@@ -739,7 +1329,8 @@ const ATELIER_TOOLS = [
       required: ["title"],
     }),
   }, ["goal", "steps"]),
-  tool("update_plan_step", "Report progress on the current task plan.", {
+  tool("update_plan_step", "Start and explicitly finish the current timeline " +
+    "step. Order is enforced and only done clears the final-report gate.", {
     stepId: stringSchema("Plan step id"),
     status: enumSchema([
       "pending",
@@ -758,6 +1349,13 @@ const ATELIER_TOOLS = [
     symbols: arraySchema(stringSchema("Symbol name")),
     files: arraySchema(stringSchema("Workspace-relative file path")),
   }, ["title", "lesson"]),
+  tool("preview_review", "Debug a local Page preview in headless Chromium. Returns " +
+    "status/decision, chronological DevTools console, page errors, failed HTTP " +
+    "requests, DOM/layout, and screenshots. Obey decision: unavailable = ask user " +
+    "to start/reopen preview and stop without retrying or starting a server; " +
+    "issues = report evidence then fix if allowed or skip; failed = report and skip.", {
+    url: stringSchema("The local http(s) URL shown in Page preview"),
+  }, ["url"]),
   tool("run_terminal", "Run a shell command in the workspace.", {
     command: stringSchema("PowerShell command line"),
     cwd: stringSchema("Workspace-relative working directory"),

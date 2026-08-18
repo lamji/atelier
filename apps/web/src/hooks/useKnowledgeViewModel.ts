@@ -21,6 +21,8 @@ export function useKnowledgeViewModel() {
   const features = useKnowledgeStore((s) => s.features);
   const featureScan = useKnowledgeStore((s) => s.featureScan);
   const lessons = useKnowledgeStore((s) => s.lessons);
+  const wikiPages = useKnowledgeStore((s) => s.wikiPages);
+  const wikiLint = useKnowledgeStore((s) => s.wikiLint);
   const graph = useKnowledgeStore((s) => s.graph);
   const graphScope = useKnowledgeStore((s) => s.graphScope);
   const graphTarget = useKnowledgeStore((s) => s.graphTarget);
@@ -54,6 +56,12 @@ export function useKnowledgeViewModel() {
         if (!cancelled) useKnowledgeStore.getState().setLessons(lessons);
       })
       .catch(() => undefined);
+    void bridge
+      .rpc("knowledge.wiki.list", {})
+      .then(({ pages, lint }) => {
+        if (!cancelled) useKnowledgeStore.getState().setWiki(pages, lint);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -78,6 +86,18 @@ export function useKnowledgeViewModel() {
   }, []);
 
   /** Kick the route→feature scan (Haiku summarizes each page/endpoint). */
+  /** Opens a wiki page in the editor tab, like a click in the explorer. */
+  const openWikiPage = useCallback(async (path: string) => {
+    try {
+      const file = await bridge.rpc("fs.readFile", { path });
+      useWorkspaceStore
+        .getState()
+        .setSelectedFile(path, file.content, file.mtime);
+    } catch {
+      // The page may have been deleted since the list was fetched.
+    }
+  }, []);
+
   const scanFeatures = useCallback(async () => {
     useKnowledgeStore.getState().setFeatureScan({
       phase: "discover",
@@ -139,6 +159,9 @@ export function useKnowledgeViewModel() {
     featureScan,
     scanFeatures,
     lessons,
+    wikiPages,
+    wikiLint,
+    openWikiPage,
     graph,
     graphScope,
     graphTarget,

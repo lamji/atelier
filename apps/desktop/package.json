@@ -1,6 +1,6 @@
 {
   "name": "@atelier/desktop",
-  "version": "1.0.6",
+  "version": "1.0.13",
   "private": true,
   "description": "Atelier desktop shell (Electron). Hosts the existing web renderer and backend unchanged.",
   "main": "dist/main.cjs",

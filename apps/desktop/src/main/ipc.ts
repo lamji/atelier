@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { BrowserWindow, dialog, ipcMain, shell, type WebContents } from "electron";
 import { writeFile } from "node:fs/promises";
 import { IPC_CHANNELS } from "../shared/ipc-contract";
 
@@ -12,6 +12,60 @@ function isSafeExternal(url: string): boolean {
   }
 }
 
+function isCaptureRect(value: unknown): value is {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  previewUrl?: string;
+} {
+  if (!value || typeof value !== "object") return false;
+  const rect = value as Record<string, unknown>;
+  return (
+    typeof rect.x === "number" &&
+    Number.isFinite(rect.x) &&
+    typeof rect.y === "number" &&
+    Number.isFinite(rect.y) &&
+    typeof rect.width === "number" &&
+    Number.isFinite(rect.width) &&
+    rect.width > 0 &&
+    typeof rect.height === "number" &&
+    Number.isFinite(rect.height) &&
+    rect.height > 0
+  );
+}
+
+function localPreviewOrigin(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    const local =
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]";
+    return local && (url.protocol === "http:" || url.protocol === "https:")
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve the iframe's live URL so SPA navigation becomes screenshot context. */
+function previewFrameUrl(webContents: WebContents, requestedUrl: unknown): string | null {
+  const origin = localPreviewOrigin(requestedUrl);
+  if (!origin) return null;
+  for (const frame of webContents.mainFrame.framesInSubtree) {
+    try {
+      const url = new URL(frame.url);
+      if (url.origin === origin) return url.href;
+    } catch {
+      // Ignore transient or non-URL child frames.
+    }
+  }
+  return null;
+}
+
 export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.pickFolder, async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -23,6 +77,28 @@ export function registerIpcHandlers(): void {
     if (result.canceled) return null;
     return result.filePaths[0] ?? null;
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.captureRegion,
+    async (event, rect: unknown) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win || !isCaptureRect(rect)) return null;
+      const contentSize = win.getContentSize();
+      const contentWidth = contentSize[0] ?? 0;
+      const contentHeight = contentSize[1] ?? 0;
+      if (contentWidth < 1 || contentHeight < 1) return null;
+      const x = Math.max(0, Math.min(Math.floor(rect.x), contentWidth - 1));
+      const y = Math.max(0, Math.min(Math.floor(rect.y), contentHeight - 1));
+      const width = Math.min(Math.ceil(rect.width), contentWidth - x);
+      const height = Math.min(Math.ceil(rect.height), contentHeight - y);
+      if (width < 1 || height < 1) return null;
+      const image = await win.webContents.capturePage({ x, y, width, height });
+      return {
+        dataUrl: image.toDataURL(),
+        frameUrl: previewFrameUrl(event.sender, rect.previewUrl),
+      };
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.openExternal, async (_event, url: unknown) => {
     if (typeof url !== "string" || !isSafeExternal(url)) return;
@@ -51,14 +127,28 @@ export function registerIpcHandlers(): void {
   );
 
   ipcMain.on(IPC_CHANNELS.windowMinimize, (event) => {
-    BrowserWindow.fromWebContents(event.sender)?.minimize();
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isKiosk()) return;
+    win.minimize();
   });
 
   ipcMain.on(IPC_CHANNELS.windowMaximizeToggle, (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win) return;
+    if (win.isKiosk()) {
+      win.setKiosk(false);
+      sendKioskState(win);
+      return;
+    }
     if (win.isMaximized()) win.unmaximize();
     else win.maximize();
+  });
+
+  ipcMain.on(IPC_CHANNELS.windowKioskToggle, (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return;
+    win.setKiosk(!win.isKiosk());
+    sendKioskState(win);
   });
 
   ipcMain.on(IPC_CHANNELS.windowClose, (event) => {
@@ -69,6 +159,10 @@ export function registerIpcHandlers(): void {
     return (
       BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
     );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.windowIsKiosk, (event) => {
+    return BrowserWindow.fromWebContents(event.sender)?.isKiosk() ?? false;
   });
 }
 
@@ -102,7 +196,7 @@ async function writePdf(html: string, filePath: string): Promise<void> {
   }
 }
 
-/** Forward maximize/unmaximize to the renderer for the titlebar icon. */
+/** Forward maximize/kiosk changes to the renderer for the titlebar icons. */
 export function wireMaximizedEvents(win: BrowserWindow): void {
   const send = (maximized: boolean): void => {
     if (!win.isDestroyed()) {
@@ -111,6 +205,14 @@ export function wireMaximizedEvents(win: BrowserWindow): void {
   };
   win.on("maximize", () => send(true));
   win.on("unmaximize", () => send(false));
+  win.on("enter-full-screen", () => sendKioskState(win));
+  win.on("leave-full-screen", () => sendKioskState(win));
+}
+
+function sendKioskState(win: BrowserWindow): void {
+  if (!win.isDestroyed()) {
+    win.webContents.send(IPC_CHANNELS.windowKioskChanged, win.isKiosk());
+  }
 }
 
 export { isSafeExternal };

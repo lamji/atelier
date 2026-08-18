@@ -1,6 +1,11 @@
-import type { UsageSnapshot, UsageWindow } from "@atelier/protocol";
+import type {
+  OllamaCloudUsageWindow,
+  UsageSnapshot,
+  UsageWindow,
+} from "@atelier/protocol";
 import type { EventBus } from "../events/event-bus.js";
 import { probeUsage } from "./usage-probe.js";
+import { usageWindows } from "../providers/ollama/usage.js";
 
 /** Labels for windows learned from live events (the probe has its own). */
 const EVENT_LABELS: Record<string, string> = {
@@ -30,6 +35,7 @@ export class UsageMonitor {
     available: false,
     status: null,
     windows: [],
+    ollamaCloudUsage: [],
     updatedAt: null,
   };
   private timer: NodeJS.Timeout | null = null;
@@ -71,7 +77,17 @@ export class UsageMonitor {
     this.probing = true;
     try {
       const probed = await probeUsage(this.workspaceRoot);
-      if (probed) this.publish(probed);
+      const ollamaCloudUsage = usageWindows(Date.now());
+      if (probed) {
+        this.publish({ ...probed, ollamaCloudUsage });
+      } else {
+        this.publish({
+          ...this.snapshot,
+          available: true,
+          ollamaCloudUsage,
+          updatedAt: Date.now(),
+        });
+      }
     } finally {
       this.probing = false;
     }
@@ -112,6 +128,7 @@ export class UsageMonitor {
       available: true,
       status,
       windows,
+      ollamaCloudUsage: usageWindows(Date.now()),
       updatedAt: Date.now(),
     });
   }
@@ -131,5 +148,11 @@ function sameUsage(a: UsageSnapshot, b: UsageSnapshot): boolean {
   const key = (w: UsageWindow) => `${w.kind}:${w.utilization}:${w.resetsAt}`;
   const left = a.windows.map(key).sort().join("|");
   const right = b.windows.map(key).sort().join("|");
-  return left === right;
+  if (left !== right) return false;
+  const cloudKey = (w: OllamaCloudUsageWindow) =>
+    `${w.kind}:${w.requests}:${w.inputTokens}:${w.outputTokens}:${w.seconds}`;
+  return (
+    a.ollamaCloudUsage.map(cloudKey).sort().join("|") ===
+    b.ollamaCloudUsage.map(cloudKey).sort().join("|")
+  );
 }

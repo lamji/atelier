@@ -80,14 +80,15 @@ export function WorkspaceSwitcher() {
         disabled={switching}
         title={active?.path}
         className={cn(
-          "flex h-7 max-w-[min(15rem,32vw)] items-center gap-1.5 rounded-md",
-          "px-2 text-xs font-medium outline-none transition-colors",
-          "hover:bg-accent",
-          "disabled:opacity-60",
-          open ? "bg-accent" : "bg-accent/50"
+          "flex h-9 max-w-[min(15rem,32vw)] items-center gap-2 rounded-full",
+          "border border-border pl-2 pr-3 text-xs font-medium outline-none",
+          "transition-colors hover:bg-accent disabled:opacity-60",
+          open ? "bg-accent" : "bg-card"
         )}
       >
-        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="icon-tile icon-tile-sm">
+          <FolderGit2 className="h-3.5 w-3.5" />
+        </span>
         <span className="truncate">{active?.name ?? "Workspace"}</span>
         {othersWorking > 0 && (
           <Tooltip
@@ -125,7 +126,7 @@ export function WorkspaceSwitcher() {
             className={cn(
               "absolute left-0 top-full z-50 mt-1",
               "w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-lg",
-              "border border-border bg-card shadow-xl"
+              "border border-border bg-card shadow-pop"
             )}
           >
             <ul className="max-h-[min(60vh,20rem)] overflow-y-auto p-1">

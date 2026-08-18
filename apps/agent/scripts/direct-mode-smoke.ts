@@ -30,6 +30,7 @@ import {
   isDirectMode,
   renderPriorTurns,
 } from "../src/orchestrator/direct-mode.js";
+import { FAST_RULES } from "../src/orchestrator/pipeline-executor.js";
 
 /** Tools that exist only because the knowledge engine does. */
 const KNOWLEDGE_TOOLS = [
@@ -94,6 +95,32 @@ function checkRules(): void {
   check(
     "rules keep workspace confinement",
     DIRECT_RULES.includes("STRICT WORKSPACE CONFINEMENT")
+  );
+}
+
+/**
+ * The pair that broke once already: the bypass must belong to direct mode
+ * alone, and the rule the re-armed hook enforces must be in the block the
+ * pipeline actually sends. Marking every pipeline task direct silently
+ * disarmed the impact hook for all four providers, and no test noticed
+ * because the guard itself still passed in isolation.
+ */
+function checkPipelineArmsGuards(): void {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const source = fs.readFileSync(
+    path.join(here, "../src/orchestrator/pipeline-executor.ts"),
+    "utf8"
+  );
+  const marks = source.match(/this\.deps\.directTasks\.mark\(/g) ?? [];
+  check(
+    "only direct mode bypasses the code guards",
+    marks.length === 1,
+    `${marks.length} mark() call(s)`
+  );
+  check("pipeline rules state the impact hook", FAST_RULES.includes("impact_of_edit"));
+  check(
+    "pipeline rules state the targeted-edit hook",
+    FAST_RULES.includes("replace_code")
   );
 }
 
@@ -167,6 +194,7 @@ async function main(): Promise<void> {
   checkFlag();
   checkTools();
   checkRules();
+  checkPipelineArmsGuards();
   checkTranscript();
   await checkGuardBypass();
 

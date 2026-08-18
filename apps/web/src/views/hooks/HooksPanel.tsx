@@ -3,6 +3,11 @@ import { Loader2, Plus, Trash2, Webhook } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import {
+  WorkspacePageBody,
+  WorkspacePageHeader,
+} from "@/components/ui/workspace-page";
 import { cn } from "@/lib/cn";
 import type { useHooksViewModel } from "@/hooks/useHooksViewModel";
 
@@ -34,29 +39,38 @@ export function HooksPanel({ vm }: HooksPanelProps) {
   const { draft, setDraft } = vm;
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
-      <div className="flex items-center gap-2">
-        <Webhook className="h-4 w-4 text-primary/80" />
-        <h2 className="text-sm font-semibold">Hooks</h2>
+    <div className="flex h-full flex-col">
+      <WorkspacePageHeader
+        icon={Webhook}
+        title="Hooks"
+        description="Define the guardrails and automations that run around every agent action."
+        meta={<Badge variant="secondary">{vm.hooks.length} rules</Badge>}
+        actions={
         <Button
           size="sm"
           variant="outline"
-          className="ml-auto h-7 gap-1 px-2"
+          className="h-8 gap-1 rounded-full px-3"
           disabled={!vm.connected}
           onClick={() => setExpanded((v) => !v)}
         >
           <Plus className="h-3.5 w-3.5" />
           New
         </Button>
-      </div>
+        }
+      />
+      <WorkspacePageBody className="grid min-h-0 flex-1 gap-4 overflow-y-auto px-6 pb-6 lg:grid-cols-[minmax(18rem,0.75fr)_minmax(0,1.25fr)]">
 
       {expanded && (
-        <div className="space-y-2 rounded-xl bg-muted/40 p-2.5">
+        <section className="h-fit space-y-3 rounded-2xl bg-primary/8 p-4 shadow-sm">
+          <div>
+            <h2 className="text-sm font-semibold">Create a guardrail</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Choose when it runs, what it matches, and the action Atelier should take.</p>
+          </div>
           <Input
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             placeholder="Hook name (e.g. Protect env files)"
-            className="h-8 text-xs"
+            className="h-9 text-xs"
           />
           <div className="grid grid-cols-2 gap-1.5">
             <Select
@@ -108,19 +122,23 @@ export function HooksPanel({ vm }: HooksPanelProps) {
               "Create hook"
             )}
           </Button>
-        </div>
+        </section>
       )}
 
-      <div className="min-h-0 flex-1">
+      <section className={cn("min-h-0 rounded-2xl bg-muted/35 p-4 shadow-sm", !expanded && "lg:col-span-2")}>
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold">Active guardrails</h2>
+          <p className="mt-1 text-xs text-muted-foreground">Enable, disable, and audit the rules protecting this workspace.</p>
+        </div>
         {vm.hooks.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/60">
             No hooks yet. Hooks gate every agent tool call — e.g. block
             writes to <span className="font-mono">**/*.env</span>.
           </p>
         ) : (
-          <ul className="space-y-1.5">
+          <ul className="grid gap-2 md:grid-cols-2">
             {vm.hooks.map((hook) => (
-              <li key={hook.id} className="rounded-lg bg-muted/40 px-2.5 py-2">
+              <li key={hook.id} className="rounded-xl bg-card/70 p-3 shadow-sm">
                 <div className="flex items-center gap-2">
                   <button
                     title={hook.enabled ? "Disable" : "Enable"}
@@ -163,7 +181,8 @@ export function HooksPanel({ vm }: HooksPanelProps) {
             ))}
           </ul>
         )}
-      </div>
+      </section>
+      </WorkspacePageBody>
     </div>
   );
 }

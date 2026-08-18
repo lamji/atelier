@@ -116,9 +116,93 @@ export function actionDetail(name: string, input: unknown): string | undefined {
     "symbol",
     "title",
     "description",
+    "url",
     "action"
   );
   return value ? clip(value.replace(/\s+/g, " "), 120) : undefined;
+}
+
+/** Compact, readable evidence from a completed tool call for its accordion. */
+export function actionResult(name: string, result: unknown): string {
+  if (result === undefined || result === null) return "Completed with no returned data.";
+  if (typeof result === "string") return clipResult(result);
+
+  const value = result as Record<string, unknown>;
+  if (typeof value.summary === "string") return clipResult(value.summary);
+
+  if (name === "read_file" && typeof value.content === "string") {
+    const count = typeof value.totalLines === "number" ? `${value.totalLines} lines` : "File read";
+    return `${count}\n${clipResult(value.content)}`;
+  }
+  if (name === "read_many_files" && Array.isArray(value.files)) {
+    const files = value.files as Array<Record<string, unknown>>;
+    const sections = files.map((file) => {
+      const path = String(file.path ?? "unknown file");
+      const lines = typeof file.totalLines === "number" ? ` · ${file.totalLines} lines` : "";
+      const content = typeof file.content === "string" ? `\n${file.content}` : "";
+      return `${path}${lines}${content}`;
+    });
+    return clipResult(`Read ${files.length} file(s)\n${sections.join("\n\n")}`);
+  }
+  if (Array.isArray(value.chunks)) {
+    const chunks = value.chunks as Array<Record<string, unknown>>;
+    const found = chunks.map((chunk, index) => {
+      const path = String(chunk.path ?? "unknown source");
+      const rows = chunk.startRow !== undefined
+        ? `:${String(chunk.startRow)}-${String(chunk.endRow ?? "?")}`
+        : "";
+      const preview = typeof chunk.preview === "string" ? `\n${chunk.preview}` : "";
+      return `${index + 1}. ${path}${rows}${preview}`;
+    });
+    const strategy = typeof value.strategy === "string"
+      ? `Strategy: ${value.strategy}`
+      : undefined;
+    const graphNodes = Array.isArray(value.graphNodes)
+      ? `Graph nodes: ${value.graphNodes.length}`
+      : undefined;
+    const features = Array.isArray(value.features)
+      ? `Features: ${value.features.length}`
+      : undefined;
+    return clipResult(
+      [
+        `Found ${chunks.length} knowledge chunk(s)`,
+        strategy,
+        graphNodes,
+        features,
+        "",
+        found.join("\n\n"),
+      ]
+        .filter((line) => line !== undefined)
+        .join("\n")
+    );
+  }
+  if (Array.isArray(value.matches)) {
+    return clipResult(`Found ${value.matches.length} match(es)\n${pretty(value.matches)}`);
+  }
+  if (name === "run_terminal" && typeof value.output === "string") {
+    const exit = value.exitCode === null || value.exitCode === undefined
+      ? "Command completed"
+      : `Exit code ${String(value.exitCode)}`;
+    return clipResult(`${exit}\n${value.output}`);
+  }
+  return clipResult(pretty(result));
+}
+
+const MAX_RESULT_CHARS = 4_000;
+
+function clipResult(value: string): string {
+  const normalized = value.trim() || "Completed with no returned data.";
+  return normalized.length > MAX_RESULT_CHARS
+    ? `${normalized.slice(0, MAX_RESULT_CHARS)}\n… result clipped`
+    : normalized;
+}
+
+function pretty(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 /** `replace_many` -> "Replace many". Last resort, but never a raw ident. */

@@ -1,5 +1,16 @@
 import { create } from "zustand";
+import {
+  isTerminalProfileId,
+  type TerminalProfileId,
+} from "@/services/terminal-appearance";
 import type { TerminalSession } from "@atelier/protocol";
+
+const TERMINAL_PROFILE_KEY = "atelier.terminal.profile";
+
+function initialProfile(): TerminalProfileId {
+  const stored = localStorage.getItem(TERMINAL_PROFILE_KEY);
+  return isTerminalProfileId(stored) ? stored : "ubuntu";
+}
 
 interface TerminalStore {
   sessions: TerminalSession[];
@@ -15,10 +26,12 @@ interface TerminalStore {
    * passes it to terminal.create().
    */
   labels: Record<string, string>;
+  profile: TerminalProfileId;
   setSessions: (sessions: TerminalSession[]) => void;
   addSession: (session: TerminalSession) => void;
   removeSession: (termId: string) => void;
   renameSession: (termId: string, name: string) => void;
+  setProfile: (profile: TerminalProfileId) => void;
   setActive: (termId: string | null) => void;
 }
 
@@ -26,6 +39,7 @@ export const useTerminalStore = create<TerminalStore>((set) => ({
   sessions: [],
   activeTermId: null,
   labels: {},
+  profile: initialProfile(),
 
   setSessions: (sessions) =>
     set((s) => ({
@@ -63,6 +77,11 @@ export const useTerminalStore = create<TerminalStore>((set) => ({
       if (!trimmed) return s;
       return { labels: { ...s.labels, [termId]: trimmed } };
     }),
+
+  setProfile: (profile) => {
+    localStorage.setItem(TERMINAL_PROFILE_KEY, profile);
+    set({ profile });
+  },
 
   setActive: (activeTermId) => set({ activeTermId }),
 }));

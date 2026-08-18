@@ -3,6 +3,7 @@ import {
   isCloudHost,
   listOllamaModels,
   supportsThinking,
+  supportsVision,
   type OllamaModel,
 } from "./client.js";
 import {
@@ -62,7 +63,10 @@ async function probe(target: OllamaTarget): Promise<ModelOption[]> {
   // cached per model, and only enabled rows — a handful — are asked.
   return Promise.all(
     offered.map(async (m) => {
-      const thinking = await supportsThinking(m.name, target).catch(() => false);
+      const [thinking, vision] = await Promise.all([
+        supportsThinking(m.name, target).catch(() => false),
+        supportsVision(m.name, target).catch(() => false),
+      ]);
       return {
         value: `${PREFIX[target]}${m.name}`,
         label: m.name,
@@ -70,6 +74,7 @@ async function probe(target: OllamaTarget): Promise<ModelOption[]> {
         provider:
           target === OLLAMA_LOCAL ? ("ollama-local" as const) : ("ollama" as const),
         supportsEffort: thinking,
+        supportsImages: vision,
         ...(thinking
           ? { reasoningLevels: ["low", "high"] as ModelOption["reasoningLevels"] }
           : {}),
@@ -105,17 +110,19 @@ export async function listOllamaCatalog(
   const models = await listOllamaModels(target);
   const enabled = enabledSet(target, models);
   const restricted = new Set(subscriptionRequiredModelsFor(target));
-  return models
-    .map((m) => ({
+  const catalog = await Promise.all(
+    models.map(async (m) => ({
       value: `${PREFIX[target]}${m.name}`,
       name: m.name,
       enabled: enabled.has(m.name) && !restricted.has(m.name),
+      supportsImages: await supportsVision(m.name, target).catch(() => false),
       subscriptionRequired: restricted.has(m.name),
       ...(sizeOf(m.parameterSize, m.quantization)
         ? { detail: sizeOf(m.parameterSize, m.quantization) }
         : {}),
     }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  );
+  return catalog.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function sizeOf(parameterSize?: string, quantization?: string): string {

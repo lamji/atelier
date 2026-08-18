@@ -25,6 +25,15 @@ export function registerFsHandlers(router: Router, files: FileService): void {
     return { path: params.path, content, mtime };
   });
 
+  router.register("fs.readImage", async (params) => {
+    const image = await files.readImage(params.path);
+    return { path: params.path, ...image };
+  });
+
+  router.register("fs.writeImage", async (params) => ({
+    path: await files.writeImage(params.path, params.data, params.mediaType),
+  }));
+
   router.register("fs.writeFile", async (params) => ({
     diff: await files.writeFile(params.path, params.content),
   }));

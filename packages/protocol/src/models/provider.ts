@@ -66,6 +66,8 @@ export const ProviderModel = z.object({
   /** The provider's own tag, e.g. "gpt-oss:20b". */
   name: z.string(),
   enabled: z.boolean(),
+  /** Whether this catalog row accepts image attachments as model input. */
+  supportsImages: z.boolean().optional(),
   detail: z.string().optional(),
   /** This account can list the model but cannot run it without upgrading. */
   subscriptionRequired: z.boolean().optional(),

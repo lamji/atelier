@@ -67,6 +67,32 @@ export class PromptAssembler {
       sections.push({ name: "scope-limits", tokens: approxTokens(text), items: limits.length });
     }
 
+    const featureRefs = input.retrieval.features
+      .filter((feature) => feature.files.length > 0)
+      .slice(0, 3)
+      .map(
+        (feature) =>
+          `- ${feature.name} (${feature.slug}): ` +
+          feature.files.slice(0, 8).join(", ")
+      );
+    if (featureRefs.length > 0) {
+      const text = featureRefs.join("\n");
+      // A LEAD, not an instruction. This used to read "stay on these owner
+      // files", which turned a fuzzy index match into direction the model
+      // followed over the path the user had just named.
+      parts.push(
+        "FEATURE FILES THAT MAY BE RELEVANT (matched from the feature index " +
+          "— treat as leads: confirm the live owner of what the user " +
+          "described before editing, and paths named in this turn win):",
+        text
+      );
+      sections.push({
+        name: "features",
+        tokens: approxTokens(text),
+        items: featureRefs.length,
+      });
+    }
+
     // 0. Cross-turn dedup: content this conversation already received at
     // full detail is referenced, never re-sent. Keyed by content hash, so
     // edited code automatically counts as fresh again.

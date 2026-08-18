@@ -1,7 +1,7 @@
 ---
 feature: session cli mode from setting
 slug: session-cli-mode-from-setting
-status: ready
+status: stale
 updated: 2026-08-09T04:22:19.918Z
 aliases:
   - CLI mode toggle
@@ -132,3 +132,4 @@ If a resumed session has a title, it is set as pinned (not watched), so a subseq
 ## Related
 
 - [[app-boot]] — Preferences store is initialized during app boot and project opening.
+

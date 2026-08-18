@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { IPC_CHANNELS, PORT_MESSAGE_TYPE } from "../shared/ipc-contract";
 import type {
   AtelierDesktopApi,
+  DesktopCaptureRequest,
   DesktopProjectInfo,
 } from "../shared/ipc-contract";
 
@@ -40,6 +41,9 @@ const api: AtelierDesktopApi = {
 
   pickFolder: () => ipcRenderer.invoke(IPC_CHANNELS.pickFolder),
 
+  captureRegion: (request: DesktopCaptureRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.captureRegion, request),
+
   // File.path was removed in Electron 32; webUtils is the only way to turn
   // a dropped File back into a filesystem path.
   pathForFile: (file: File) => {
@@ -59,8 +63,10 @@ const api: AtelierDesktopApi = {
   window: {
     minimize: () => ipcRenderer.send(IPC_CHANNELS.windowMinimize),
     maximizeToggle: () => ipcRenderer.send(IPC_CHANNELS.windowMaximizeToggle),
+    kioskToggle: () => ipcRenderer.send(IPC_CHANNELS.windowKioskToggle),
     close: () => ipcRenderer.send(IPC_CHANNELS.windowClose),
     isMaximized: () => ipcRenderer.invoke(IPC_CHANNELS.windowIsMaximized),
+    isKiosk: () => ipcRenderer.invoke(IPC_CHANNELS.windowIsKiosk),
     onMaximizedChanged: (cb: (maximized: boolean) => void) => {
       const listener = (_e: unknown, maximized: boolean): void =>
         cb(maximized);
@@ -70,6 +76,13 @@ const api: AtelierDesktopApi = {
           IPC_CHANNELS.windowMaximizedChanged,
           listener,
         );
+      };
+    },
+    onKioskChanged: (cb: (kiosk: boolean) => void) => {
+      const listener = (_e: unknown, kiosk: boolean): void => cb(kiosk);
+      ipcRenderer.on(IPC_CHANNELS.windowKioskChanged, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.windowKioskChanged, listener);
       };
     },
   },

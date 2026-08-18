@@ -445,10 +445,23 @@ export class Retriever {
       status: string;
       updated_at: number;
     }>;
+    // Two hits, one of them in the name. `terms.some(...)` over name AND
+    // summary let a single common word ("issue", "data", "page") match a
+    // feature that had nothing to do with the request — and a matched
+    // feature is printed to the model as files worth working on, so a
+    // loose match reads to it as direction.
     const matched = rows.filter((f) => {
-      const hay = `${f.name} ${f.summary}`.toLowerCase();
-      return terms.some((t) => hay.includes(t));
+      const name = f.name.toLowerCase();
+      const summary = f.summary.toLowerCase();
+      const nameHits = terms.filter((t) => name.includes(t)).length;
+      if (nameHits === 0) return false;
+      const summaryHits = terms.filter((t) => summary.includes(t)).length;
+      return nameHits + summaryHits >= 2;
     });
+    const filesFor = this.db.prepare(
+      "SELECT f.path FROM feature_files ff JOIN files f ON f.id = ff.file_id " +
+        "WHERE ff.feature_id = ? ORDER BY ff.weight DESC, f.path LIMIT 20"
+    );
     return matched.slice(0, 5).map((f) => ({
       id: f.id,
       name: f.name,
@@ -457,7 +470,9 @@ export class Retriever {
       detailMd: f.detail_md ?? undefined,
       status: f.status as Feature["status"],
       updatedAt: f.updated_at,
-      files: [],
+      files: (filesFor.all(f.id) as Array<{ path: string }>).map(
+        (row) => row.path
+      ),
     }));
   }
 }

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { bridge } from "@/services/bridge-client";
-import { replayProcessTimeline } from "@/services/event-dispatcher";
+import {
+  loadExecutionTimeline,
+  replayProcessTimeline,
+} from "@/services/event-dispatcher";
 import { useConnectionStore } from "@/state/connection.store";
 import { useSessionsStore, type SessionVm } from "@/state/sessions.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
@@ -43,13 +46,16 @@ export function useSessionsViewModel() {
     [order, sessions]
   );
 
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(async (): Promise<string | null> => {
     try {
       const { conversation } = await bridge.rpc("session.createConversation", {});
       useSessionsStore.getState().addSession(conversation);
       useWorkspaceStore.getState().setRightTab("chat");
+      setError(null);
+      return conversation.id;
     } catch (e) {
       setError(errText(e));
+      return null;
     }
   }, []);
 
@@ -65,6 +71,7 @@ export function useSessionsViewModel() {
           return;
         }
         store.upsertConversations(conversations);
+        void hydrateSessionPreviews(conversations.map((conversation) => conversation.id));
         // After a reload the backend may still be running tasks. Restore the
         // busy UI (spinner, stop button, disabled composer) and re-map
         // task -> conversation so the live event stream resolves again.
@@ -96,21 +103,46 @@ export function useSessionsViewModel() {
   useEffect(() => {
     if (!connected || !needsHydration) return;
     const conversationId = needsHydration;
-    void bridge
-      .rpc("session.getMessages", { conversationId })
-      .then(({ messages }) => {
-        useSessionsStore.getState().hydrate(
-          conversationId,
-          messages.map((m) => ({
-            id: m.id,
-            role: m.role,
-            text: m.text,
-            logTopic: m.logTopic,
-            diff: m.diff,
-          }))
-        );
-      })
-      .catch(() => undefined);
+    void (async () => {
+      const [{ messages }, { tasks }] = await Promise.all([
+        bridge.rpc("session.getMessages", { conversationId }),
+        bridge.rpc("task.list", { conversationId }),
+      ]);
+      const store = useSessionsStore.getState();
+      const items = messages.map((m) => ({
+          id: m.id,
+          taskId: m.taskId,
+          createdAt: m.createdAt,
+          role: m.role,
+          text: m.text,
+          logTopic: m.logTopic,
+          logDetail: m.logDetail,
+          diff: m.diff,
+        }));
+      store.hydrate(conversationId, items);
+      const executions = (await Promise.all(tasks.map(loadExecutionTimeline))).map(
+        (execution) => {
+          const request = items.find(
+            (item) => item.taskId === execution.taskId && item.role === "user"
+          );
+          const report = [...items]
+            .reverse()
+            .find(
+              (item) =>
+                item.taskId === execution.taskId && item.role === "assistant"
+            );
+          return {
+            ...execution,
+            request: execution.frontendReview
+              ? execution.request
+              : request?.text ?? execution.request,
+            report: report?.text ?? "",
+            requestedAt: request?.createdAt ?? execution.requestedAt,
+          };
+        }
+      );
+      useSessionsStore.getState().setExecutions(conversationId, executions);
+    })().catch(() => undefined);
   }, [connected, needsHydration]);
 
   /** Selecting a session always brings the Chat view to the front. */
@@ -197,4 +229,21 @@ function pendingHydration(state: {
 
 function errText(e: unknown): string {
   return String((e as { message?: string } | undefined)?.message ?? e);
+}
+
+async function hydrateSessionPreviews(conversationIds: string[]): Promise<void> {
+  await Promise.all(
+    conversationIds.map(async (conversationId) => {
+      const session = useSessionsStore.getState().sessions[conversationId];
+      if (!session || session.previewText !== null || session.items.length > 0) return;
+      const { messages } = await bridge.rpc("session.getMessages", { conversationId });
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const text = messages[index]?.text?.replaceAll("\n", " ").trim();
+        if (text) {
+          useSessionsStore.getState().setPreview(conversationId, text);
+          return;
+        }
+      }
+    })
+  ).catch(() => undefined);
 }

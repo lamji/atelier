@@ -192,8 +192,7 @@ export function CommandPalette(props: CommandPaletteProps) {
           transition={{ duration: 0.14, ease: [0.2, 0, 0.2, 1] }}
           onKeyDown={onKeyDown}
           className={cn(
-            "flex w-[min(44rem,calc(100vw-3rem))] flex-col overflow-hidden",
-            "rounded-lg border border-border bg-elevated shadow-2xl"
+            "modal-surface flex w-[min(44rem,calc(100vw-3rem))] flex-col overflow-hidden"
           )}
         >
           <div className="flex items-center gap-2 border-b border-border-subtle px-3">
@@ -299,7 +298,7 @@ function Option(props: {
   return (
     <>
       {props.showGroupHeader && row.kind === "command" && (
-        <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+        <p className="px-3 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground/60">
           {row.command.group}
         </p>
       )}

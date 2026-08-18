@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+/** Added/removed line counts for one side of a file's change. */
+export const GitLineStat = z.object({
+  added: z.number(),
+  removed: z.number(),
+  /** git reports "-" for binary files — the counts are 0 and meaningless. */
+  binary: z.boolean().optional(),
+});
+export type GitLineStat = z.infer<typeof GitLineStat>;
+
 export const GitFileStatus = z.object({
   path: z.string(),
   index: z.string(),
@@ -13,8 +22,36 @@ export const GitFileStatus = z.object({
    * contract. Optional: an older agent simply does not send it.
    */
   mark: z.string().optional(),
+  /**
+   * Line delta of the STAGED side (HEAD → index) and of the WORKING side
+   * (index → working tree). Kept apart because one file can have both, and
+   * the panel shows it in both sections. Absent when the count could not
+   * be taken (an older agent, or an untracked file too big to read).
+   */
+  indexStat: GitLineStat.optional(),
+  workStat: GitLineStat.optional(),
 });
 export type GitFileStatus = z.infer<typeof GitFileStatus>;
+
+/** Which multi-step operation left the repo mid-flight. */
+export const GitMergeKind = z.enum(["merge", "rebase", "cherry-pick", "revert"]);
+export type GitMergeKind = z.infer<typeof GitMergeKind>;
+
+/**
+ * An in-progress merge-like operation (MERGE_HEAD, rebase-merge/,
+ * CHERRY_PICK_HEAD, REVERT_HEAD). Present whether or not conflicts remain:
+ * "all resolved, not yet committed" is still this state.
+ */
+export const GitMergeState = z.object({
+  kind: GitMergeKind,
+  /** Human label for the side HEAD is on — what git calls "ours". */
+  ours: z.string(),
+  /** Human label for the side being brought in — git's "theirs". */
+  theirs: z.string(),
+  /** Message git prepared for the resulting commit (MERGE_MSG), if any. */
+  message: z.string().optional(),
+});
+export type GitMergeState = z.infer<typeof GitMergeState>;
 
 export const GitStatus = z.object({
   branch: z.string(),
@@ -24,8 +61,63 @@ export const GitStatus = z.object({
   isClean: z.boolean(),
   /** False when the repo has no remotes configured (never pushed anywhere). */
   hasRemote: z.boolean(),
+  /**
+   * Workspace-relative paths still unmerged in the index (every conflict
+   * shape: UU, AA, DD, AU, UA, DU, UD). Empty when nothing is conflicted.
+   */
+  conflicts: z.array(z.string()),
+  /** The merge/rebase/… in flight, or null when the repo is at rest. */
+  mergeState: GitMergeState.nullable(),
 });
 export type GitStatus = z.infer<typeof GitStatus>;
+
+/**
+ * Everything the resolver needs for ONE conflicted file. Sides come from
+ * the index stages (:1: base, :2: ours, :3: theirs); a side that does not
+ * exist there (added on one side only, deleted on the other) is "".
+ */
+export const GitConflictFile = z.object({
+  path: z.string(),
+  base: z.string(),
+  ours: z.string(),
+  theirs: z.string(),
+  /** Working-tree content — the file with conflict markers in it. */
+  current: z.string(),
+  oursLabel: z.string(),
+  theirsLabel: z.string(),
+  /** True once the index no longer lists the path as unmerged. */
+  resolved: z.boolean(),
+});
+export type GitConflictFile = z.infer<typeof GitConflictFile>;
+
+/** A configured remote. */
+export const GitRemote = z.object({ name: z.string(), url: z.string() });
+export type GitRemote = z.infer<typeof GitRemote>;
+
+/**
+ * Everything the pull/push/checkout pickers need, read from the local ref
+ * store (no network — a Fetch button refreshes it). `remote` branches are
+ * split into remote + branch so the pickers can filter by remote.
+ */
+export const GitRefs = z.object({
+  current: z.string(),
+  remotes: z.array(GitRemote),
+  local: z.array(
+    z.object({
+      name: z.string(),
+      /** "origin/main" when the branch tracks a remote branch. */
+      upstream: z.string().nullable(),
+    })
+  ),
+  remote: z.array(
+    z.object({ ref: z.string(), remote: z.string(), branch: z.string() })
+  ),
+});
+export type GitRefs = z.infer<typeof GitRefs>;
+
+/** How `git pull` reconciles a diverged branch. */
+export const GitPullMode = z.enum(["merge", "rebase", "ff-only"]);
+export type GitPullMode = z.infer<typeof GitPullMode>;
 
 export const GitCommit = z.object({
   hash: z.string(),

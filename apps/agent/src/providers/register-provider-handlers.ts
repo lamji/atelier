@@ -204,7 +204,6 @@ async function applyModelToggle(
     const access = await probeOllamaModelAccess(name, OLLAMA_CLOUD);
     if (access === "subscription-required") {
       setModelSubscriptionRequired(id, name, true);
-      return;
     }
     if (access === "available") {
       setModelSubscriptionRequired(id, name, false);

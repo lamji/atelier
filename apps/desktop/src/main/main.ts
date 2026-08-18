@@ -1,4 +1,6 @@
 import { writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { app, BrowserWindow } from "electron";
 import { createMainWindow } from "./window";
 import { devUrl, packagedIndexHtml } from "./resolve-url";
@@ -8,6 +10,22 @@ import { installAppMenu } from "./menu";
 import { mark } from "./boot-trace";
 import { ProjectManager, resolveAgentEntry } from "./project-manager";
 
+function configureAppIdentity(): void {
+  if (app.isPackaged) {
+    app.setAppUserModelId("dev.atelier.desktop");
+    return;
+  }
+  const base =
+    process.env.LOCALAPPDATA ?? path.join(os.homedir(), ".local", "share");
+  const devDataDir = path.join(base, "atelier-dev");
+  process.env.ATELIER_DATA_DIR = process.env.ATELIER_DATA_DIR ?? devDataDir;
+  app.setName("Atelier Dev");
+  app.setPath("userData", devDataDir);
+  app.setAppUserModelId("dev.atelier.desktop.dev");
+}
+
+configureAppIdentity();
+
 const projects = new ProjectManager(resolveAgentEntry());
 
 app.whenReady().then(() => {
@@ -15,10 +33,9 @@ app.whenReady().then(() => {
   installAppMenu();
   registerIpcHandlers();
   registerAppIpc(projects);
-  // The agent fork and workspace prewarm are both on the critical path to a
-  // usable window and neither one needs the renderer.
+  // The host fork can overlap renderer load. Opening a workspace is left to
+  // the renderer so heavy db/watch/indexer work cannot run before first paint.
   projects.prewarmHost();
-  projects.prewarmWorkspace();
   void start();
 
   app.on("activate", () => {

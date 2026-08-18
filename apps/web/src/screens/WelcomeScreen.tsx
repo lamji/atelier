@@ -64,7 +64,7 @@ export function WelcomeScreen() {
 
   return (
     <div
-      className="flex h-full flex-col bg-background"
+      className="relative flex h-full flex-col bg-background"
       onDragOver={(event) => {
         event.preventDefault();
         setDragging(true);
@@ -79,7 +79,7 @@ export function WelcomeScreen() {
     >
       <BareTitleBar />
 
-      <main className="flex min-h-0 flex-1 items-center justify-center px-6 pb-10">
+      <main className="flex min-h-0 flex-1 items-center justify-center px-6">
         <motion.div
           initial={reduceMotion ? false : { opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}

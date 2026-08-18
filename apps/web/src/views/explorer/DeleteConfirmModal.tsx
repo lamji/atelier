@@ -44,7 +44,7 @@ export function DeleteConfirmModal(props: DeleteConfirmModalProps) {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 8 }}
             transition={{ type: "spring", stiffness: 300, damping: 28 }}
-            className="island flex w-full max-w-sm flex-col overflow-hidden"
+            className="modal-surface island flex w-full max-w-sm flex-col overflow-hidden"
           >
             <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
               <Trash2 className="h-4 w-4 text-destructive" />

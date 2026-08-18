@@ -170,14 +170,14 @@ export function Select({
                 "fixed z-[100] max-w-[min(20rem,80vw)]",
                 // Long branch lists scroll instead of running off-screen.
                 "max-h-[min(18rem,60vh)] overflow-y-auto overflow-x-hidden",
-                "rounded-lg border border-white/10 bg-card p-1 shadow-xl",
+                "rounded-lg border border-border bg-card p-1 shadow-pop",
                 menuClassName,
               )}
             >
               {options.map((option) => (
                 <li key={option.value}>
                   {option.separator ? (
-                    <div className="px-2 pb-1 pt-1.5 text-[9px] font-medium uppercase tracking-wide text-muted-foreground/50">
+                    <div className="px-2 pb-1 pt-1.5 text-[9px] font-medium text-muted-foreground/50">
                       {option.label}
                     </div>
                   ) : (

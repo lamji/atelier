@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import type { MethodParams } from "@atelier/protocol";
 import { newId } from "@atelier/shared";
 import { bridge } from "@/services/bridge-client";
+import { alert } from "@/state/alerts.store";
 import { useGitFlowStore } from "@/state/git-flow.store";
 import { useGitStore } from "@/state/git.store";
 import { useSessionsStore } from "@/state/sessions.store";
@@ -74,8 +75,10 @@ export function useGitFlowViewModel() {
         });
         useGitStore.getState().bumpStateVersion();
         if (result.ok) {
+          alert.success("Committed", firstLine(state().commitMessage));
           patch({ running: false, stage: "push" });
         } else {
+          alert.danger(`Commit failed (exit ${result.exitCode})`, "hooks output is in the wizard");
           patch({
             running: false,
             stage: "commit-fix",
@@ -83,6 +86,7 @@ export function useGitFlowViewModel() {
           });
         }
       } catch (e) {
+        alert.danger("Commit failed", errText(e));
         patch({ running: false, stage: "commit-fix", error: errText(e) });
       }
     },
@@ -113,6 +117,7 @@ export function useGitFlowViewModel() {
       const result = await streamRun("git.pushRun", { flags });
       useGitStore.getState().bumpStateVersion();
       if (!result.ok) {
+        alert.danger(`Push failed (exit ${result.exitCode})`, "see the wizard output");
         patch({
           running: false,
           stage: "push-fix",
@@ -120,6 +125,7 @@ export function useGitFlowViewModel() {
         });
         return;
       }
+      alert.success("Pushed to origin", state().info?.branch);
       const next = state().afterPush;
       if (next === "done") {
         patch({ running: false, stage: "done" });
@@ -130,6 +136,7 @@ export function useGitFlowViewModel() {
       }
     } catch (e) {
       const text = errText(e);
+      alert.danger("Push failed", text);
       // A rejected flag is an input mistake — stay on the push screen.
       const stage = text.includes("flag not allowed") ? "push" : "push-fix";
       patch({ running: false, stage, error: text });
@@ -185,6 +192,7 @@ export function useGitFlowViewModel() {
     patch({ running: true, error: null });
     try {
       await bridge.rpc("git.checkout", { ref: name, create: true });
+      alert.success(`Created branch ${name}`);
       useGitStore.getState().bumpStateVersion();
       // The header shows the branch — keep it truthful after the switch.
       const info = state().info;
@@ -290,8 +298,10 @@ export function useGitFlowViewModel() {
         body: s.prBody,
       });
       if (result.ok) {
+        alert.success("Pull request created", result.url);
         patch({ running: false, stage: "done", prUrl: result.url ?? null });
       } else {
+        alert.danger(`PR creation failed (exit ${result.exitCode})`, "see the wizard output");
         patch({
           running: false,
           stage: "pr-fix",
@@ -314,11 +324,13 @@ export function useGitFlowViewModel() {
       const result = await streamRun("git.mergeRun", { base });
       useGitStore.getState().bumpStateVersion();
       if (result.ok) {
+        alert.success(`Merged origin/${base}`, "no conflicts");
         // Base merged cleanly after all — push the merge and re-validate.
         patch({ afterPush: "pr-conflicts" });
         await runPush();
         return;
       }
+      alert.warning(`Merging origin/${base} left conflicts`, "the wizard's AI fix can resolve them");
       patch({
         running: false,
         stage: "conflict-fix",
@@ -467,4 +479,8 @@ function buildFixPrompt(
 
 function errText(e: unknown): string {
   return String(e).replace(/^Error:\s*/, "").slice(0, 300);
+}
+
+function firstLine(text: string): string {
+  return (text.split("\n")[0] ?? "").trim().slice(0, 72);
 }

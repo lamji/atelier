@@ -1,32 +1,31 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  Check,
-  FolderOpen,
-  GaugeCircle,
-  GitBranch,
-  Layers,
-  Loader2,
-  Plug,
-  PlugZap,
-  RefreshCw,
-} from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Check, FolderOpen, Layers, Loader2, Plug, PlugZap, Activity } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import type { AgentStatus, ConnectionState } from "@/types";
+import type { ConnectionState } from "@/types";
 import type { IndexingProgress } from "@/state/knowledge.store";
-import type { UsageVm } from "@/hooks/useUsageViewModel";
 import type { ContextStatsVm } from "@/hooks/useContextStatsViewModel";
-import type { UsageWindow } from "@atelier/protocol";
 
+/**
+ * What is left in the bottom strip once the dock has it.
+ *
+ * Agent state and the current branch are gone from here: the dock badges
+ * working agents and changed files, and the chat's own header reports what
+ * the agent is doing, so the bar was saying it a second time in smaller type.
+ * Plan usage is gone too — it is behind the dock's gauge tile now, where it
+ * has room for the reset times.
+ */
 export interface StatusBarProps {
+  /**
+   * Centred between the two status clusters — the dock. The bar owns the
+   * bottom strip, and the dock has to sit in the middle of it, so it is
+   * passed in rather than the shell stacking a second full-width layer here
+   * that would overlap the status text at narrow widths.
+   */
+  left?: ReactNode;
   connection: ConnectionState;
-  agentStatus: AgentStatus;
   agentStatusDetail?: string;
   workspaceRoot: string | null;
-  /** Live current git branch, straight from git.state.changed. */
-  branch: string | null;
-  /** Live plan usage. */
-  usage: UsageVm;
   /** Live context-engineering token metrics. */
   contextStats: ContextStatsVm;
   /** Live indexing indicator (shown beside the folder path). */
@@ -44,107 +43,128 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
 
 export function StatusBar(props: StatusBarProps) {
   const connOk = props.connection === "connected";
-  const agentTone =
-    props.agentStatus === "waiting-auth" || props.agentStatus === "error"
-      ? "text-destructive"
-      : props.agentStatus === "working"
-        ? "text-primary"
-        : "text-muted-foreground";
 
+  const showSync = props.indexingActive || props.lastIndexedAt != null;
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
+  /*
+   * Three columns, not one flex row: the dock has to be centred on the WINDOW,
+   * and in a flex row it would sit wherever the status clusters left it —
+   * drifting sideways every time a path or a sync label changed length. The
+   * `1fr` sides are equal by construction, so the middle column is centred
+   * whatever they contain, and each side truncates into its own half.
+   */
   return (
-    <div
-      role="status"
-      aria-label="Workspace status"
-      className="flex h-full items-center gap-3 px-2 text-[11px]"
-    >
-      <Tooltip content={`Agent bridge: ${CONNECTION_LABEL[props.connection]}`}>
-        <span
-          className={cn(
-            "flex shrink-0 items-center gap-1.5 font-medium",
-            connOk ? "text-success" : "text-destructive"
-          )}
-        >
-          {connOk ? (
-            <PlugZap className="h-3.5 w-3.5" />
-          ) : (
-            <Plug className="h-3.5 w-3.5" />
-          )}
-          {CONNECTION_LABEL[props.connection]}
-        </span>
-      </Tooltip>
-      <span
-        className={cn(
-          "flex shrink-0 items-center gap-1.5 whitespace-nowrap font-medium",
-          agentTone
-        )}
+    <div className="taskbar-grid">
+      <div className="flex min-w-0 items-center justify-start gap-2 overflow-visible">
+        {props.left}
+      </div>
+
+      <div
+        role="status"
+        aria-label="Workspace status"
+        className="flex min-w-0 items-center justify-end gap-3.5 text-[11px]"
       >
-        <span
-          className={cn(
-            "h-1.5 w-1.5 rounded-full bg-current",
-            props.agentStatus === "working" && "animate-pulse"
-          )}
-        />
-        agent {props.agentStatus}
-      </span>
-      {/*
-        Priority shedding. Everything here is real state and all of it is
-        useful, but the bar is one line and at 900px it wants more than the
-        window has. So the least durable items give way first — the transient
-        detail text, then the context pill, then the usage countdowns — which
-        keeps connection, agent state, branch and workspace visible at every
-        width instead of letting the right-hand end clip away silently.
-      */}
-      {props.agentStatusDetail && (
-        <span className="hidden min-w-0 truncate text-muted-foreground md:inline">
-          {props.agentStatusDetail}
-        </span>
-      )}
-      {props.branch && (
-        <Tooltip content="Current branch">
-          <span className="flex min-w-0 shrink-0 items-center gap-1.5 font-medium text-muted-foreground">
-            <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary" />
-            <span className="max-w-[160px] truncate">{props.branch}</span>
+        {props.agentStatusDetail && (
+          <span className="hidden min-w-0 truncate text-muted-foreground 2xl:inline">
+            {props.agentStatusDetail}
           </span>
-        </Tooltip>
-      )}
-      <UsagePill usage={props.usage} />
-      <ContextPill stats={props.contextStats} />
-      {(() => {
-        const showSync =
-          props.indexingActive || props.lastIndexedAt != null;
-        return (
-          <>
-            {showSync && (
-              <SyncStatus
-                active={props.indexingActive}
-                indexing={props.indexing}
-                lastIndexedAt={props.lastIndexedAt}
-              />
-            )}
-            {/*
-              shrink-0 with a capped width, not the flexible item: in a narrow
-              window the flexible item is squeezed first, and this one used to
-              be it — the workspace you are in vanished from the bar while the
-              transient agent-status text kept its space. The detail text is
-              the one that gives way now.
-            */}
-            <Tooltip content={props.workspaceRoot ?? "No workspace attached"}>
-              <span
-                className={cn(
-                  "flex shrink-0 items-center gap-1.5 text-muted-foreground",
-                  !showSync && "ml-auto"
+        )}
+        <div className="relative border-l border-border-subtle pl-3.5">
+          <Tooltip content={detailsOpen ? "Hide workspace details" : "Show workspace details"}>
+            <button
+              type="button"
+              aria-label="Show workspace details"
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen((open) => !open)}
+              className={cn(
+                "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
+                detailsOpen
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground hover:bg-accent/70 hover:text-foreground"
+              )}
+            >
+              <Activity className={cn("h-4 w-4", detailsOpen && "text-primary")} />
+            </button>
+          </Tooltip>
+          {detailsOpen && (
+            <div
+              role="dialog"
+              aria-label="Workspace details"
+              className="absolute bottom-9 right-0 z-50 w-96 rounded-lg border border-border-subtle bg-card p-4 text-[11px] text-foreground shadow-pop"
+            >
+              <div className="mb-3 flex items-center gap-2 border-b border-border-subtle pb-3 font-medium">
+                <Activity className="h-3.5 w-3.5 text-primary" />
+                Workspace details
+              </div>
+              <div className="space-y-3">
+                <div className="grid grid-cols-[90px_1fr] gap-3 items-center">
+                  <span className="text-muted-foreground">Connection</span>
+                  <span className={cn("flex items-center gap-1.5 font-medium", connOk ? "text-success" : "text-destructive")}>
+                    {connOk ? <PlugZap className="h-3.5 w-3.5" /> : <Plug className="h-3.5 w-3.5" />}
+                    {CONNECTION_LABEL[props.connection]}
+                  </span>
+                </div>
+                <div className="grid grid-cols-[90px_1fr] gap-3 items-start">
+                  <span className="text-muted-foreground pt-1">Workspace</span>
+                  <Tooltip content={props.workspaceRoot ?? "No workspace attached"}>
+                    <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                      <FolderOpen className="h-3.5 w-3.5 shrink-0 flex-shrink-0" />
+                      <span className="truncate [direction:rtl] [text-align:left]">{props.workspaceRoot ?? "no workspace"}</span>
+                    </span>
+                  </Tooltip>
+                </div>
+                {showSync && (
+                  <div className="grid grid-cols-[90px_1fr] gap-3 items-center">
+                    <span className="text-muted-foreground">Knowledge</span>
+                    <SyncStatus active={props.indexingActive} indexing={props.indexing} lastIndexedAt={props.lastIndexedAt} />
+                  </div>
                 )}
-              >
-                <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-                {/* Tail-truncated: the deep end of a path identifies it. */}
-                <span className="max-w-[220px] truncate [direction:rtl] [text-align:left]">
-                  {props.workspaceRoot ?? "no workspace"}
-                </span>
+                {props.contextStats.available && props.contextStats.last && (
+                  <div className="grid grid-cols-[90px_1fr] gap-3 items-center">
+                    <span className="text-muted-foreground">Context</span>
+                    <ContextPill stats={props.contextStats} />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="hidden items-center gap-3.5">
+          <Activity className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+          <ContextPill stats={props.contextStats} />
+          {showSync && (
+            <SyncStatus
+              active={props.indexingActive}
+              indexing={props.indexing}
+              lastIndexedAt={props.lastIndexedAt}
+            />
+          )}
+          <Tooltip content={props.workspaceRoot ?? "No workspace attached"}>
+            <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
+              <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+              <span className="max-w-[220px] truncate [direction:rtl] [text-align:left]">
+                {props.workspaceRoot ?? "no workspace"}
               </span>
-            </Tooltip>
-          </>
-        );
-      })()}
+            </span>
+          </Tooltip>
+          <Tooltip content={`Agent bridge: ${CONNECTION_LABEL[props.connection]}`}>
+            <span
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 font-medium",
+                connOk ? "text-success" : "text-destructive"
+              )}
+            >
+              {connOk ? (
+                <PlugZap className="h-3.5 w-3.5" />
+              ) : (
+                <Plug className="h-3.5 w-3.5" />
+              )}
+              {CONNECTION_LABEL[props.connection]}
+            </span>
+          </Tooltip>
+        </div>
+      </div>
     </div>
   );
 }
@@ -230,89 +250,6 @@ function formatSince(ms: number): string {
 }
 
 /**
- * Live plan usage as compact bars — one per window (5-hour, weekly, …),
- * each showing how much has been USED and when it resets. Hidden for
- * API-key sessions where plan limits do not apply.
- */
-function UsagePill({ usage }: { usage: UsageVm }) {
-  // Tick once a second so the reset countdowns advance live.
-  const [now, setNow] = useState(() => Date.now());
-  const lastResetRefresh = useRef(0);
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // When any window's countdown crosses zero the window has reset — pull a
-  // fresh probe (guarded so it fires once, not every tick) to get the new
-  // reset time and the reset utilization.
-  const anyExpired = usage.windows.some(
-    (w) => w.resetsAt != null && w.resetsAt - now <= 0
-  );
-  useEffect(() => {
-    if (!anyExpired || usage.refreshing) return;
-    if (now - lastResetRefresh.current < 15_000) return;
-    lastResetRefresh.current = now;
-    usage.refresh();
-  }, [anyExpired, now, usage]);
-
-  if (!usage.available || usage.windows.length === 0) return null;
-  return (
-    <span className="hidden shrink-0 items-center gap-3 md:flex">
-      <GaugeCircle className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-      {usage.windows.map((w) => (
-        <UsageBar key={w.kind} window={w} now={now} />
-      ))}
-      <Tooltip content="Refresh usage now (auto-refreshes every 2 min)">
-        <button
-          onClick={usage.refresh}
-          disabled={usage.refreshing}
-          className="rounded p-0.5 text-muted-foreground/70 hover:text-foreground disabled:opacity-50"
-        >
-          <RefreshCw
-            className={cn("h-3 w-3", usage.refreshing && "animate-spin")}
-          />
-        </button>
-      </Tooltip>
-    </span>
-  );
-}
-
-/** One window: label, a fill bar of % used, the %, and a live countdown. */
-function UsageBar({ window: w, now }: { window: UsageWindow; now: number }) {
-  const used = Math.round(w.utilization);
-  // Semantic, not decorative: the bar changes meaning at these thresholds, so
-  // it uses the shared danger/warning tokens rather than a one-off amber.
-  const fill =
-    used >= 90 ? "bg-destructive" : used >= 70 ? "bg-warning" : "bg-primary";
-  const remaining = w.resetsAt != null ? w.resetsAt - now : null;
-  return (
-    <Tooltip
-      content={`${w.label}: ${used}% used${
-        w.resetsAt ? ` · resets in ${formatCountdown(w.resetsAt - now)}` : ""
-      }`}
-    >
-      <span className="flex items-center gap-1.5">
-        <span className="font-medium text-muted-foreground">{w.label}</span>
-        <span className="h-1.5 w-16 overflow-hidden rounded-full bg-muted-foreground/20">
-          <span
-            className={cn("block h-full rounded-full", fill)}
-            style={{ width: `${Math.min(100, Math.max(2, used))}%` }}
-          />
-        </span>
-        <span className="tabular-nums text-muted-foreground">{used}%</span>
-        {remaining != null && (
-          <span className="hidden tabular-nums text-muted-foreground/60 xl:inline">
-            · {formatCountdown(remaining)}
-          </span>
-        )}
-      </span>
-    </Tooltip>
-  );
-}
-
-/**
  * Live context-engineering metrics: what the last request's assembled
  * context cost, its savings vs naive assembly, and — across the recent
  * window — fresh input vs prompt-cache reads.
@@ -347,7 +284,7 @@ function ContextPill({ stats }: { stats: ContextStatsVm }) {
     (cacheShare !== null ? ` · session cache share ${cacheShare}%` : "");
   return (
     <Tooltip content={tip}>
-      <span className="hidden shrink-0 items-center gap-1.5 text-muted-foreground lg:flex">
+      <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
         <Layers className="h-3.5 w-3.5 shrink-0 text-primary" />
         <span className="tabular-nums">
           ctx {fmtTokens(last.appendTokens)}
@@ -363,19 +300,4 @@ function ContextPill({ stats }: { stats: ContextStatsVm }) {
 /** Compact token count: "840t", "12.4kt". */
 function fmtTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(1)}kt` : `${n}t`;
-}
-
-/** Time-remaining countdown: "3d 4h", "2h 05m", "4m 12s", "9s", "reset". */
-function formatCountdown(ms: number): string {
-  if (ms <= 0) return "reset";
-  const total = Math.floor(ms / 1000);
-  const d = Math.floor(total / 86_400);
-  const h = Math.floor((total % 86_400) / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${pad(m)}m`;
-  if (m > 0) return `${m}m ${pad(s)}s`;
-  return `${s}s`;
 }

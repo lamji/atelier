@@ -1,7 +1,7 @@
 ---
 feature: chat flow
 slug: chat-flow
-status: ready
+status: stale
 updated: 2026-08-08T13:50:42.264Z
 aliases:
   - git flow
@@ -187,3 +187,4 @@ The commit → push → PR wizard guides users through publishing changes to Git
 **ANSI Escape Codes**: Output is stripped of CSI (colors/cursor) and OSC (title/link) sequences before display. Hooks can still run and see colors.
 
 **GIT_TERMINAL_PROMPT=0**: Git commands fail fast on interactive credential prompts instead of hanging.
+

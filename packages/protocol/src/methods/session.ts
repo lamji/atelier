@@ -10,7 +10,7 @@ export const SlashCommand = z.object({
   name: z.string(),
   description: z.string(),
   kind: z.enum(["command", "skill"]),
-  scope: z.enum(["user", "project"]),
+  scope: z.enum(["app", "user", "project"]),
   enabled: z.boolean().default(true),
 });
 export type SlashCommand = z.infer<typeof SlashCommand>;
@@ -67,8 +67,8 @@ export const sessionMethods = {
     params: z.object({ conversationId: z.string() }),
     result: z.object({ messages: z.array(ChatMessage) }),
   },
-  // Slash commands + skills from ~/.claude and <workspace>/.claude, for
-  // the composer's "/" autocomplete (Claude Code-style).
+  // Bundled application skills plus ~/.claude and <workspace>/.claude
+  // commands and skills, for the composer's "/" autocomplete.
   "session.listCommands": {
     params: z.object({}).optional(),
     result: z.object({ commands: z.array(SlashCommand) }),

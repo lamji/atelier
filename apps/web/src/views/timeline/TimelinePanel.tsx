@@ -2,6 +2,7 @@ import { memo, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
+  BookOpen,
   CheckCircle2,
   Database,
   FileDiff,
@@ -13,15 +14,18 @@ import {
   Network,
   Play,
   Radar,
+  Send,
   TerminalSquare,
   Webhook,
   Wrench,
   XCircle,
 } from "lucide-react";
+import { llmRequestSummary } from "@atelier/shared";
 import { cn } from "@/lib/cn";
 import { actionDetail, actionLabel } from "@/lib/tool-labels";
 import { useStickToTop } from "@/hooks/useStickToBottom";
 import type { TimelineEntryVm } from "@/types";
+import type { LlmRequestLike } from "@atelier/shared";
 
 export interface TimelinePanelProps {
   entries: TimelineEntryVm[];
@@ -90,7 +94,11 @@ function styleFor(topic: string): TopicStyle {
     return { icon: Network, tone: "primary" };
   }
   if (topic === "session.recalled") return { icon: History, tone: "primary" };
+  if (topic === "working-memory.reused") return { icon: History, tone: "primary" };
+  if (topic === "llm.request") return { icon: Send, tone: "primary" };
+  if (topic.startsWith("wiki.")) return { icon: BookOpen, tone: "primary" };
   if (topic === "scope.locked") return { icon: FolderLock, tone: "primary" };
+  if (topic === "scope.escaped") return { icon: FolderLock, tone: "destructive" };
   if (topic === "task.completed") return { icon: CheckCircle2, tone: "success" };
   if (topic === "task.started") return { icon: Play, tone: "primary" };
   if (topic.startsWith("tool.")) return { icon: Wrench, tone: "primary" };
@@ -189,6 +197,14 @@ function summarize(entry: TimelineEntryVm): string {
       const repo = typeof p.repo === "string" && p.repo ? ` · git: ${p.repo}` : "";
       return `${roots.map((r) => `${r}/`).join(", ")}${repo}`;
     }
+    case "scope.escaped":
+      return `${String(p.tool ?? "")} let through to ${String(p.path ?? "")}`;
+    case "wiki.recalled": {
+      const pages = Array.isArray(p.pages) ? p.pages.length : 0;
+      return `${pages} page(s) · ~${Number(p.tokens ?? 0)} tok`;
+    }
+    case "wiki.updated":
+      return `${p.created ? "created" : "updated"} ${String(p.title ?? "")}`;
     case "session.recalled": {
       const labels = Array.isArray(p.labels) ? p.labels.map(String) : [];
       const head =
@@ -218,6 +234,13 @@ function summarize(entry: TimelineEntryVm): string {
     }
     case "summary.created":
       return String(p.text ?? "").slice(0, 160);
+    case "llm.request":
+      return llmRequestSummary(p as unknown as LlmRequestLike);
+    case "working-memory.reused":
+      return (
+        `${Number(p.inlined ?? 0)} file(s) reused · ${Number(p.listed ?? 0)} listed · ` +
+        `${Number(p.searches ?? 0)} search(es) · ~${Number(p.tokens ?? 0)} tok`
+      );
     case "hook.blocked":
       return `${String(p.name)}: ${String(p.reason ?? "").slice(0, 120)}`;
     case "review.checked": {

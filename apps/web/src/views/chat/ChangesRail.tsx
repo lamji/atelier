@@ -31,7 +31,7 @@ export function ChangesRail(props: ChangesRailProps) {
     <aside
       className={cn(
         "flex h-full w-[var(--changes-rail-w)] shrink-0 flex-col",
-        "overflow-hidden border-l border-border bg-editor"
+        "overflow-hidden border-l border-border-subtle bg-panel"
       )}
     >
       <TabStrip
@@ -78,10 +78,7 @@ function TabStrip(props: {
     <div
       role="tablist"
       aria-label="Changed files"
-      className={cn(
-        "flex shrink-0 items-stretch overflow-x-auto border-b border-border",
-        "bg-panel"
-      )}
+      className="flex shrink-0 items-center gap-1 overflow-x-auto px-2.5"
       style={{ height: "var(--tabbar-h)" }}
     >
       {props.changes.map((change) => {
@@ -95,20 +92,13 @@ function TabStrip(props: {
             title={change.path}
             onClick={() => props.onSelect(change.path)}
             className={cn(
-              "group relative flex max-w-[12rem] shrink-0 items-center gap-1.5",
-              "border-r border-border-subtle px-3 text-xs transition-colors",
+              "flex h-8 max-w-[12rem] shrink-0 items-center gap-1.5 rounded-full",
+              "px-3 text-xs font-medium transition-colors",
               active
-                ? "bg-editor text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
             )}
           >
-            <span
-              aria-hidden
-              className={cn(
-                "absolute inset-x-0 top-0 h-[2px] bg-primary transition-opacity",
-                active ? "opacity-100" : "opacity-0"
-              )}
-            />
             <FileDiff className="h-3.5 w-3.5 shrink-0 opacity-80" />
             <span className="truncate">{basename(change.path)}</span>
           </button>
@@ -116,7 +106,7 @@ function TabStrip(props: {
       })}
       <span aria-hidden className="min-w-0 flex-1" />
       {props.changes.length > 0 && (
-        <span className="flex shrink-0 items-center gap-2 px-3 text-[11px] tabular-nums">
+        <span className="flex shrink-0 items-center gap-2 pl-2 text-[11px] tabular-nums">
           <span className="text-muted-foreground">
             {props.changes.length} file{props.changes.length === 1 ? "" : "s"}
           </span>
@@ -135,7 +125,7 @@ function DiffPane(props: { change: FileChange }) {
       <div
         className={cn(
           "flex shrink-0 items-center gap-2 border-b border-border-subtle",
-          "px-3 py-1.5"
+          "px-3.5 py-2"
         )}
       >
         {/* Where the file lives. The tab above already carries its name, so

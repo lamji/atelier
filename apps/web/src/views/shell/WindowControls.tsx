@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Minus, Square, X } from "lucide-react";
+import { Copy, Maximize2, Minimize2, Minus, Square, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { desktopPlatform } from "@/lib/desktop";
 
@@ -11,12 +11,19 @@ import { desktopPlatform } from "@/lib/desktop";
  */
 export function WindowControls() {
   const [maximized, setMaximized] = useState(false);
+  const [kiosk, setKiosk] = useState(false);
   const api = window.atelierDesktop?.window;
 
   useEffect(() => {
     if (!api) return;
     void api.isMaximized().then(setMaximized);
-    return api.onMaximizedChanged(setMaximized);
+    void api.isKiosk().then(setKiosk);
+    const offMaximized = api.onMaximizedChanged(setMaximized);
+    const offKiosk = api.onKioskChanged(setKiosk);
+    return () => {
+      offMaximized();
+      offKiosk();
+    };
   }, [api]);
 
   if (!api || desktopPlatform() === "darwin") return null;
@@ -31,24 +38,41 @@ export function WindowControls() {
     <div className="flex shrink-0 items-stretch">
       <button
         type="button"
-        aria-label="Minimize"
-        onClick={() => api.minimize()}
+        aria-label={kiosk ? "Restore normal window" : "Take over screen"}
+        title={kiosk ? "Restore normal window" : "Take over screen"}
+        onClick={() => api.kioskToggle()}
         className={buttonClass}
       >
-        <Minus className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        aria-label={maximized ? "Restore" : "Maximize"}
-        onClick={() => api.maximizeToggle()}
-        className={buttonClass}
-      >
-        {maximized ? (
-          <Copy className="h-3 w-3 -scale-x-100" />
+        {kiosk ? (
+          <Minimize2 className="h-3.5 w-3.5" />
         ) : (
-          <Square className="h-3 w-3" />
+          <Maximize2 className="h-3.5 w-3.5" />
         )}
       </button>
+      {!kiosk && (
+        <>
+          <button
+            type="button"
+            aria-label="Minimize"
+            onClick={() => api.minimize()}
+            className={buttonClass}
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label={maximized ? "Restore" : "Maximize"}
+            onClick={() => api.maximizeToggle()}
+            className={buttonClass}
+          >
+            {maximized ? (
+              <Copy className="h-3 w-3 -scale-x-100" />
+            ) : (
+              <Square className="h-3 w-3" />
+            )}
+          </button>
+        </>
+      )}
       <button
         type="button"
         aria-label="Close"
@@ -69,7 +93,7 @@ export function WindowControls() {
 export function BareTitleBar() {
   if (!window.atelierDesktop) return null;
   return (
-    <div className="app-drag flex h-[var(--titlebar-h)] shrink-0 items-stretch">
+    <div className="app-drag absolute inset-x-0 top-0 z-10 flex h-[var(--titlebar-h)] items-stretch">
       <div className="min-w-0 flex-1" />
       <WindowControls />
     </div>

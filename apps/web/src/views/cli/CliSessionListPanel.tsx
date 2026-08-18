@@ -93,10 +93,10 @@ export function CliSessionListPanel(props: {
   return (
     <div className="flex h-full flex-col">
       <div className="island-header justify-between">
-        <div className="flex items-center gap-1.5">
-          <TerminalSquare className="h-3.5 w-3.5 text-muted-foreground" />
-          <span className="island-title">CLI</span>
-        </div>
+        <span className="icon-tile icon-tile-sm">
+          <TerminalSquare className="h-3.5 w-3.5" />
+        </span>
+        <span className="island-title">CLI</span>
         <Button
           type="button"
           variant="ghost"
@@ -104,30 +104,30 @@ export function CliSessionListPanel(props: {
           title="New CLI session"
           aria-label="New CLI session"
           onClick={openProviderPicker}
-          className="tool-btn !h-6 !w-6"
+          className="tool-btn ml-auto !h-7 !w-7"
         >
           <Plus className="h-4 w-4" />
         </Button>
       </div>
       <div
-        className="flex gap-1 border-b border-border/60 px-2 py-1"
+        role="group"
+        className="segmented mx-3 mb-2 flex"
         aria-label="Filter CLI sessions by provider"
       >
         {[{ id: "all", label: "All" }, ...CLI_PROVIDERS].map((provider) => (
-          <Button
+          <button
             key={provider.id}
             type="button"
-            variant={providerFilter === provider.id ? "secondary" : "ghost"}
-            size="sm"
-            aria-pressed={providerFilter === provider.id}
+            role="tab"
+            aria-selected={providerFilter === provider.id}
             onClick={() => setProviderFilter(provider.id)}
-            className="h-6 flex-1 px-2 text-[11px]"
+            className="segment flex-1 justify-center"
           >
             {provider.label}
-          </Button>
+          </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {!bootstrapped || loadingHistory ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-4">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/50" />
@@ -184,7 +184,7 @@ function ProviderGroup(props: {
   return (
     <div className="pb-1">
       <div className="flex items-center gap-1.5 py-0.5 pl-2 pr-1">
-        <span className="min-w-0 flex-1 truncate text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-muted-foreground">
           {provider.label}
         </span>
       </div>
@@ -214,7 +214,7 @@ function ProviderGroup(props: {
         <>
           {/* Labelled, because these rows behave differently from the ones
               above: nothing is running behind them until you click. */}
-          <div className="px-2 pb-0.5 pt-1.5 text-[10px] uppercase tracking-wide text-muted-foreground/60">
+          <div className="px-2 pb-0.5 pt-1.5 text-[11px] text-muted-foreground/60">
             Recent
           </div>
           {props.history.map((entry) => (

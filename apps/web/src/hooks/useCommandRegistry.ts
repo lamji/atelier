@@ -23,7 +23,7 @@ import { openWorkspace } from "@/services/project-switch";
 import { useProjectsStore } from "@/state/projects.store";
 import { useThemeStore } from "@/state/theme.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
-import type { ActivityView } from "@/views/shell/ActivityBar";
+import type { ActivityView } from "@/views/shell/dock/dock-items";
 
 export interface Command {
   id: string;
@@ -61,7 +61,6 @@ const VIEWS: Array<{ id: ActivityView; label: string; icon: LucideIcon }> = [
   { id: "markdown", label: "Notes", icon: BookOpen },
   { id: "hooks", label: "Hooks", icon: Webhook },
   { id: "monitor", label: "Monitor", icon: Activity },
-  { id: "settings", label: "Settings", icon: Settings },
 ];
 
 /**
@@ -73,6 +72,7 @@ export function useCommandRegistry(sources: CommandSources): Command[] {
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
   const setActivityView = useWorkspaceStore((s) => s.setActivityView);
+  const openSettings = useWorkspaceStore((s) => s.openSettings);
   const setRightTab = useWorkspaceStore((s) => s.setRightTab);
   const bottomPanel = useWorkspaceStore((s) => s.bottomPanel);
   const setBottomPanel = useWorkspaceStore((s) => s.setBottomPanel);
@@ -94,6 +94,14 @@ export function useCommandRegistry(sources: CommandSources): Command[] {
       });
     }
 
+    list.push({
+      id: "view.settings",
+      title: "Open Settings",
+      group: "Go to",
+      icon: Settings,
+      run: openSettings,
+    });
+
     list.push(
       {
         id: "pane.chat",
@@ -104,7 +112,7 @@ export function useCommandRegistry(sources: CommandSources): Command[] {
       },
       {
         id: "panel.terminal",
-        title: bottomPanel ? "Hide bottom panel" : "Show Terminal panel",
+        title: bottomPanel ? "Minimize Terminal window" : "Open Terminal window",
         group: "View",
         icon: TerminalSquare,
         hint: "Ctrl+`",
@@ -195,13 +203,14 @@ export function useCommandRegistry(sources: CommandSources): Command[] {
       group: "Account",
       icon: UserRound,
       detail: "Opens Settings → Account",
-      run: () => setActivityView("settings"),
+      run: openSettings,
     });
 
     return list;
   }, [
     activeId,
     bottomPanel,
+    openSettings,
     projects,
     setActivityView,
     setBottomPanel,

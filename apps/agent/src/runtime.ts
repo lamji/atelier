@@ -1,3 +1,4 @@
+import path from "node:path";
 import type pino from "pino";
 import type { AgentConfig } from "./config/agent-config.js";
 import { EventBus } from "./events/event-bus.js";
@@ -9,6 +10,7 @@ import { CliSessionDiffRepo } from "./storage/repositories/cli-session-diffs.js"
 import { Router } from "./bridge/router.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { UsageMonitor } from "./orchestrator/usage-monitor.js";
+import { initUsage } from "./providers/ollama/usage.js";
 import {
   createUserRule,
   deleteUserRule,
@@ -25,6 +27,7 @@ import { ToolRegistry } from "./tools/registry.js";
 import { registerFsTools } from "./tools/fs-tools.js";
 import { registerGitTools } from "./tools/git-tools.js";
 import { registerTerminalTools } from "./tools/terminal-tools.js";
+import { registerPreviewReviewTools } from "./tools/preview-review-tools.js";
 import { GitService } from "./git/git-service.js";
 import { registerGitHandlers } from "./git/register-git-handlers.js";
 import { TerminalManager } from "./terminal/terminal-manager.js";
@@ -35,7 +38,7 @@ import {
   WorkspaceIgnore,
 } from "./workspace/ignore.js";
 import { SessionScopeStore } from "./workspace/scope/index.js";
-import { ScopeGuard } from "./tools/scope-guard.js";
+import { ScopeGuard, fileNamedUnder } from "./tools/scope-guard.js";
 import { FileService } from "./workspace/file-service.js";
 import { AttachmentStore } from "./context/attachments/attachment-store.js";
 import { NoteJournal } from "./notes/note-journal.js";
@@ -50,10 +53,20 @@ import {
 } from "./hooks/modularity-guard.js";
 import { followsOneSymbolPerFile } from "./hooks/modularity-convention.js";
 import {
+  FlexLayoutGuard,
+  FLEX_LAYOUT_HOOK_ID,
+  FLEX_LAYOUT_HOOK_NAME,
+} from "./hooks/flex-layout-guard.js";
+import {
   ImpactFirstGuard,
   IMPACT_HOOK_ID,
   IMPACT_HOOK_NAME,
 } from "./hooks/impact-guard.js";
+import {
+  PlanEditGuard,
+  PLAN_EDIT_HOOK_ID,
+  PLAN_EDIT_HOOK_NAME,
+} from "./hooks/plan-edit-guard.js";
 import {
   TargetedEditGuard,
   REWRITE_HOOK_ID,
@@ -98,9 +111,13 @@ import { TokenLedger } from "./context/ledger/index.js";
 import { PromptAssembler } from "./context/assemble/index.js";
 import { CachedRetriever, IndexGeneration } from "./context/cache/index.js";
 import { SentChunkStore } from "./context/dedup/index.js";
+import { WorkingMemoryStore } from "./context/working-memory/index.js";
+import { WikiCompiler, WikiStore } from "./knowledge/wiki/index.js";
+import { runOneShot } from "./providers/one-shot.js";
 import { TaskSummaryStore } from "./context/summaries/index.js";
 import { SharedSessionContextBuilder } from "./context/session/index.js";
 import { SkillLoader } from "./orchestrator/skill-loader.js";
+import { PlanCheckpointStore } from "./orchestrator/plan-checkpoint-store.js";
 
 export interface AgentRuntime {
   router: Router;
@@ -138,6 +155,13 @@ export function createAgentRuntime(
   const bus = new EventBus();
   const timeline = new TimelineStore(db, bus);
   const conversations = new ConversationRepo(db);
+  const interruptedTasks = conversations.markStaleTasksInterrupted();
+  if (interruptedTasks > 0) {
+    log.info(
+      { interruptedTasks },
+      "recovered tasks left running by the previous process"
+    );
+  }
   const cliSessionDiffs = new CliSessionDiffRepo(db);
   const settings = new SettingsRepo(db, {
     workspaceRoot: config.workspaceRoot,
@@ -152,6 +176,10 @@ export function createAgentRuntime(
     maxReviewRetries: 2,
   });
 
+  // Cloud activity is account-scoped, so it is initialized once from the
+  // agent's settings store before any Ollama call can be made.
+  initUsage(settings);
+
   const guard = new PathGuard(config.workspaceRoot);
   const ig = new WorkspaceIgnore(config.workspaceRoot, settings.get().ignoreGlobs);
   const files = new FileService(guard, ig, bus);
@@ -160,6 +188,7 @@ export function createAgentRuntime(
   registerFsTools(tools, files);
   registerGitTools(tools, git);
   registerTerminalTools(tools, guard, config.workspaceRoot, log);
+  registerPreviewReviewTools(tools, config.workspaceRoot);
   const codexTools = new CodexToolBridge(tools);
   const terminals = new TerminalManager(db, bus, config.workspaceRoot);
   const hooks = new HooksEngine(db, bus, config.workspaceRoot);
@@ -167,6 +196,21 @@ export function createAgentRuntime(
   // below enforce the knowledge engine, so they step aside for those runs;
   // the consent guards (git flow, DB, dev server) never do.
   const directTasks = new DirectTaskRegistry();
+  // Built-in flex-first layout hook: candidate UI writes may not add
+  // grid/position centering or alignment without a flex container. The
+  // preTool registration exposes the rule and its toggle; the write guard
+  // below sees the complete candidate content and makes the real decision.
+  hooks.ensureBuiltin({
+    id: FLEX_LAYOUT_HOOK_ID,
+    name: FLEX_LAYOUT_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file|replace_code|replace_many",
+    action: "block",
+    argument: "Use flexbox for UI layout and basic centering",
+  });
+  const flexLayout = new FlexLayoutGuard();
+  hooks.registerGuard(FLEX_LAYOUT_HOOK_ID, async () => undefined);
   // Built-in modularity hook: one file = one function/component/class.
   // Visible in hooks.list, can be disabled there; enforced on every write.
   hooks.ensureBuiltin({
@@ -194,6 +238,23 @@ export function createAgentRuntime(
   // and let the write guard decide.
   hooks.registerGuard(MODULARITY_HOOK_ID, async () => undefined);
   files.setWriteGuard(async (relPath, nextContent, prevContent, taskId) => {
+    // UI edits made by an agent carry a task id. Manual editor writes do not,
+    // so the flex rule improves model behavior without policing the user.
+    if (taskId && hooks.isEnabled(FLEX_LAYOUT_HOOK_ID)) {
+      const verdict = flexLayout.check(relPath, nextContent, prevContent);
+      if (!verdict.ok) {
+        bus.publish(
+          "hook.blocked",
+          {
+            hookId: FLEX_LAYOUT_HOOK_ID,
+            name: FLEX_LAYOUT_HOOK_NAME,
+            reason: verdict.reason,
+          },
+          taskId
+        );
+        throw new Error(`Write blocked by flex layout hook: ${verdict.reason}`);
+      }
+    }
     if (!modularityInForce()) return;
     if (directTasks.has(taskId)) return;
     const verdict = await modularity.check(relPath, nextContent, prevContent);
@@ -374,8 +435,23 @@ export function createAgentRuntime(
     bus,
     settings
   );
-  const planTracker = new PlanTracker(bus);
+  const planCheckpoints = new PlanCheckpointStore(config.workspaceRoot, log);
+  const planTracker = new PlanTracker(bus, planCheckpoints);
   registerPlanTools(tools, planTracker);
+  // A completion gate can catch a missing plan only after the damage is done.
+  // Refuse the mutation at its source so every emitted diff already owns the
+  // active step that the timeline renders it beneath.
+  hooks.ensureBuiltin({
+    id: PLAN_EDIT_HOOK_ID,
+    name: PLAN_EDIT_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file|replace_code|replace_many",
+    action: "block",
+    argument: "Publish and start the ordered plan before editing",
+  });
+  const planEditGuard = new PlanEditGuard(planTracker, bus);
+  hooks.registerGuard(PLAN_EDIT_HOOK_ID, (ctx) => planEditGuard.check(ctx));
   const validators = new ValidationRunners(config.workspaceRoot);
   // Every tool call — model- or UI-invoked — is gated by user hooks.
   tools.setGate(hooks);
@@ -392,6 +468,24 @@ export function createAgentRuntime(
   // Token-budgeted context assembly through the compression ladder, with
   // cross-turn dedup and compressed conversation memory.
   const sentChunks = new SentChunkStore(db);
+  const workingMemory = new WorkingMemoryStore(db);
+  // The feature wiki: pages under .atelier/wiki, read at turn start and
+  // compiled after a change task by one cheap model call on the user's
+  // selected model (Haiku when it is a Claude turn with no pick).
+  const wiki = new WikiStore(config.workspaceRoot);
+  const wikiCompiler = new WikiCompiler({
+    store: wiki,
+    oneShot: (system, prompt) =>
+      runOneShot({
+        model: settings.get().model,
+        claudeFallback: "claude-haiku-4-5",
+        system,
+        prompt,
+        cwd: config.workspaceRoot,
+        signal: new AbortController().signal,
+      }),
+    log,
+  });
   // Saving a session memory changes what retrieval can return, so it has to
   // invalidate the retrieval cache the same way re-indexing a file does.
   const taskSummaries = new TaskSummaryStore(db, embedder, vectors, () =>
@@ -424,7 +518,29 @@ export function createAgentRuntime(
   // The working-set lock: "@folder" in a prompt narrows retrieval, the
   // prompt's directory map, and git routing for the whole conversation.
   const scope = new SessionScopeStore(db, config.workspaceRoot, guard);
-  const scopeGuard = new ScopeGuard();
+  // The lock's one hazard is a same-named file in another project; the
+  // index knows every path, so that check is one query — with the disk as
+  // the fallback for a workspace whose index has not caught up.
+  const twinStmt = db.prepare(
+    "SELECT 1 FROM files WHERE path LIKE ? AND path LIKE ? LIMIT 1"
+  );
+  const scopeGuard = new ScopeGuard({
+    workspaceRoot: config.workspaceRoot,
+    twinExists: (roots, basename) =>
+      roots.some(
+        (root) =>
+          twinStmt.get(`${root}/%`, `%/${basename}`) !== undefined ||
+          fileNamedUnder(path.join(config.workspaceRoot, root), basename, ig)
+      ),
+    onEscape: (taskId, escapedPath, tool) => {
+      log.info({ taskId, path: escapedPath, tool }, "scope lock let a path through");
+      bus.publish(
+        "scope.escaped",
+        { path: escapedPath, tool, roots: scope.get(taskId).roots },
+        taskId
+      );
+    },
+  });
   tools.setScopeGuard(scopeGuard);
   const orchestrator = new Orchestrator({
     config,
@@ -433,6 +549,11 @@ export function createAgentRuntime(
     tools,
     files,
     scope,
+    // The other half of continuity: what earlier turns already read and
+    // searched, replayed so a follow-up builds on it instead of rescanning.
+    workingMemory,
+    wiki,
+    wikiCompiler,
     scopeGuard,
     ignore: ig,
     git,
@@ -528,7 +649,8 @@ export function createAgentRuntime(
     lessons,
     validators,
     bus,
-    settings
+    settings,
+    wiki
   );
 
   watcher.start();

@@ -24,6 +24,7 @@ import {
   parseMentions,
   renderScope,
   scopeGlob,
+  workingSet,
 } from "../src/workspace/scope/index.js";
 
 const HOME = process.env.USERPROFILE ?? process.env.HOME ?? ".";
@@ -137,7 +138,57 @@ async function main(): Promise<void> {
     scopeGlob(anchored) === `${project}/**`,
     String(scopeGlob(anchored))
   );
-  check("lock renders a prompt block", renderScope(anchored).includes("LOCKED"));
+  check(
+    "lock renders a prompt block",
+    renderScope(anchored, workingSet(anchored, [])).includes("LOCKED")
+  );
+
+  // ── anchors expire unless the turn re-earns them ─────────────────────
+  // The drift this closes: one edit to the wrong file used to pin that
+  // file to the top of the anchor list, from where it was ranked as a
+  // target and printed as "the files we are working on" for the rest of
+  // the session — so every later turn inherited the mistake.
+  const wrong = `${project}/src/i18n/translations.ts`;
+  const right = `${project}/src/lib/apiErrorMiddleware.ts`;
+  store.noteTouched("conv1", wrong);
+  const drifted = store.resolve("conv1", "still not fixed", profile);
+  check("the wrong file is stored as an anchor", drifted.anchors[0] === wrong);
+  check(
+    "an anchor this turn's retrieval confirms survives",
+    workingSet(drifted, [right, wrong]).includes(wrong)
+  );
+  check(
+    "an anchor this turn never surfaced falls out",
+    !workingSet(drifted, [right]).includes(wrong),
+    JSON.stringify(workingSet(drifted, [right]))
+  );
+  check(
+    "a turn with no evidence at all still inherits recent anchors",
+    workingSet(drifted, []).includes(wrong)
+  );
+  check(
+    "the recency fallback is a short tail, not the whole history",
+    workingSet(drifted, []).length <= 4,
+    String(workingSet(drifted, []).length)
+  );
+  // Hand-built rather than store-resolved: `named` only ever holds paths
+  // that exist on disk, and this case has to hold on any machine.
+  const named = { ...drifted, named: [right] };
+  const set = workingSet(named, [wrong, right]);
+  check(
+    "a path named this turn leads the working set",
+    set[0] === right,
+    JSON.stringify(set)
+  );
+  check(
+    "the named path is stated as the subject",
+    renderScope(named, set).includes("NAMED THESE PATHS IN THIS MESSAGE")
+  );
+  check(
+    "history that rode along is labelled a lead, not the subject",
+    !set.includes(wrong) || renderScope(named, set).includes("leads only"),
+    JSON.stringify(set)
+  );
 
   // ── explicit lock (the git wizard's fix agent) ───────────────────────
   // Its prompt is command output: no folder to mention, so the caller

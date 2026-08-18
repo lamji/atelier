@@ -1,7 +1,7 @@
 ---
 feature: main chat panel
 slug: main-chat-panel
-status: ready
+status: stale
 updated: 2026-08-08T14:38:23.509Z
 aliases:
   - chat transcript
@@ -215,3 +215,4 @@ The main chat panel is the central conversation interface where users send promp
 ## Related
 
 None of the pre-documented features touch the main chat panel flow.
+

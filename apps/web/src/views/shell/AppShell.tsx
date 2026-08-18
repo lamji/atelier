@@ -1,18 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { newId } from "@atelier/shared";
+import type { ModelOption } from "@atelier/protocol";
 import { AnimatePresence } from "framer-motion";
 import {
   Panel,
   PanelGroup,
   PanelResizeHandle,
-  type ImperativePanelHandle,
 } from "react-resizable-panels";
-import { HeaderBar } from "./HeaderBar";
+import { HeaderBar, type AgentSurface } from "./HeaderBar";
 import { TitleBar } from "./TitleBar";
 import { BottomPanel } from "./BottomPanel";
-import { ActivityBar, type ActivityView } from "./ActivityBar";
 import { CommandPalette } from "./CommandPalette";
 import { EditorTabBar } from "./EditorTabBar";
 import { StatusBar } from "./StatusBar";
+import { CommandCenter } from "./CommandCenter";
+import { BrandMark } from "@/components/BrandMark";
+import { Dock } from "./dock/Dock";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { CliConsolePane } from "@/views/cli/CliConsolePane";
 import { CliProviderModal } from "@/views/cli/CliProviderModal";
@@ -20,6 +23,9 @@ import { CliSessionListPanel } from "@/views/cli/CliSessionListPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
 import { GitPanel } from "@/views/git/GitPanel";
 import { GitFlowHost } from "@/views/git/GitFlowHost";
+import { MergeConflictHost } from "@/views/git/MergeConflictHost";
+import { GitSyncModal } from "@/views/git/GitSyncModal";
+import { AlertHost } from "./AlertHost";
 import { SessionListPanel } from "@/views/sessions/SessionListPanel";
 import { MonitorPanel } from "@/views/monitor/MonitorPanel";
 import { KnowledgePanel } from "@/views/knowledge/KnowledgePanel";
@@ -27,8 +33,14 @@ import { IndexingWelcome } from "@/views/knowledge/IndexingWelcome";
 import { HooksPanel } from "@/views/hooks/HooksPanel";
 import { MarkdownPanel } from "@/views/markdown/MarkdownPanel";
 import { SettingsPanel } from "@/views/settings/SettingsPanel";
+import { SettingsModal } from "@/views/settings/SettingsModal";
 import { DbApprovalModal } from "@/views/hooks/DbApprovalModal";
+import { FrontendReviewModal } from "@/views/review/FrontendReviewModal";
 import { RightDock } from "@/views/right/RightDock";
+import {
+  ComponentPreviewPane,
+  type ScreenshotChatDestination,
+} from "@/views/right/ComponentPreviewPane";
 import { useTerminalViewModel } from "@/hooks/useTerminalViewModel";
 import { useSessionsViewModel } from "@/hooks/useSessionsViewModel";
 import { useConnectionViewModel } from "@/hooks/useConnectionViewModel";
@@ -46,19 +58,64 @@ import { useUsageViewModel } from "@/hooks/useUsageViewModel";
 import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
 import { useCommandRegistry } from "@/hooks/useCommandRegistry";
 import { bridge } from "@/services/bridge-client";
-import { useCliConsoleStore } from "@/services/cli-console";
+import {
+  createCliSession,
+  ensureCliSessions,
+  useCliConsoleStore,
+} from "@/services/cli-console";
 import { useGitStore } from "@/state/git.store";
 import { usePreferencesStore } from "@/state/preferences.store";
+import { useProvidersStore } from "@/state/providers.store";
+import { useSessionsStore } from "@/state/sessions.store";
 import { useThemeStore } from "@/state/theme.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import { cn } from "@/lib/cn";
+import {
+  FRONTEND_REVIEW_REQUEST_EVENT,
+  frontendReviewTimelineMarker,
+  type FrontendReviewRequest,
+} from "@/lib/frontend-review";
 import { isDesktop } from "@/lib/desktop";
+import { WorkspacePageBody } from "@/components/ui/workspace-page";
+import type { PendingImage } from "@/types";
+
+interface PendingFrontendReviewCapture {
+  review: FrontendReviewRequest;
+  image: PendingImage;
+  url: string;
+  unsupportedModelLabel: string;
+  rejectedModelValue?: string;
+}
+
+/** Optional post-task review must never wait indefinitely for consent. */
+const FRONTEND_REVIEW_RESPONSE_MS = 30_000;
+
+function reviewModelSupportsImages(
+  choice: string,
+  models: ModelOption[]
+): boolean {
+  if (choice === "default" || choice.startsWith("atelier/")) return true;
+  return models.find((model) => model.value === choice)?.supportsImages !== false;
+}
+
+function reviewModelLabel(choice: string, models: ModelOption[]): string {
+  if (choice === "default") return "Default model";
+  return models.find((model) => model.value === choice)?.label ?? choice;
+}
+
+function isImageCapabilityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:image|vision|multimodal).*(?:not supported|unsupported|cannot|can't)|(?:not supported|unsupported).*(?:image|vision|multimodal)/i.test(
+    message
+  );
+}
 
 /**
- * Single-console layout: header tabs (Chat / Editor / Terminal / Activity)
- * drive the one main view. Left column = agent sessions + the rail-selected
- * workspace view. Selecting a session forces Chat forward. Agent file edits
- * render inline in the chat transcript as VS Code-style diffs.
+ * Single-console layout on a card canvas. The header carries the workspace
+ * destinations; the left card shows whichever one is selected, and the main
+ * card shows one pane at a time (Chat / Editor / Output / …) chosen by its
+ * segmented switcher. Selecting a session forces Chat forward. Agent file
+ * edits render inline in the chat transcript as unified diffs.
  */
 export function AppShell() {
   const activeView = useWorkspaceStore((s) => s.activityView);
@@ -80,48 +137,374 @@ export function AppShell() {
   const usage = useUsageViewModel();
   const contextStats = useContextStatsViewModel();
   const cliMode = usePreferencesStore((s) => s.cliMode);
+  const setCliMode = usePreferencesStore((s) => s.setCliMode);
+  const cliSessions = useCliConsoleStore((s) => s.sessions);
+  const selectedCliId = useCliConsoleStore((s) => s.selectedId);
+  const providerRevision = useProvidersStore((s) => s.revision);
+  const setComposer = usePreferencesStore((s) => s.setComposer);
   const skillDetail = useWorkspaceStore((s) => s.skillDetail);
   const closeSkillDetail = useWorkspaceStore((s) => s.closeSkillDetail);
   const branch = useGitStore((s) => s.live?.branch ?? s.status?.branch ?? null);
-  // Same live git state the status bar reads, badged onto the Source Control
-  // rail icon so pending changes are visible without opening the view.
+  // Same live git state the status bar reads, badged onto the Changes tile in
+  // the top nav so pending changes are visible without opening the view.
   const changedCount = useGitStore(
     (s) => s.live?.changedFiles ?? s.status?.files.length ?? 0
+  );
+  const conflictCount = useGitStore(
+    (s) => s.live?.conflicts ?? s.status?.conflicts.length ?? 0
   );
   const bottomOpen = useWorkspaceStore((s) => s.bottomPanel);
   const setBottomPanel = useWorkspaceStore((s) => s.setBottomPanel);
   const openBottom = useWorkspaceStore((s) => s.openBottom);
   const workbenchVisible = useWorkspaceStore((s) => s.workbenchVisible);
-  const setWorkbenchVisible = useWorkspaceStore(
-    (s) => s.setWorkbenchVisible
-  );
-  const bottomRef = useRef<ImperativePanelHandle>(null);
+  const workspaceEpoch = useWorkspaceStore((s) => s.workspaceEpoch);
+  const settingsOpen = useWorkspaceStore((s) => s.settingsOpen);
+  const openSettings = useWorkspaceStore((s) => s.openSettings);
+  const closeSettings = useWorkspaceStore((s) => s.closeSettings);
   const [palette, setPalette] = useState<{ open: boolean; query: string }>({
     open: false,
     query: "",
   });
+  const [agentSurface, setAgentSurface] = useState<AgentSurface>("agent");
+  const [pagePreviewTermId, setPagePreviewTermId] = useState<string | null>(null);
+  const [pagePreviewUrl, setPagePreviewUrl] = useState<string | null>(null);
+  const [frontendReviewOffer, setFrontendReviewOffer] =
+    useState<FrontendReviewRequest | null>(null);
+  const [frontendReviewExpiresAt, setFrontendReviewExpiresAt] =
+    useState<number | null>(null);
+  const [approvedFrontendReview, setApprovedFrontendReview] =
+    useState<FrontendReviewRequest | null>(null);
+  const [frontendReviewAwaitingCapture, setFrontendReviewAwaitingCapture] =
+    useState<FrontendReviewRequest | null>(null);
+  const [frontendReviewError, setFrontendReviewError] = useState<string | null>(null);
+  const [pendingFrontendReviewCapture, setPendingFrontendReviewCapture] =
+    useState<PendingFrontendReviewCapture | null>(null);
+  const [frontendReviewModel, setFrontendReviewModel] = useState("");
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const frontendReviewModelOptions = useMemo(
+    () =>
+      models
+        .filter(
+          (model) =>
+            model.supportsImages === true &&
+            model.value !== pendingFrontendReviewCapture?.rejectedModelValue
+        )
+        .map((model) => ({
+          value: model.value,
+          label: model.label,
+          ...(model.description ? { hint: model.description } : {}),
+        })),
+    [models, pendingFrontendReviewCapture?.rejectedModelValue]
+  );
+  const currentSessionTitle = sessions.selectedId
+    ? sessions.sessionList.find(
+        (session) => session.conversation.id === sessions.selectedId
+      )?.conversation.title ?? null
+    : null;
 
-  // The panel is the source of truth for its size; the store drives
-  // expand/collapse so anything (header tab, Ctrl+`) can toggle it.
   useEffect(() => {
-    const panel = bottomRef.current;
-    if (!panel) return;
-    if (bottomOpen && panel.isCollapsed()) {
-      panel.expand();
-      // First open starts from defaultSize 0, so give it a real height.
-      if (panel.getSize() < 15) panel.resize(30);
-    }
-    if (!bottomOpen && !panel.isCollapsed()) panel.collapse();
-  }, [bottomOpen]);
+    setAgentSurface("agent");
+    setPagePreviewTermId(null);
+    setPagePreviewUrl(null);
+    setFrontendReviewOffer(null);
+    setFrontendReviewExpiresAt(null);
+    setApprovedFrontendReview(null);
+    setFrontendReviewAwaitingCapture(null);
+    setFrontendReviewError(null);
+    setPendingFrontendReviewCapture(null);
+    setFrontendReviewModel("");
+  }, [workspaceEpoch]);
 
-  // Ctrl+` toggles the bottom dock; Ctrl+P / Ctrl+Shift+P open the palette in
-  // its file and command modes. All VS Code conventions.
+  useEffect(() => {
+    const onFrontendReviewRequested = (event: Event) => {
+      const request = (event as CustomEvent<FrontendReviewRequest>).detail;
+      if (!request?.taskId) return;
+      // A new offer supersedes any older approved/captured review. This keeps
+      // a stale preview from starting later without approval for this task.
+      setApprovedFrontendReview(null);
+      setFrontendReviewAwaitingCapture(null);
+      setPendingFrontendReviewCapture(null);
+      setFrontendReviewModel("");
+      setFrontendReviewError(null);
+      setFrontendReviewExpiresAt(Date.now() + FRONTEND_REVIEW_RESPONSE_MS);
+      setFrontendReviewOffer(request);
+    };
+    window.addEventListener(
+      FRONTEND_REVIEW_REQUEST_EVENT,
+      onFrontendReviewRequested
+    );
+    return () =>
+      window.removeEventListener(
+        FRONTEND_REVIEW_REQUEST_EVENT,
+        onFrontendReviewRequested
+      );
+  }, []);
+
+
+  useEffect(() => {
+    if (!pagePreviewTermId) return;
+    const stillRunning = terminal.sessions.some(
+      (session) => session.id === pagePreviewTermId && session.alive
+    );
+    if (!stillRunning) setPagePreviewTermId(null);
+  }, [pagePreviewTermId, terminal.sessions]);
+
+  const stopPagePreview = useCallback(() => {
+    if (!pagePreviewTermId) return;
+    const termId = pagePreviewTermId;
+    setPagePreviewTermId(null);
+    setAgentSurface("agent");
+    void terminal.kill(termId);
+  }, [pagePreviewTermId, terminal.kill]);
+
+  const attachPreviewScreenshot = useCallback(
+    async (image: PendingImage, destination: ScreenshotChatDestination) => {
+      if (destination === "new") {
+        const createdId = await sessions.createSession();
+        if (!createdId) throw new Error("Atelier could not create a new chat.");
+      } else if (!sessions.selectedId) {
+        throw new Error("Select a chat or choose New chat for this screenshot.");
+      }
+
+      window.dispatchEvent(
+        new CustomEvent("atelier:screenshot-captured", { detail: image })
+      );
+      editor.setRightTab("chat");
+      setAgentSurface("agent");
+      setActiveView("agents");
+    },
+    [editor.setRightTab, sessions.createSession, sessions.selectedId, setActiveView]
+  );
+
+  const showFrontendReviewModelPicker = useCallback(
+    (capture: PendingFrontendReviewCapture) => {
+      const fallback = models.find(
+        (model) =>
+          model.supportsImages === true &&
+          model.value !== capture.rejectedModelValue
+      );
+      setApprovedFrontendReview(null);
+      setPendingFrontendReviewCapture(capture);
+      setFrontendReviewModel(fallback?.value ?? "");
+      setFrontendReviewError(null);
+      setFrontendReviewExpiresAt(Date.now() + FRONTEND_REVIEW_RESPONSE_MS);
+      setFrontendReviewOffer(capture.review);
+      setAgentSurface("agent");
+      setActiveView("agents");
+    },
+    [models, setActiveView]
+  );
+
+  const startFrontendReview = useCallback(
+    async (
+      capture: PendingFrontendReviewCapture,
+      modelOverride?: string
+    ) => {
+      const { review, image, url } = capture;
+      const prefs = usePreferencesStore.getState();
+      const pick = { ...prefs.defaults, ...prefs.byChat[review.conversationId] };
+      const choice = modelOverride ?? pick.model;
+      const model =
+        choice === "default" || choice.startsWith("atelier/")
+          ? undefined
+          : choice;
+      const visiblePrompt = `Review the completed frontend in Page preview · ${url}`;
+      const prompt = [
+        frontendReviewTimelineMarker({
+          ...(image.path ? { screenshotPath: image.path } : {}),
+          displayRequest: visiblePrompt,
+        }),
+        "FRONTEND REVIEW ONLY. Do not modify files, run fixes, or start another server.",
+        `Review the completed frontend task at ${url}.`,
+        "Use the attached live preview screenshot as visual evidence. Then call " +
+          "preview_review with this exact URL for the headless Playwright desktop " +
+          "and mobile audit. Correlate its console, network, accessibility, layout, " +
+          "and screenshot evidence with the requested change.",
+        "Obey preview_review's decision. If unavailable, ask the user to start or " +
+          "reopen Page preview and stop without retrying or starting a server. If " +
+          "failed, report the tool error and skip. If issues are present, report " +
+          "the exact console/network/page evidence and skip because this review is read-only.",
+        "The verdict is about the original requested UI outcome, not whether the " +
+          "preview merely loaded or had clean console diagnostics. preview_review status " +
+          "ready/continue means evidence collection succeeded; it is never proof that the " +
+          "requested change passed.",
+        "PASS only when the attached screenshot and the settled Playwright evidence " +
+          "actually show the requested outcome on the target route and viewport. A modal " +
+          "or overlay obscuring the target, screenshot/DOM disagreement, the wrong route " +
+          "or state, an expected layout/content mismatch, or missing visual evidence is a " +
+          "blocking review failure. Never say no blocking issue in those cases.",
+        "Report findings in severity order with concrete routes and elements. End with " +
+          "exactly FRONTEND REVIEW: PASS or FRONTEND REVIEW: FAIL; use FAIL whenever the " +
+          "requested outcome was not verified.",
+        `Original request: ${review.request}`,
+        `Changed frontend files: ${review.changedFiles.join(", ")}`,
+      ].join("\n\n");
+      const store = useSessionsStore.getState();
+      const requestedAt = Date.now();
+      try {
+        const { taskId, queued } = await bridge.rpc("task.start", {
+          conversationId: review.conversationId,
+          prompt,
+          model,
+          effort: pick.effort === "default" ? undefined : pick.effort,
+          systemKnowledge: false,
+          autoReview: false,
+          autoValidate: false,
+          images: [{ mediaType: image.mediaType, data: image.data }],
+        });
+        store.addUserMessage(
+          review.conversationId,
+          newId("local"),
+          visiblePrompt,
+          [image.dataUrl]
+        );
+        const existing =
+          store.sessions[review.conversationId]?.executions ?? [];
+        store.setExecutions(review.conversationId, [
+          ...existing.filter((execution) => execution.taskId !== taskId),
+          {
+            taskId,
+            request: visiblePrompt,
+            report: "",
+            requestedAt,
+            status: queued ? "queued" : "running",
+            startedAt: requestedAt,
+            endedAt: null,
+            durationMs: null,
+            plan: null,
+            actions: [],
+            diffs: [],
+            logs: [],
+            frontendReview: true,
+            images: [image.dataUrl],
+          },
+        ]);
+        if (queued) {
+          store.taskQueued(review.conversationId, taskId);
+        } else {
+          store.taskStarted(review.conversationId, taskId);
+        }
+        setApprovedFrontendReview(null);
+        setPendingFrontendReviewCapture(null);
+        setFrontendReviewModel("");
+        editor.setRightTab("chat");
+        setAgentSurface("agent");
+        setActiveView("agents");
+      } catch (error) {
+        if (isImageCapabilityError(error)) {
+          showFrontendReviewModelPicker({
+            ...capture,
+            unsupportedModelLabel: reviewModelLabel(choice, models),
+            rejectedModelValue: choice,
+          });
+          return;
+        }
+        setApprovedFrontendReview(null);
+        setFrontendReviewError(
+          error instanceof Error
+            ? error.message
+            : "The frontend review could not be started."
+        );
+        setFrontendReviewExpiresAt(Date.now() + FRONTEND_REVIEW_RESPONSE_MS);
+        setFrontendReviewOffer(review);
+      }
+    },
+    [editor.setRightTab, models, setActiveView, showFrontendReviewModelPicker]
+  );
+
+  const dismissFrontendReview = useCallback(() => {
+    setFrontendReviewOffer(null);
+    setFrontendReviewExpiresAt(null);
+    setApprovedFrontendReview(null);
+    setFrontendReviewAwaitingCapture(null);
+    setPendingFrontendReviewCapture(null);
+    setFrontendReviewModel("");
+    setFrontendReviewError(null);
+  }, []);
+
+  useEffect(() => {
+    if (!frontendReviewOffer || frontendReviewExpiresAt === null) return;
+    const timer = window.setTimeout(
+      dismissFrontendReview,
+      Math.max(0, frontendReviewExpiresAt - Date.now())
+    );
+    return () => window.clearTimeout(timer);
+  }, [dismissFrontendReview, frontendReviewExpiresAt, frontendReviewOffer]);
+
+  const approveFrontendReview = useCallback(() => {
+    if (pendingFrontendReviewCapture) {
+      const selected = models.find(
+        (model) =>
+          model.value === frontendReviewModel && model.supportsImages === true
+      );
+      if (!selected) return;
+      setComposer(pendingFrontendReviewCapture.review.conversationId, {
+        model: selected.value,
+        effort: "default",
+      });
+      const capture = pendingFrontendReviewCapture;
+      setFrontendReviewOffer(null);
+      setFrontendReviewExpiresAt(null);
+      setPendingFrontendReviewCapture(null);
+      setFrontendReviewError(null);
+      void startFrontendReview(capture, selected.value);
+      return;
+    }
+    if (!frontendReviewOffer) return;
+    setFrontendReviewAwaitingCapture(frontendReviewOffer);
+    setFrontendReviewOffer(null);
+    setFrontendReviewExpiresAt(null);
+    setFrontendReviewError(null);
+  }, [
+    frontendReviewModel,
+    frontendReviewOffer,
+    models,
+    pendingFrontendReviewCapture,
+    setComposer,
+    startFrontendReview,
+  ]);
+
+  const captureApprovedFrontendReview = useCallback(() => {
+    if (!frontendReviewAwaitingCapture) return;
+    setApprovedFrontendReview(frontendReviewAwaitingCapture);
+    setFrontendReviewAwaitingCapture(null);
+    setAgentSurface("preview");
+    setActiveView("agents");
+  }, [frontendReviewAwaitingCapture, setActiveView]);
+
+  const captureFrontendReview = useCallback(
+    async (image: PendingImage, url: string) => {
+      const review = approvedFrontendReview;
+      if (!review) return;
+      const prefs = usePreferencesStore.getState();
+      const pick = { ...prefs.defaults, ...prefs.byChat[review.conversationId] };
+      const capture: PendingFrontendReviewCapture = {
+        review,
+        image,
+        url,
+        unsupportedModelLabel: reviewModelLabel(pick.model, models),
+      };
+      if (!reviewModelSupportsImages(pick.model, models)) {
+        showFrontendReviewModelPicker(capture);
+        return;
+      }
+      await startFrontendReview(capture);
+    },
+    [approvedFrontendReview, models, showFrontendReviewModelPicker, startFrontendReview]
+  );
+
+  const openTerminalWindow = useCallback(() => {
+    openBottom();
+    if (terminal.sessions.length === 0) void terminal.create();
+  }, [openBottom, terminal.create, terminal.sessions.length]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey;
       if (mod && event.key === "`") {
         event.preventDefault();
-        useWorkspaceStore.setState((s) => ({ bottomPanel: !s.bottomPanel }));
+        if (useWorkspaceStore.getState().bottomPanel) setBottomPanel(false);
+        else openTerminalWindow();
         return;
       }
       // Ctrl+P is the browser print dialog until we claim it, and inside
@@ -136,17 +519,25 @@ export function AppShell() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [openTerminalWindow, setBottomPanel]);
+
+  // Migrate a hot-reloaded shell that was already on the old full-page
+  // Settings destination into the new preferences window.
+  useEffect(() => {
+    if (activeView !== "settings") return;
+    openSettings();
+    setActiveView("agents");
+  }, [activeView, openSettings, setActiveView]);
 
   /*
-   * "terminal" toggles the bottom dock; everything else is an editor-area
+   * "terminal" toggles terminal mode; everything else is an editor-area
    * pane, Activity (the execution timeline) included — it moved out of the
    * bottom dock so that dock's bar could become the terminal tab strip.
    */
   const selectHeaderTab = (tab: Parameters<typeof editor.setRightTab>[0]) => {
     if (tab === "terminal") {
       if (bottomOpen) setBottomPanel(false);
-      else openBottom();
+      else openTerminalWindow();
       return;
     }
     editor.setRightTab(tab);
@@ -163,10 +554,24 @@ export function AppShell() {
           branch: status.branch,
           isClean: status.isClean,
           changedFiles: status.files.length,
+          conflicts: status.conflicts.length,
+          mergeKind: status.mergeState?.kind ?? null,
         })
       )
       .catch(() => undefined);
   }, [connection.state]);
+
+  // Live model roster, so the dock's provider tiles can point at the
+  // flagship Claude and Codex rows rather than a hardcoded alias. Same
+  // trigger the composer watches: a key saved in Settings bumps the
+  // revision and brings the new roster in without a reload.
+  useEffect(() => {
+    if (connection.state !== "connected") return;
+    void bridge
+      .rpc("models.list", {})
+      .then(({ models }) => setModels(models))
+      .catch(() => undefined);
+  }, [connection.state, providerRevision]);
 
   const busy = sessions.busy;
   const showIndexingWelcome =
@@ -200,6 +605,7 @@ export function AppShell() {
       <MarkdownPanel
         vm={markdownVm}
         onOpenFile={(path) => void explorer.openFile(path)}
+        compact
       />
     ) : activeView === "git" ? (
       <GitPanel vm={git} />
@@ -244,12 +650,13 @@ export function AppShell() {
         else void sessions.createSession();
       },
       createTerminal: () => {
-        // Open the dock first, or the new terminal is created into a panel
-        // the user cannot see.
-        openBottom();
-        void terminal.create();
+        if (terminal.sessions.length === 0) openTerminalWindow();
+        else {
+          openBottom();
+          void terminal.create();
+        }
       },
-      openTerminalPanel: () => openBottom(),
+      openTerminalPanel: openTerminalWindow,
       refreshExplorer: explorer.refresh,
       collapseFolders: explorer.collapseAll,
       refreshGit: git.refresh,
@@ -261,7 +668,7 @@ export function AppShell() {
       explorer.refresh,
       git.refresh,
       cliMode,
-      openBottom,
+      openTerminalWindow,
       sessions,
       terminal,
     ]
@@ -270,38 +677,110 @@ export function AppShell() {
 
   const headerBar = (
     <HeaderBar
-      workingCount={sessions.workingCount}
-      rightTab={editor.rightTab}
-      terminalCount={terminal.sessions.length}
-      workbenchVisible={workbenchVisible}
-      bottomOpen={bottomOpen}
-      onSelectTab={selectHeaderTab}
-      onToggleWorkbench={() => setWorkbenchVisible(!workbenchVisible)}
-      onOpenCommands={(query) => setPalette({ open: true, query })}
+      activeAgentSurface={activeView === "agents" ? agentSurface : null}
+      pagePreviewRunning={pagePreviewTermId !== null}
+      onSelectAgent={() => {
+        setAgentSurface("agent");
+        setActiveView("agents");
+      }}
+      onSelectPagePreview={() => {
+        setAgentSurface("preview");
+        setActiveView("agents");
+      }}
+      onStopPagePreview={stopPagePreview}
     />
   );
 
+  // Provider CLI tiles own the conversation surface: entering one enables
+  // CLI mode, swaps the transcript for that provider's real terminal, and
+  // swaps the left rail from Atelier chats to CLI sessions. Reuse a live
+  // session before creating one so switching providers preserves scrollback.
+  const selectedCliProvider = cliSessions.find(
+    (session) => session.termId === selectedCliId
+  )?.providerId;
+  const claudeActive = cliMode && selectedCliProvider === "claude";
+  const codexActive = cliMode && selectedCliProvider === "codex";
+  const selectCliProvider = useCallback(
+    (providerId: "claude" | "codex") => {
+      setCliMode(true);
+      editor.setRightTab("chat");
+      setAgentSurface("agent");
+      setActiveView("agents");
+      void ensureCliSessions()
+        .then(() => {
+          const cli = useCliConsoleStore.getState();
+          const existing = cli.sessions.find(
+            (session) => session.providerId === providerId
+          );
+          if (existing) {
+            cli.select(existing.termId);
+            return;
+          }
+          return createCliSession(providerId);
+        })
+        .catch(() => useCliConsoleStore.getState().openProviderPicker());
+    },
+    [editor.setRightTab, setActiveView, setCliMode]
+  );
+  const selectClaude = useCallback(
+    () => selectCliProvider("claude"),
+    [selectCliProvider]
+  );
+  const selectCodex = useCallback(
+    () => selectCliProvider("codex"),
+    [selectCliProvider]
+  );
+
+  // Every icon control in the app, in one bar at the bottom of the canvas.
+  const dock = (
+    <Dock
+      activeView={activeView}
+      onSelectView={(view) => {
+        if (view === "explorer" || view === "markdown") {
+          editor.setRightTab("editor");
+        }
+        if (view === "agents") setAgentSurface("agent");
+        setActiveView(view);
+      }}
+      workingCount={sessions.workingCount}
+      changedCount={changedCount}
+      conflictCount={conflictCount}
+      terminalCount={terminal.sessions.length}
+      bottomOpen={bottomOpen}
+      theme={theme}
+      usage={usage}
+      settingsOpen={settingsOpen}
+      onToggleSettings={settingsOpen ? closeSettings : openSettings}
+      onToggleTheme={toggle}
+      onSelectTab={selectHeaderTab}
+      claudeActive={claudeActive}
+      codexActive={codexActive}
+      onSelectClaude={selectClaude}
+      onSelectCodex={selectCodex}
+    />
+  );
+
+  /*
+   * Canvas, not regions. The shell is a tinted page with cards floating on
+   * it: the gutter between them is the resize handle's own width, so the
+   * spacing and the drag target are the same 10px and neither has to be
+   * faked with margins that the panel library would then fight.
+   */
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-background">
+    <div className="app-canvas relative flex h-full flex-col overflow-hidden">
       {isDesktop() ? (
         <TitleBar>{headerBar}</TitleBar>
       ) : (
-        <div className="h-[var(--titlebar-h)] shrink-0 border-b border-border bg-titlebar">
-          {headerBar}
-        </div>
+        <div className="h-[var(--topnav-h)] shrink-0">{headerBar}</div>
       )}
       <div className="flex min-h-0 flex-1">
-        <div className="w-[var(--activitybar-w)] shrink-0 border-r border-border bg-activity">
-          <ActivityBar
-            active={activeView}
-            theme={theme}
-            workingCount={sessions.workingCount}
-            changedCount={changedCount}
-            onSelect={setActiveView}
-            onToggleTheme={toggle}
-          />
-        </div>
-        <PanelGroup direction="horizontal" className="min-w-0 flex-1">
+        {activeView === "agents" ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <WorkspacePageBody
+              wide
+              className="flex min-h-0 flex-1"
+            >
+              <PanelGroup direction="horizontal" className="min-w-0 flex-1">
           {/*
            * Primary sidebar. `minSize` in percent would let the sidebar be
            * squeezed to unreadable at small window widths, so it is floored in
@@ -309,48 +788,103 @@ export function AppShell() {
            * actions stop fitting.
            */}
           <Panel
-            defaultSize={22}
-            minSize={14}
-            maxSize={40}
-            className="min-w-[190px]"
+            defaultSize={15}
+            minSize={12}
+            maxSize={18}
+            className="min-w-[220px] max-w-[300px]"
           >
-            <div className="h-full overflow-hidden border-r border-border bg-sidebar">
-              {leftPanel}
-            </div>
+            <div className="island h-full">{leftPanel}</div>
           </Panel>
-          <PanelResizeHandle className="resize-handle w-[3px]" />
-          <Panel defaultSize={78} minSize={35} className="min-w-[360px]">
-            <PanelGroup direction="vertical">
-              {/* 100, not 72: the bottom dock starts collapsed at 0, so the
-                  editor owns the whole column until the dock is opened. The
-                  old 72/0 pair summed to 72% and react-resizable-panels
-                  normalised it away with a console warning on every mount. */}
-              <Panel defaultSize={100} minSize={25}>
+          <PanelResizeHandle className="resize-handle w-px" />
+          <Panel defaultSize={85} minSize={72} className="min-w-[360px]">
+            <div
+              className={cn(
+                "island island-main relative flex h-full flex-col",
+                busy && "glow-working"
+              )}
+            >
+              <AnimatePresence>
+                {agentSurface === "agent" && showIndexingWelcome && (
+                  <IndexingWelcome
+                    vm={knowledge}
+                    workspaceRoot={connection.workspaceRoot}
+                  />
+                )}
+              </AnimatePresence>
+              {agentSurface === "agent" && workbenchVisible && (
+                <EditorTabBar
+                  rightTab={editor.rightTab}
+                  selectedPath={editor.selectedPath}
+                  diffPath={null}
+                  onSelectTab={selectHeaderTab}
+                />
+              )}
+              <div className="relative min-h-0 flex-1">
                 <div
                   className={cn(
-                    "relative flex h-full flex-col bg-editor",
-                    busy && "glow-working"
+                    "absolute inset-0",
+                    agentSurface !== "agent" && "invisible pointer-events-none"
                   )}
+                  aria-hidden={agentSurface !== "agent"}
                 >
-                  <AnimatePresence>
-                    {showIndexingWelcome && (
-                      <IndexingWelcome
-                        vm={knowledge}
-                        workspaceRoot={connection.workspaceRoot}
-                      />
-                    )}
-                  </AnimatePresence>
-                  {workbenchVisible && (
-                    <EditorTabBar
-                      rightTab={editor.rightTab}
-                      selectedPath={editor.selectedPath}
-                      diffPath={git.gitDiff?.path ?? null}
-                      onSelectTab={selectHeaderTab}
-                    />
+                  <RightDock
+                    rightTab={editor.rightTab}
+                    chatPane={chatPane}
+                    skillDetail={skillDetail}
+                    onCloseSkillDetail={closeSkillDetail}
+                    selectedPath={editor.selectedPath}
+                    fileContent={editor.fileContent}
+                    language={editor.language}
+                    monacoTheme={editor.monacoTheme}
+                    gitDiff={null}
+                    onCloseGitDiff={git.closeDiff}
+                    knowledgeVm={knowledge}
+                    ragVm={rag}
+                    appTheme={theme}
+                    timelineEntries={timeline.entries}
+                    processConsoleVm={processConsole}
+                  />
+                </div>
+                <div
+                  className={cn(
+                    "absolute inset-0",
+                    agentSurface !== "preview" && "invisible pointer-events-none"
                   )}
-                  <div className="relative min-h-0 flex-1">
+                  aria-hidden={agentSurface !== "preview"}
+                >
+                  <ComponentPreviewPane
+                    managedTermId={pagePreviewTermId}
+                    onManagedTermChange={setPagePreviewTermId}
+                    currentSessionTitle={currentSessionTitle}
+                    onAttachScreenshot={attachPreviewScreenshot}
+                    reviewTaskId={approvedFrontendReview?.taskId ?? null}
+                    onPreviewUrlChange={setPagePreviewUrl}
+                    onCaptureForReview={captureFrontendReview}
+                  />
+                </div>
+              </div>
+            </div>
+          </Panel>
+              </PanelGroup>
+            </WorkspacePageBody>
+          </div>
+        ) : activeView === "explorer" ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <WorkspacePageBody className="flex min-h-0 flex-1">
+              <PanelGroup direction="horizontal" className="min-w-0 flex-1">
+                <Panel
+                  defaultSize={30}
+                  minSize={18}
+                  maxSize={45}
+                  className="min-w-[240px]"
+                >
+                  <div className="island h-full">{leftPanel}</div>
+                </Panel>
+                <PanelResizeHandle className="resize-handle w-px" />
+                <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
+                  <div className="island island-main h-full overflow-hidden">
                     <RightDock
-                      rightTab={editor.rightTab}
+                      rightTab="editor"
                       chatPane={chatPane}
                       skillDetail={skillDetail}
                       onCloseSkillDetail={closeSkillDetail}
@@ -367,38 +901,75 @@ export function AppShell() {
                       processConsoleVm={processConsole}
                     />
                   </div>
-                </div>
-              </Panel>
-              <PanelResizeHandle className="resize-handle h-[3px]" />
-              <Panel
-                ref={bottomRef}
-                defaultSize={0}
-                minSize={12}
-                collapsible
-                collapsedSize={0}
-                onCollapse={() => setBottomPanel(false)}
-                onExpand={() => setBottomPanel(true)}
-              >
-                <BottomPanel
-                  open={bottomOpen}
-                  onClose={() => setBottomPanel(false)}
-                  terminalSessions={terminal.sessions}
-                  activeTermId={terminal.activeTermId}
-                  onSelectTerm={terminal.setActive}
-                  onCreateTerm={() => void terminal.create()}
-                  onKillTerm={(id) => void terminal.kill(id)}
-                  onRenameTerm={terminal.rename}
-                  onMountTerm={terminal.mount}
-                  onRefitTerm={terminal.refit}
-                  termSearchOpen={terminal.searchOpen}
-                  onOpenTermSearch={terminal.openSearch}
-                  onCloseTermSearch={terminal.closeSearch}
-                />
-              </Panel>
-            </PanelGroup>
-          </Panel>
-        </PanelGroup>
+                </Panel>
+              </PanelGroup>
+            </WorkspacePageBody>
+          </div>
+        ) : activeView === "markdown" ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <WorkspacePageBody className="flex min-h-0 flex-1">
+              <PanelGroup direction="horizontal" className="min-w-0 flex-1">
+                <Panel
+                  defaultSize={30}
+                  minSize={18}
+                  maxSize={45}
+                  className="min-w-[240px]"
+                >
+                  <div className="island h-full">{leftPanel}</div>
+                </Panel>
+                <PanelResizeHandle className="resize-handle w-px" />
+                <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
+                  <div className="island island-main h-full overflow-hidden">
+                    <RightDock
+                      rightTab="editor"
+                      chatPane={chatPane}
+                      skillDetail={skillDetail}
+                      onCloseSkillDetail={closeSkillDetail}
+                      selectedPath={editor.selectedPath}
+                      fileContent={editor.fileContent}
+                      language={editor.language}
+                      monacoTheme={editor.monacoTheme}
+                      gitDiff={null}
+                      onCloseGitDiff={git.closeDiff}
+                      knowledgeVm={knowledge}
+                      ragVm={rag}
+                      appTheme={theme}
+                      timelineEntries={timeline.entries}
+                      processConsoleVm={processConsole}
+                    />
+                  </div>
+                </Panel>
+              </PanelGroup>
+            </WorkspacePageBody>
+          </div>
+        ) : (
+          <main className="island island-main w-full min-w-0 flex-1 overflow-hidden">
+            {leftPanel}
+          </main>
+        )}
       </div>
+
+      <BottomPanel
+        open={bottomOpen}
+        onClose={() => setBottomPanel(false)}
+        terminalSessions={terminal.sessions}
+        activeTermId={terminal.activeTermId}
+        onSelectTerm={terminal.setActive}
+        onCreateTerm={() => void terminal.create()}
+        onKillTerm={(id) => {
+          if (terminal.sessions.length <= 1) setBottomPanel(false);
+          void terminal.kill(id);
+        }}
+        onRenameTerm={terminal.rename}
+        onMountTerm={terminal.mount}
+        onRefitTerm={terminal.refit}
+        termSearchOpen={terminal.searchOpen}
+        terminalProfileId={terminal.profile}
+        onTerminalProfileChange={terminal.setProfile}
+        onOpenTermSearch={terminal.openSearch}
+        onCloseTermSearch={terminal.closeSearch}
+      />
+
       {/* Shell-level: the palette overlays every region, so it cannot live
           inside one of them. */}
       <CommandPalette
@@ -409,23 +980,58 @@ export function AppShell() {
         onClose={() => setPalette((p) => ({ ...p, open: false }))}
       />
       <CliProviderModal />
+      <SettingsModal open={settingsOpen} onClose={closeSettings} />
       {/* Shell-level: raised by the git panel or by the git-flow hook. */}
       <GitFlowHost />
+      {/* Shell-level: finishes AI conflict resolutions and announces new
+          conflicts (from a pull here or a terminal) wherever the user is. */}
+      <MergeConflictHost />
+      {/* Shell-level: the pull-from / push-to / checkout pickers. */}
+      <GitSyncModal />
+      {/* Shell-level: one stack for every git operation's outcome. */}
+      <AlertHost />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />
+      <FrontendReviewModal
+        request={frontendReviewOffer}
+        expiresAt={frontendReviewExpiresAt}
+        previewReady={pagePreviewUrl !== null}
+        error={frontendReviewError}
+        modelSelectionRequired={pendingFrontendReviewCapture !== null}
+        unsupportedModelLabel={
+          pendingFrontendReviewCapture?.unsupportedModelLabel ?? null
+        }
+        selectedModel={frontendReviewModel}
+        modelOptions={frontendReviewModelOptions}
+        onModelChange={setFrontendReviewModel}
+        onApprove={approveFrontendReview}
+        onDismiss={dismissFrontendReview}
+        onClosed={captureApprovedFrontendReview}
+      />
+      {/* The bottom strip: the dock floating in the middle of it, workspace
+          state reading quietly along both edges. No border and no bar surface
+          — the canvas runs under it, which is what lets the dock read as
+          something floating above the work rather than a fourth region of
+          it. `overflow-visible`, because a magnified tile grows past the
+          dock's own top edge by design. */}
       <div
         className={cn(
-          "h-[var(--statusbar-h)] shrink-0 overflow-hidden border-t",
-          "border-border bg-titlebar"
+          "h-[var(--statusbar-h)] shrink-0 overflow-visible"
         )}
       >
         <StatusBar
+          left={
+            <>
+              <BrandMark className="h-9 w-9 shrink-0" tile title="Atelier" />
+              <div className="w-[20rem] shrink-0">
+                <CommandCenter onOpen={(query) => setPalette({ open: true, query })} />
+              </div>
+              {dock}
+            </>
+          }
           connection={connection.state}
-          agentStatus={connection.agentStatus}
           agentStatusDetail={connection.agentStatusDetail}
           workspaceRoot={connection.workspaceRoot}
-          branch={branch}
-          usage={usage}
           contextStats={contextStats}
           indexingActive={knowledge.indexingActive}
           indexing={knowledge.indexing}

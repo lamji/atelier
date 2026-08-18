@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Check,
   ChevronDown,
   ChevronRight,
+  FileDiff,
   GitBranch,
   GitCommitHorizontal,
   Github,
@@ -18,14 +19,27 @@ import { errorText } from "@/lib/error-text";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
+import { WorkspacePageBody } from "@/components/ui/workspace-page";
 import { useGitFlowViewModel } from "@/hooks/useGitFlowViewModel";
+import {
+  useMergeConflictViewModel,
+  type MergeConflictViewModel,
+} from "@/hooks/useMergeConflictViewModel";
+import { DiffStat, statOf, sumStats, type DiffSide } from "./DiffStat";
+import { FileDiffDrawer } from "./FileDiffDrawer";
 import { RepoSwitcher } from "./RepoSwitcher";
+import { SyncBar } from "./SyncBar";
+import { MergeBanner } from "./MergeBanner";
+import { ConflictResolver } from "./ConflictResolver";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import type { GitFileStatus } from "@atelier/protocol";
 
 export interface GitPanelProps {
   vm: GitViewModel;
 }
+
+/** Keep unusually large working trees from blocking the renderer on mount. */
+const MAX_RENDERED_FILES_PER_SECTION = 200;
 
 /**
  * Shell around the repo view. The switcher lives here rather than inside
@@ -36,20 +50,40 @@ export function GitPanel({ vm }: GitPanelProps) {
   const multi = vm.repos.length > 1;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {multi && (
-        <RepoSwitcher
-          repos={vm.repos}
-          active={vm.activeRepo}
-          onSelect={(repo) => void vm.selectRepo(repo)}
-        />
-      )}
-      <div className="min-h-0 flex-1">
-        {multi && !vm.activeRepo ? (
-          <EmptyState text="Choose a project to see its git status." />
-        ) : (
-          <GitRepoView vm={vm} />
-        )}
-      </div>
+      <WorkspacePageBody className="flex min-h-0 flex-1 flex-col p-5">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-muted/30 shadow-sm">
+          <div className="min-h-0 flex-1">
+            {multi && !vm.activeRepo ? (
+              <div className="grid h-full min-h-0 gap-4 p-4 text-sm lg:grid-cols-[minmax(13rem,19rem)_minmax(0,1fr)]">
+                <div className="rounded-2xl bg-card/70 p-3 shadow-sm">
+                  <RepoSwitcher
+                    repos={vm.repos}
+                    active={vm.activeRepo}
+                    onSelect={(repo) => void vm.selectRepo(repo)}
+                  />
+                </div>
+                <EmptyState text="Choose a project to see its git status." />
+              </div>
+            ) : (
+              <GitRepoView
+                vm={vm}
+                repoSwitcher={
+                  multi ? (
+                    <RepoSwitcher
+                      repos={vm.repos}
+                      active={vm.activeRepo}
+                      onSelect={(repo) => void vm.selectRepo(repo)}
+                    />
+                  ) : null
+                }
+              />
+            )}
+          </div>
+          {/* Slides in over the right of this panel; the file list stays
+              readable beside it so the next file is one click away. */}
+          <FileDiffDrawer vm={vm} />
+        </div>
+      </WorkspacePageBody>
     </div>
   );
 }
@@ -114,7 +148,10 @@ function NoRepoState({ text, vm }: { text: string; vm: GitViewModel }) {
  * top, collapsible staged/unstaged sections with stage/unstage/discard
  * actions, and recent history. Clicking a file opens its diff.
  */
-function GitRepoView({ vm }: GitPanelProps) {
+function GitRepoView({
+  vm,
+  repoSwitcher,
+}: GitPanelProps & { repoSwitcher?: ReactNode }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -122,6 +159,9 @@ function GitRepoView({ vm }: GitPanelProps) {
   // Same store as the shell-mounted modal (GitFlowHost) — this instance
   // only starts the flow; the host renders it.
   const flowVm = useGitFlowViewModel();
+  // Sync row + merge-conflict flow. Its resolver takes over the right
+  // column while a conflicted file is open.
+  const mergeVm = useMergeConflictViewModel();
 
   if (vm.error) {
     // No checkouts found anywhere is the one failure the user can fix from
@@ -139,12 +179,23 @@ function GitRepoView({ vm }: GitPanelProps) {
       </p>
     );
   }
-  if (!vm.status.hasRemote) {
+  // A merge in flight is shown even without a remote: local branch merges
+  // conflict too, and hiding the resolver behind "connect to GitHub" would
+  // strand the user mid-merge.
+  if (!vm.status.hasRemote && !vm.status.mergeState) {
     return <NoRemoteState onConnect={vm.connectGitHub} />;
   }
 
-  const staged = vm.status.files.filter((f) => isStaged(f));
-  const unstaged = vm.status.files.filter((f) => isUnstaged(f));
+  const conflictSet = new Set(vm.status.conflicts);
+  const inMerge = vm.status.mergeState !== null;
+  // Unmerged paths render in the Conflicts section only — an "UU" file
+  // satisfies both isStaged and isUnstaged and would otherwise show twice.
+  const staged = vm.status.files.filter(
+    (f) => isStaged(f) && !conflictSet.has(f.path)
+  );
+  const unstaged = vm.status.files.filter(
+    (f) => isUnstaged(f) && !conflictSet.has(f.path)
+  );
 
   const act = (fn: () => Promise<void>) => {
     setBusy(true);
@@ -191,143 +242,411 @@ function GitRepoView({ vm }: GitPanelProps) {
   };
 
   return (
-    <div className="flex h-full flex-col gap-2 overflow-y-auto p-2 text-sm">
-      <BranchSection
-        status={vm.status}
-        branches={vm.branches}
-        busy={busy}
-        onCheckout={(ref) => act(() => vm.checkout(ref))}
-        onRefresh={vm.refresh}
-      />
+    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden p-4 text-sm lg:grid-cols-[minmax(13rem,19rem)_minmax(0,1fr)] lg:grid-rows-1">
+      <div className="space-y-3 rounded-2xl bg-card/70 p-3 shadow-sm">
+        {repoSwitcher}
+        <BranchSection
+          status={vm.status}
+          busy={busy}
+          onOpenCheckout={() => mergeVm.openSync("checkout")}
+          onRefresh={vm.refresh}
+        />
 
-      {actionError && (
-        <p className="rounded-lg bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
-          {actionError}
-        </p>
-      )}
+        <SyncBar vm={mergeVm} disabled={busy} />
 
-      <div className="space-y-1.5">
-        <div className="relative">
-          <Textarea
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder={generating ? "Drafting a message…" : "Commit message"}
-            rows={2}
-            disabled={generating}
-            className="max-h-60 min-h-14 resize-y pr-8 text-xs"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) doCommit();
-            }}
+        {actionError && (
+          <p className="rounded-lg bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+            {actionError}
+          </p>
+        )}
+
+        {inMerge ? (
+          <MergeBanner vm={mergeVm} />
+        ) : (
+          <CommitBox
+            message={message}
+            onMessageChange={setMessage}
+            generating={generating}
+            busy={busy}
+            stagedCount={staged.length}
+            unstagedCount={unstaged.length}
+            onCommit={doCommit}
+            onGenerate={doGenerate}
           />
-          <Tooltip content="Generate commit message from changes (AI)">
-            <button
-              onClick={doGenerate}
-              disabled={generating || busy}
-              className="absolute right-1.5 top-1.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-primary disabled:opacity-50"
-            >
-              {generating ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Sparkles className="h-3.5 w-3.5" />
-              )}
-            </button>
-          </Tooltip>
-        </div>
-        <Tooltip
-          content={
-            staged.length === 0
-              ? "Nothing staged — all changes will be staged and committed"
-              : undefined
-          }
-          disabled={staged.length !== 0}
-        >
-          <Button
-            size="sm"
-            className="w-full"
-            disabled={
-              busy ||
-              generating ||
-              message.trim() === "" ||
-              (staged.length === 0 && unstaged.length === 0)
-            }
-            onClick={doCommit}
-          >
-            <Check className="mr-1.5 h-3.5 w-3.5" />
-            Commit{" "}
-            {staged.length > 0
-              ? `(${staged.length})`
-              : unstaged.length > 0
-                ? `all (${unstaged.length})`
-                : ""}
-          </Button>
-        </Tooltip>
+        )}
       </div>
+      {mergeVm.merge.openPath ? (
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl bg-card/70 shadow-sm">
+          <ConflictResolver vm={mergeVm} />
+        </div>
+      ) : (
+      <div className="min-h-0 space-y-3 overflow-y-auto rounded-2xl bg-card/70 p-3 shadow-sm">
+        {(inMerge || conflictSet.size > 0) && (
+          <ConflictSection vm={mergeVm} busy={busy} onError={setActionError} />
+        )}
+        <FileSection
+          title="Staged"
+          files={staged}
+          side="index"
+          emptyText="Nothing staged."
+          busy={busy}
+          onOpen={(path) => void vm.openDiff(path, true)}
+          rowActions={[
+            {
+              icon: Minus,
+              title: "Unstage",
+              run: (path) => act(() => vm.unstage([path])),
+            },
+          ]}
+          headerActions={
+            staged.length > 1
+              ? [
+                  {
+                    label: "Unstage all",
+                    run: () => act(() => vm.unstage(staged.map((f) => f.path))),
+                  },
+                ]
+              : []
+          }
+        />
 
-      <FileSection
-        title="Staged"
-        files={staged}
-        emptyText="Nothing staged."
-        busy={busy}
-        onOpen={(path) => void vm.openDiff(path, true)}
-        rowActions={[
-          {
-            icon: Minus,
-            title: "Unstage",
-            run: (path) => act(() => vm.unstage([path])),
-          },
-        ]}
-        headerActions={
-          staged.length > 1
-            ? [
-                {
-                  label: "Unstage all",
-                  run: () => act(() => vm.unstage(staged.map((f) => f.path))),
-                },
-              ]
-            : []
-        }
-      />
+        <FileSection
+          title="Changes"
+          files={unstaged}
+          side="work"
+          emptyText={
+            vm.status.isClean ? "Working tree clean." : "No unstaged changes."
+          }
+          busy={busy}
+          onOpen={(path) => void vm.openDiff(path, false)}
+          rowActions={[
+            {
+              icon: Undo2,
+              title: "Discard changes",
+              danger: true,
+              run: (path) => doDiscard([path]),
+            },
+            {
+              icon: Plus,
+              title: "Stage",
+              run: (path) => act(() => vm.stage([path])),
+            },
+          ]}
+          headerActions={
+            unstaged.length > 1
+              ? [
+                  {
+                    label: "Discard all",
+                    danger: true,
+                    run: () => doDiscard(unstaged.map((f) => f.path)),
+                  },
+                  {
+                    label: "Stage all",
+                    run: () => act(() => vm.stage(unstaged.map((f) => f.path))),
+                  },
+                ]
+              : []
+          }
+        />
 
-      <FileSection
-        title="Changes"
-        files={unstaged}
-        emptyText={
-          vm.status.isClean ? "Working tree clean." : "No unstaged changes."
-        }
-        busy={busy}
-        onOpen={(path) => void vm.openDiff(path, false)}
-        rowActions={[
-          {
-            icon: Undo2,
-            title: "Discard changes",
-            danger: true,
-            run: (path) => doDiscard([path]),
-          },
-          {
-            icon: Plus,
-            title: "Stage",
-            run: (path) => act(() => vm.stage([path])),
-          },
-        ]}
-        headerActions={
-          unstaged.length > 1
-            ? [
-                {
-                  label: "Discard all",
-                  danger: true,
-                  run: () => doDiscard(unstaged.map((f) => f.path)),
-                },
-                {
-                  label: "Stage all",
-                  run: () => act(() => vm.stage(unstaged.map((f) => f.path))),
-                },
-              ]
-            : []
-        }
-      />
-
-      <HistorySection commits={vm.commits} />
+        <HistorySection commits={vm.commits} />
+      </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * The merge-mode file list: unresolved conflicts first (red, `!`), then the
+ * files already resolved in this merge (green, ✓, with Undo). Sits above
+ * Staged/Changes so the thing blocking the commit is the first thing seen.
+ */
+function ConflictSection(props: {
+  vm: MergeConflictViewModel;
+  busy: boolean;
+  onError: (message: string | null) => void;
+}) {
+  const { vm } = props;
+  const [open, setOpen] = useState(true);
+  const unresolved = vm.conflicts;
+  const resolved = vm.merge.trackedConflicts.filter(
+    (p) => !unresolved.includes(p)
+  );
+  const aiResolved = new Set(vm.merge.aiResolved);
+  const aiBusy = new Set(vm.aiWorking ? (vm.merge.aiPaths ?? []) : []);
+  const disabled = props.busy;
+
+  const run = (fn: () => Promise<void>) => {
+    props.onError(null);
+    void fn().catch((err: unknown) => props.onError(shortError(errorText(err))));
+  };
+
+  return (
+    <div>
+      <div className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-1 backdrop-blur">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className={cn(
+            "flex min-w-0 items-center gap-1 text-[12px] font-medium hover:text-foreground",
+            unresolved.length > 0 ? "text-destructive" : "text-success"
+          )}
+        >
+          {open ? (
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          ) : (
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          )}
+          <span className="truncate">
+            Conflicts
+            {unresolved.length > 0
+              ? ` · ${unresolved.length}`
+              : resolved.length > 0
+                ? " · all resolved"
+                : ""}
+          </span>
+        </button>
+        {unresolved.length > 1 && (
+          <span className="ml-auto flex shrink-0 items-center gap-2">
+            <Tooltip content="Keep our side in every conflicted file">
+              <button
+                onClick={() => run(() => vm.takeSide(unresolved, "ours"))}
+                disabled={disabled}
+                className="text-[11px] text-cyan hover:underline"
+              >
+                All ours
+              </button>
+            </Tooltip>
+            <Tooltip content="Take the incoming side in every conflicted file">
+              <button
+                onClick={() => run(() => vm.takeSide(unresolved, "theirs"))}
+                disabled={disabled}
+                className="text-[11px] text-primary hover:underline"
+              >
+                All theirs
+              </button>
+            </Tooltip>
+          </span>
+        )}
+      </div>
+      {open && (
+        <>
+          {unresolved.map((path) => (
+            <ConflictRow
+              key={path}
+              path={path}
+              state={aiBusy.has(path) ? "ai" : "unresolved"}
+              onOpen={() => vm.openConflict(path)}
+              actions={[
+                {
+                  label: "Ours",
+                  hint: "Keep our side of this file",
+                  tone: "ours",
+                  run: () => run(() => vm.takeSide([path], "ours")),
+                },
+                {
+                  label: "Theirs",
+                  hint: "Take the incoming side of this file",
+                  tone: "theirs",
+                  run: () => run(() => vm.takeSide([path], "theirs")),
+                },
+                {
+                  icon: Sparkles,
+                  hint: "Resolve this file with AI",
+                  tone: "ai",
+                  disabled: vm.aiWorking,
+                  run: () => run(() => vm.aiResolve([path])),
+                },
+              ]}
+              disabled={disabled}
+            />
+          ))}
+          {resolved.map((path) => (
+            <ConflictRow
+              key={path}
+              path={path}
+              state="resolved"
+              tag={aiResolved.has(path) ? "AI · review" : undefined}
+              onOpen={() => vm.openConflict(path)}
+              actions={[
+                {
+                  icon: FileDiff,
+                  hint: "Review the resolution",
+                  run: () => vm.openConflict(path),
+                },
+                {
+                  icon: Undo2,
+                  hint: "Restore the conflict markers",
+                  tone: "danger",
+                  run: () => run(() => vm.restore(path)),
+                },
+              ]}
+              disabled={disabled}
+            />
+          ))}
+          {unresolved.length === 0 && resolved.length === 0 && (
+            <p className="px-2 pb-1 text-[11px] text-muted-foreground/60">
+              No conflicted files.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+interface ConflictRowAction {
+  label?: string;
+  icon?: typeof Plus;
+  hint: string;
+  tone?: "ours" | "theirs" | "ai" | "danger";
+  disabled?: boolean;
+  run: () => void;
+}
+
+function ConflictRow(props: {
+  path: string;
+  state: "unresolved" | "resolved" | "ai";
+  tag?: string;
+  onOpen: () => void;
+  actions: ConflictRowAction[];
+  disabled: boolean;
+}) {
+  const unresolved = props.state !== "resolved";
+  const title = unresolved
+    ? `${props.path} — open the resolver`
+    : `${props.path} — resolved, staged`;
+  return (
+    <div className="group flex items-center gap-0.5 rounded-md pr-1 hover:bg-accent/60">
+      <Tooltip content={title}>
+        <button
+          onClick={props.onOpen}
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
+        >
+          <span
+            className={cn(
+              "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
+              props.state === "resolved"
+                ? "bg-success/15 text-success"
+                : "conflict-badge bg-destructive/15 text-destructive"
+            )}
+          >
+            {props.state === "ai" ? (
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            ) : props.state === "resolved" ? (
+              <Check className="h-2.5 w-2.5" />
+            ) : (
+              "!"
+            )}
+          </span>
+          <span
+            className={cn(
+              "truncate text-xs",
+              unresolved ? "text-destructive" : "text-foreground"
+            )}
+          >
+            {props.path}
+          </span>
+          {props.tag && (
+            <span className="ml-1 shrink-0 rounded-full bg-primary/15 px-1.5 text-[10px] text-primary">
+              {props.tag}
+            </span>
+          )}
+        </button>
+      </Tooltip>
+      {props.actions.map((a) => (
+        <Tooltip key={a.hint} content={a.hint}>
+          <button
+            onClick={a.run}
+            disabled={props.disabled || a.disabled}
+            className={cn(
+              "shrink-0 rounded px-1 py-0.5 text-[10px] font-medium opacity-0 group-hover:opacity-100 disabled:opacity-30",
+              a.tone === "ours" && "text-cyan hover:bg-cyan/15",
+              a.tone === "theirs" && "text-primary hover:bg-primary/15",
+              a.tone === "ai" && "text-primary hover:bg-primary/15",
+              a.tone === "danger" && "text-muted-foreground hover:text-destructive",
+              !a.tone && "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {a.icon ? <a.icon className="h-3.5 w-3.5" /> : a.label}
+          </button>
+        </Tooltip>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The commit message box + button. Hidden while a merge is in flight — the
+ * merge banner's "Commit merge" is the commit then, and two commit buttons
+ * would invite committing half a merge.
+ */
+function CommitBox(props: {
+  message: string;
+  onMessageChange: (value: string) => void;
+  generating: boolean;
+  busy: boolean;
+  stagedCount: number;
+  unstagedCount: number;
+  onCommit: () => void;
+  onGenerate: () => void;
+}) {
+  return (
+    <>
+    <div className="relative">
+      <Textarea
+        value={props.message}
+        onChange={(e) => props.onMessageChange(e.target.value)}
+        placeholder={props.generating ? "Drafting a message…" : "Commit message"}
+        rows={2}
+        disabled={props.generating}
+        className="max-h-60 min-h-14 resize-y pr-8 text-xs"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) props.onCommit();
+        }}
+      />
+      <Tooltip content="Generate commit message from changes (AI)">
+        <button
+          onClick={props.onGenerate}
+          disabled={props.generating || props.busy}
+          className="absolute right-1.5 top-1.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-primary disabled:opacity-50"
+        >
+          {props.generating ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </Tooltip>
+    </div>
+    <Tooltip
+      content={
+        props.stagedCount === 0
+          ? "Nothing staged — all changes will be staged and committed"
+          : undefined
+      }
+      disabled={props.stagedCount !== 0}
+    >
+      <Button
+        size="sm"
+        className="w-full"
+        disabled={
+          props.busy ||
+          props.generating ||
+          props.message.trim() === "" ||
+          (props.stagedCount === 0 && props.unstagedCount === 0)
+        }
+        onClick={props.onCommit}
+      >
+        <Check className="mr-1.5 h-3.5 w-3.5" />
+        Commit{" "}
+        {props.stagedCount > 0
+          ? `(${props.stagedCount})`
+          : props.unstagedCount > 0
+            ? `all (${props.unstagedCount})`
+            : ""}
+      </Button>
+    </Tooltip>
+    </>
   );
 }
 
@@ -379,68 +698,39 @@ function NoRemoteState(props: { onConnect: () => Promise<void> }) {
 
 function BranchSection(props: {
   status: NonNullable<GitViewModel["status"]>;
-  branches: GitViewModel["branches"];
   busy: boolean;
-  onCheckout: (ref: string) => void;
+  /** Opens the checkout picker (local + remote branches, or a new one). */
+  onOpenCheckout: () => void;
   onRefresh: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const { status } = props;
   return (
-    <div>
-      <div className="flex items-center gap-1.5">
-        <Tooltip content="Switch branch">
-          <button
-            onClick={() => setOpen((v) => !v)}
-            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-accent/60"
-          >
-            {open ? (
-              <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-            ) : (
-              <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-            )}
-            <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-            <span className="truncate font-medium">{status.branch}</span>
-            {(status.ahead > 0 || status.behind > 0) && (
-              <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
-                {status.ahead > 0 && `↑${status.ahead}`}
-                {status.behind > 0 && ` ↓${status.behind}`}
-              </span>
-            )}
-          </button>
-        </Tooltip>
-        <Tooltip content="Refresh">
-          <button
-            onClick={props.onRefresh}
-            className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </button>
-        </Tooltip>
-      </div>
-      {open && (
-        <div className="mt-0.5 space-y-0.5 pl-6">
-          {props.branches.map((b) => (
-            <button
-              key={b.name}
-              disabled={props.busy || b.current}
-              onClick={() => {
-                setOpen(false);
-                props.onCheckout(b.name);
-              }}
-              className={cn(
-                "flex w-full items-center gap-1.5 truncate rounded-md px-2 py-1 text-left text-xs",
-                b.current
-                  ? "font-medium text-primary"
-                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              )}
-            >
-              <span className="truncate">{b.name}</span>
-              {b.current && <Check className="ml-auto h-3 w-3 shrink-0" />}
-            </button>
-          ))}
-        </div>
-      )}
+    <div className="flex items-center gap-1.5">
+      <Tooltip content="Checkout another branch…">
+        <button
+          onClick={props.onOpenCheckout}
+          disabled={props.busy}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-accent/60 disabled:opacity-60"
+        >
+          <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+          <span className="truncate font-medium">{status.branch}</span>
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+          {(status.ahead > 0 || status.behind > 0) && (
+            <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {status.ahead > 0 && `↑${status.ahead}`}
+              {status.behind > 0 && ` ↓${status.behind}`}
+            </span>
+          )}
+        </button>
+      </Tooltip>
+      <Tooltip content="Refresh">
+        <button
+          onClick={props.onRefresh}
+          className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -462,6 +752,8 @@ interface HeaderAction {
 function FileSection(props: {
   title: string;
   files: GitFileStatus[];
+  /** Which side of each file's change this section counts and diffs. */
+  side: DiffSide;
   emptyText: string;
   busy: boolean;
   onOpen: (path: string) => void;
@@ -469,12 +761,15 @@ function FileSection(props: {
   headerActions: HeaderAction[];
 }) {
   const [open, setOpen] = useState(true);
+  const visibleFiles = props.files.slice(0, MAX_RENDERED_FILES_PER_SECTION);
+  const hiddenCount = props.files.length - visibleFiles.length;
+  const total = sumStats(props.files, props.side);
   return (
-    <div className="border-t border-white/5 pt-1">
-      <div className="flex items-center gap-1 px-1 py-1">
+    <div className="border-t border-white/5 pt-1 first:border-t-0 first:pt-0">
+      <div className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-1 backdrop-blur">
         <button
           onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+          className="flex min-w-0 items-center gap-1 text-[12px] font-medium text-muted-foreground hover:text-foreground"
         >
           {open ? (
             <ChevronDown className="h-3 w-3 shrink-0" />
@@ -486,6 +781,12 @@ function FileSection(props: {
             {props.files.length > 0 && ` · ${props.files.length}`}
           </span>
         </button>
+        {total && (
+          <DiffStat
+            stat={total}
+            title={`${total.added} added, ${total.removed} removed in this section`}
+          />
+        )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {props.headerActions.map((a) => (
             <button
@@ -508,43 +809,56 @@ function FileSection(props: {
             {props.emptyText}
           </p>
         ) : (
-          props.files.map((f) => (
-            <div
-              key={f.path}
-              className="group flex items-center gap-0.5 rounded-md pr-1 hover:bg-accent/60"
-            >
-              <Tooltip content={f.path}>
-                <button
-                  onClick={() => props.onOpen(f.path)}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
-                >
-                  <span
-                    className={cn(
-                      "w-4 shrink-0 text-center font-mono text-[11px] font-semibold",
-                      statusColor(f)
-                    )}
-                  >
-                    {statusChar(f)}
-                  </span>
-                  <span className="truncate text-xs">{f.path}</span>
-                </button>
-              </Tooltip>
-              {props.rowActions.map((a) => (
-                <Tooltip key={a.title} content={a.title}>
+          <>
+            {visibleFiles.map((f) => (
+              <div
+                key={f.path}
+                className="group flex items-center gap-0.5 rounded-md pr-1 hover:bg-accent/60"
+              >
+                <Tooltip content={f.path}>
                   <button
-                    onClick={() => a.run(f.path)}
-                    disabled={props.busy}
-                    className={cn(
-                      "shrink-0 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100",
-                      a.danger ? "hover:text-destructive" : "hover:text-foreground"
-                    )}
+                    onClick={() => props.onOpen(f.path)}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
                   >
-                    <a.icon className="h-3.5 w-3.5" />
+                    <span
+                      className={cn(
+                        "w-4 shrink-0 text-center font-mono text-[11px] font-semibold",
+                        statusColor(f)
+                      )}
+                    >
+                      {statusChar(f)}
+                    </span>
+                    <span className="truncate text-xs">{f.path}</span>
                   </button>
                 </Tooltip>
-              ))}
-            </div>
-          ))
+                <DiffStat
+                  stat={statOf(f, props.side)}
+                  onOpen={() => props.onOpen(f.path)}
+                />
+                {props.rowActions.map((a) => (
+                  <Tooltip key={a.title} content={a.title}>
+                    <button
+                      onClick={() => a.run(f.path)}
+                      disabled={props.busy}
+                      className={cn(
+                        "shrink-0 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100",
+                        a.danger
+                          ? "hover:text-destructive"
+                          : "hover:text-foreground"
+                      )}
+                    >
+                      <a.icon className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                ))}
+              </div>
+            ))}
+            {hiddenCount > 0 && (
+              <p className="px-2 py-1 text-[11px] text-muted-foreground/60">
+                {hiddenCount} more changed files not shown.
+              </p>
+            )}
+          </>
         ))}
     </div>
   );
@@ -557,7 +871,7 @@ function HistorySection(props: { commits: GitViewModel["commits"] }) {
     <div className="min-h-0 border-t border-white/5 pt-1">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1 px-1 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+        className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-1 text-[12px] font-medium text-muted-foreground backdrop-blur hover:text-foreground"
       >
         {open ? (
           <ChevronDown className="h-3 w-3 shrink-0" />

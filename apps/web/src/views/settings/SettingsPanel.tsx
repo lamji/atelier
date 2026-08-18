@@ -10,7 +10,9 @@ import {
   Orbit,
   Plug,
   RefreshCw,
+  Search,
   Scale,
+  Settings as SettingsIcon,
   Sparkles,
   Terminal,
   Trash2,
@@ -22,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { WorkspacePageHeader } from "@/components/ui/workspace-page";
 import { RulesTab } from "./RulesTab";
 import { McpTab } from "./McpTab";
 import { SkillsTab } from "./SkillsTab";
@@ -42,62 +45,76 @@ import type {
  * reachable where it is actually used — the composer, the rail, the header
  * — so this panel is only the thing that has nowhere else to go.
  */
-export function SettingsPanel() {
-  const [tab, setTab] = useState<Tab>("providers");
+export function SettingsPanel({ modal = false }: { modal?: boolean }) {
+  const [tab, setTab] = useState<Tab>("general");
+  const [search, setSearch] = useState("");
+  const visibleTabs = SETTINGS_TABS.filter((item) =>
+    item.label.toLowerCase().includes(search.trim().toLowerCase())
+  );
+  const current = SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0]!;
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
-      {/*
-        No title row: the rail icon and its tooltip already say Settings, and
-        the tab strip is the only thing here that does any work. It gets the
-        full width instead of being pushed into the corner by a label.
-      */}
-      <div className="flex items-center">
-        <div className="flex w-full items-center gap-0.5 rounded-lg bg-muted/60 p-0.5">
-          {/* One tab for every model provider. They are the same kind of
-              thing configured the same way, so splitting them across three
-              icons only hid two of them at a time. */}
-          <TabButton
-            active={tab === "providers"}
-            onClick={() => setTab("providers")}
-            title="Model providers"
-          >
-            <Cloud className="h-3.5 w-3.5" />
-          </TabButton>
-          <span className="mx-0.5 h-4 w-px bg-border" />
-          <TabButton
-            active={tab === "mcp"}
-            onClick={() => setTab("mcp")}
-            title="MCP servers"
-          >
-            <Plug className="h-3.5 w-3.5" />
-          </TabButton>
-          <TabButton
-            active={tab === "skills"}
-            onClick={() => setTab("skills")}
-            title="Skills & commands"
-          >
-            <Wand2 className="h-3.5 w-3.5" />
-          </TabButton>
-          <TabButton
-            active={tab === "rules"}
-            onClick={() => setTab("rules")}
-            title="Agent rules"
-          >
-            <Scale className="h-3.5 w-3.5" />
-          </TabButton>
-        </div>
+    <div className="flex h-full flex-col">
+      {!modal && (
+        <WorkspacePageHeader
+          icon={SettingsIcon}
+          title="Settings"
+          description="Connect providers, extend Atelier, and define how agents work in this workspace."
+        />
+      )}
+      <div className="flex min-h-0 flex-1">
+        <aside className="flex w-56 shrink-0 flex-col border-r border-border-subtle bg-panel/65 p-3">
+          <div className="relative mb-3">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search settings"
+              aria-label="Search settings"
+              className="h-8 rounded-lg bg-card pl-8 text-xs shadow-sm"
+            />
+          </div>
+          <nav className="space-y-1" aria-label="Settings categories">
+            {visibleTabs.map((item) => (
+              <SettingsCategory
+                key={item.id}
+                item={item}
+                active={tab === item.id}
+                onSelect={() => setTab(item.id)}
+              />
+            ))}
+            {visibleTabs.length === 0 && (
+              <span className="block px-3 py-2 text-xs text-muted-foreground">
+                No matching settings
+              </span>
+            )}
+          </nav>
+        </aside>
+
+        <main className="min-w-0 flex-1 overflow-y-auto bg-card px-8 py-6">
+          <div className="mx-auto w-full max-w-3xl">
+            <div className="mb-5">
+              <h2 className="text-base font-semibold">{current.label}</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {current.description}
+              </p>
+            </div>
+
+            {tab === "general" && (
+              <div className="space-y-5">
+                <SettingsGroup title="Agent experience">
+                  <CliModeCheck />
+                  <GlobalSessionKnowledgeToggle />
+                </SettingsGroup>
+              </div>
+            )}
+            {tab === "providers" && <ProvidersTab />}
+            {tab === "mcp" && <McpTab />}
+            {tab === "skills" && <SkillsTab />}
+            {tab === "rules" && <RulesTab />}
+          </div>
+        </main>
       </div>
-
-      {/* Above the tab content, not inside a tab: it changes what the whole
-          main console IS, so it should be visible whichever tab is open. */}
-      <CliModeCheck />
-      <GlobalSessionKnowledgeToggle />
-
-      {tab === "providers" && <ProvidersTab />}
-      {tab === "mcp" && <McpTab />}
-      {tab === "skills" && <SkillsTab />}
-      {tab === "rules" && <RulesTab />}
     </div>
   );
 }
@@ -108,7 +125,20 @@ type ProviderTab =
   | "grok"
   | "codex"
   | "claude";
-type Tab = "providers" | "mcp" | "skills" | "rules";
+type Tab = "general" | "providers" | "mcp" | "skills" | "rules";
+
+const SETTINGS_TABS: Array<{
+  id: Tab;
+  label: string;
+  description: string;
+  icon: typeof SettingsIcon;
+}> = [
+  { id: "general", label: "General", description: "Choose how Atelier sessions and knowledge behave.", icon: SettingsIcon },
+  { id: "providers", label: "Providers", description: "Connect model providers and manage the models available in chat.", icon: Cloud },
+  { id: "mcp", label: "MCP Servers", description: "Configure external tools and context servers available to agents.", icon: Plug },
+  { id: "skills", label: "Skills & Commands", description: "Review reusable workflows and commands discovered for this workspace.", icon: Wand2 },
+  { id: "rules", label: "Agent Rules", description: "Define the instructions agents must follow while working in this project.", icon: Scale },
+];
 
 interface ProviderDef {
   id: ProviderTab;
@@ -182,14 +212,15 @@ function CliModeCheck() {
   const setCliMode = usePreferencesStore((s) => s.setCliMode);
 
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
       role="checkbox"
       aria-checked={cliMode}
       onClick={() => setCliMode(!cliMode)}
       className={cn(
-        "flex w-full items-start gap-2 rounded-xl bg-muted/40 p-2.5",
-        "text-left transition-colors hover:bg-muted/60"
+        "h-auto w-full items-start justify-start gap-3 rounded-none px-4 py-3",
+        "whitespace-normal text-left font-normal hover:bg-muted/45"
       )}
     >
       <span
@@ -215,7 +246,7 @@ function CliModeCheck() {
           untick this.
         </span>
       </span>
-    </button>
+    </Button>
   );
 }
 
@@ -257,7 +288,7 @@ function GlobalSessionKnowledgeToggle() {
   };
 
   return (
-    <section className="rounded-xl bg-muted/40 p-2.5">
+    <section className="px-4 py-3">
       <div className="flex items-start gap-2">
         <Orbit className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         <div className="min-w-0 flex-1">
@@ -291,74 +322,82 @@ function GlobalSessionKnowledgeToggle() {
   );
 }
 
-/** Icon-only tab: the title is the tooltip and the accessible name. */
-function TabButton({
+/** Ubuntu-style category row: icon, readable label, and a quiet active fill. */
+function SettingsCategory({
+  item,
   active,
-  onClick,
-  title,
-  children,
+  onSelect,
 }: {
+  item: (typeof SETTINGS_TABS)[number];
   active: boolean;
-  onClick: () => void;
-  title: string;
-  children: React.ReactNode;
+  onSelect: () => void;
 }) {
+  const Icon = item.icon;
   return (
     <Button
       type="button"
       variant="ghost"
-      size="icon"
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      aria-pressed={active}
+      onClick={onSelect}
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "!h-6 !w-7 rounded-md",
+        "h-9 w-full justify-start gap-2.5 rounded-lg px-3 text-xs font-normal",
         active
-          ? "bg-background text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground"
+          ? "bg-accent text-foreground"
+          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       )}
     >
-      {children}
+      <Icon className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">{item.label}</span>
     </Button>
   );
 }
 
-/** All model providers, one section each, under the single Cloud tab. */
+function SettingsGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <h3 className="mb-2 text-xs font-semibold">{title}</h3>
+      <div className="overflow-hidden rounded-xl border border-border-subtle bg-elevated shadow-sm [&>*+*]:border-t [&>*+*]:border-border-subtle">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+/** All model providers in one compact, divided preferences list. */
 function ProvidersTab() {
   const vm = useProvidersViewModel();
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="space-y-3">
       {(vm.loading || vm.saving) && (
         <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
       )}
 
       {vm.error && (
-        <p className="rounded-lg bg-destructive/10 px-2.5 py-2 text-[11px] text-destructive">
+        <p className="rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
           {vm.error}
         </p>
       )}
 
+      <div className="overflow-hidden rounded-xl border border-border-subtle bg-elevated shadow-sm [&>*+*]:border-t [&>*+*]:border-border-subtle">
       {PROVIDER_DEFS.map((definition) => {
         const provider = vm.providers.find(
           (candidate) => candidate.id === definition.id
         );
         return (
-          <section key={definition.id} className="space-y-1.5">
-            <div className="flex items-center gap-1.5 px-0.5">
-              <definition.icon className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-              <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
-                {definition.title}
-              </h3>
-            </div>
-
+          <section key={definition.id} className="bg-card">
             {!provider || vm.loading ? (
-              <p className="rounded-xl bg-muted/40 px-2.5 py-3 text-[11px] text-muted-foreground/70">
+              <p className="px-4 py-3 text-[11px] text-muted-foreground/70">
                 Loading provider…
               </p>
             ) : (
-              <ProviderCard
+              <ProviderRow
                 provider={provider}
                 definition={definition}
                 vm={vm}
@@ -367,12 +406,13 @@ function ProvidersTab() {
           </section>
         );
       })}
+      </div>
     </div>
   );
 }
 
 /** A stored provider: status, its models, the connection check, removal. */
-function ProviderCard({
+function ProviderRow({
   provider,
   definition,
   vm,
@@ -391,7 +431,7 @@ function ProviderCard({
   const { loadCatalog } = vm;
 
   // Pull the catalog once the provider is on screen; the toggles are the
-  // point of this card, so they shouldn't wait for a click to appear.
+  // point of this row, so they shouldn't wait for a click to appear.
   useEffect(() => {
     if (vm.connected && provider.configured && models === undefined) {
       loadCatalog(provider.id);
@@ -411,8 +451,8 @@ function ProviderCard({
   const Icon = definition.icon;
 
   return (
-    <div className="overflow-hidden rounded-xl bg-muted/40">
-      {/* "Already working" is read from what the card has: a Test result
+    <div className="bg-card">
+      {/* "Already working" is read from what the row has: a Test result
           when the user has run one, otherwise a non-empty catalog — a CLI
           that is not signed in, or a bad key, offers no models. */}
       <ProviderHelpModal
@@ -420,10 +460,10 @@ function ProviderCard({
         ready={check ? check.ok : (models?.length ?? 0) > 0}
         onClose={() => setHelpFor(null)}
       />
-      <div className="flex items-start gap-2.5 p-2.5">
+      <div className="flex items-center gap-3 px-4 py-3">
         <Icon
           className={cn(
-            "mt-0.5 h-3.5 w-3.5 shrink-0",
+            "h-4 w-4 shrink-0",
             provider.enabled ? "text-primary/80" : "text-muted-foreground/50"
           )}
         />
@@ -523,7 +563,7 @@ function ProviderCard({
           switching the provider back on. */}
       <div
         className={cn(
-          "border-t border-border/60 transition-opacity",
+          "border-t border-border-subtle bg-muted/20 transition-opacity",
           (!provider.enabled || !provider.configured) && "opacity-50"
         )}
       >
@@ -543,7 +583,7 @@ function ProviderCard({
                 showModels && "rotate-90"
               )}
             />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+            <span className="text-[11px] font-semibold text-muted-foreground/60">
               Models
             </span>
             <span className="text-[10px] text-muted-foreground/50">
@@ -692,7 +732,7 @@ function UsageBlock({
     <div className="mx-1 mb-1 rounded-lg bg-background/40 p-2">
       <div className="flex items-center gap-1.5">
         <Gauge className="h-3 w-3 text-primary/70" />
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+        <span className="text-[11px] font-semibold text-muted-foreground/60">
           Usage by Atelier
         </span>
       </div>
@@ -769,7 +809,7 @@ function ProviderForm({
   };
 
   return (
-    <div className="space-y-2 rounded-lg bg-background/40 p-2">
+    <div className="space-y-2 px-2 py-1">
       <div>
         <p className="text-[11px] font-medium">{label}</p>
         <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground/60">

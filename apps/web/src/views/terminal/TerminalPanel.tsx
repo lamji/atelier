@@ -1,12 +1,17 @@
 import { memo, useEffect, useRef } from "react";
 import { TerminalSquare } from "lucide-react";
 import { cn } from "@/lib/cn";
+import {
+  terminalProfile,
+  type TerminalProfileId,
+} from "@/services/terminal-appearance";
 import { TerminalFindBar } from "./TerminalFindBar";
 import type { TerminalSession } from "@atelier/protocol";
 
 export interface TerminalPanelProps {
   sessions: TerminalSession[];
   activeTermId: string | null;
+  profileId: TerminalProfileId;
   /** Whether the Ctrl+F find bar is showing for the active terminal. */
   searchOpen: boolean;
   onCreate: () => void;
@@ -26,6 +31,7 @@ export const TerminalPanel = memo(function TerminalPanel(
   props: TerminalPanelProps
 ) {
   const { sessions, activeTermId, onMount, onRefit } = props;
+  const profile = terminalProfile(props.profileId);
   // One persistent DOM container per terminal, kept mounted for the
   // terminal's whole life. Switching tabs only toggles visibility, so
   // scrollback and content survive; a theme toggle re-renders without
@@ -60,7 +66,7 @@ export const TerminalPanel = memo(function TerminalPanel(
   }, [activeTermId, onRefit]);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" style={{ backgroundColor: profile.surface }}>
       {sessions.length > 0 ? (
         <div className="relative min-h-0 flex-1">
           {sessions.map((session) => (
@@ -74,6 +80,7 @@ export const TerminalPanel = memo(function TerminalPanel(
                 "absolute inset-0 px-2 pb-2 pt-1",
                 session.id !== activeTermId && "hidden"
               )}
+              style={{ backgroundColor: profile.surface }}
             />
           ))}
           {props.searchOpen && activeTermId && (

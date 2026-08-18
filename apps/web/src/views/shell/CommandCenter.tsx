@@ -22,19 +22,14 @@ export function CommandCenter(props: CommandCenterProps) {
       aria-label="Search files and commands"
       aria-keyshortcuts="Control+P Control+Shift+P"
       title={`Search files (${mod}+P) · Commands (${mod}+Shift+P)`}
-      className={cn(
-        "app-no-drag flex h-[22px] w-full items-center gap-1.5 rounded",
-        "border border-border bg-editor/60 px-2 text-[11px]",
-        "text-muted-foreground transition-colors",
-        "hover:border-primary/50 hover:text-foreground"
-      )}
+      className={cn("app-no-drag pill-field w-full text-left")}
     >
-      <Search className="h-3 w-3 shrink-0" />
-      <span className="truncate">Search files or run a command</span>
+      <Search className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">Search files or commands</span>
       <kbd
         className={cn(
-          "ml-auto hidden shrink-0 rounded border border-border px-1",
-          "text-[9px] font-medium tabular-nums sm:block"
+          "ml-auto hidden shrink-0 rounded-md bg-muted px-1.5 py-0.5",
+          "text-[10px] font-medium tabular-nums text-muted-foreground sm:block"
         )}
       >
         {mod}+P

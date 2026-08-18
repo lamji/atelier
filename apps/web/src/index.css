@@ -3,7 +3,7 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Atelier theme tokens — deep mineral teal, brand #224248.
+ * Atelier theme tokens — mineral teal, brand #224248, on a soft-card canvas.
  *
  * Two layers, on purpose:
  *   --atelier-*   semantic source of truth (brand ramp, per-region surfaces,
@@ -13,6 +13,12 @@
  *                 aliases every existing component already consumes. They are
  *                 now *derived* from the atelier layer, so a component keeps
  *                 working untouched and still lands on the new palette.
+ *
+ * The shell is no longer a set of abutting IDE regions. It is a tinted canvas
+ * with cards floating on it: `--atelier-bg-app` is the canvas and is the only
+ * surface that is meaningfully darker than white, so a card reads as raised
+ * without needing a heavy border. Region tokens survive because a few places
+ * still want a distinct surface, but most of them now resolve to the card.
  *
  * Light is the base cascade; dark is applied by BOTH `.dark` (what the theme
  * store has always toggled) and `[data-theme="dark"]`, so either signal works.
@@ -24,32 +30,54 @@
   --atelier-brand-active: #19363b;
   --atelier-brand-soft: rgba(34, 66, 72, 0.1);
 
-  --atelier-bg-app: #eef3f2;
-  --atelier-bg-titlebar: #e7eeec;
-  --atelier-bg-activity: #dce7e4;
-  --atelier-bg-sidebar: #f2f6f5;
-  --atelier-bg-editor: #fbfcfc;
-  --atelier-bg-panel: #f5f8f7;
+  /* Canvas first, cards on top of it. */
+  --atelier-bg-app: #eef1f2;
+  --atelier-bg-sidebar: #ffffff;
+  --atelier-bg-editor: #ffffff;
+  --atelier-bg-panel: #f4f6f7;
   --atelier-bg-elevated: #ffffff;
-  --atelier-bg-hover: #e1ebe8;
-  --atelier-bg-active: #d4e2df;
+  --atelier-bg-hover: #eff3f3;
+  --atelier-bg-active: #e2eaea;
 
-  --atelier-border: #c7d4d1;
-  --atelier-border-subtle: #dce5e3;
-  --atelier-text-primary: #152527;
-  --atelier-text-secondary: #475f62;
-  --atelier-text-muted: #5f7477;
+  /* The main card's wash — the brand itself, not a new hue. The ceiling on
+     this alpha is not taste, it is the canvas: past ~0.07 the tint is darker
+     than --atelier-bg-app and the card reads as a dent instead of a card. */
+  --atelier-island-wash: rgba(34, 66, 72, 0.05);
+  --atelier-island-wash-fade: rgba(34, 66, 72, 0);
 
-  --atelier-success: #28734d;
-  --atelier-warning: #8d661f;
-  --atelier-danger: #a94444;
+  /* Hairlines only. Containment comes from the shadow and the gap. */
+  --atelier-border: #e3e8e9;
+  --atelier-border-subtle: #edf1f1;
+  --atelier-text-primary: #14191a;
+  --atelier-text-secondary: #4b5a5d;
+  --atelier-text-muted: #66757a;
+
+  --atelier-success: #1f7a4d;
+  --atelier-warning: #8a6317;
+  --atelier-danger: #c0453f;
   --atelier-info: #2f747e;
   --atelier-focus: #2f747e;
+
+  /* Scroll chrome follows the mineral-teal ramp instead of the browser UI. */
+  --atelier-scrollbar-track: rgba(34, 66, 72, 0.05);
+  --atelier-scrollbar-thumb: rgba(34, 66, 72, 0.28);
+  --atelier-scrollbar-thumb-hover: rgba(34, 66, 72, 0.46);
+  --atelier-scrollbar-thumb-active: rgba(47, 116, 126, 0.72);
 
   /* On light surfaces the brand itself is the accent colour. */
   --primary: var(--atelier-brand);
   --primary-foreground: #ffffff;
   --ring: var(--atelier-focus);
+
+  --atelier-shadow-sm: 0 1px 2px rgba(18, 32, 34, 0.05);
+  --atelier-shadow-card: 0 1px 2px rgba(18, 32, 34, 0.04),
+    0 10px 26px -14px rgba(18, 32, 34, 0.18);
+  --atelier-shadow-pop: 0 6px 14px -6px rgba(18, 32, 34, 0.16),
+    0 24px 48px -20px rgba(18, 32, 34, 0.28);
+  /* The main card sits a layer above the sidebar rather than beside it, so
+     it carries a deeper, wider shadow than the shared card token. */
+  --atelier-shadow-island: 0 2px 4px rgba(18, 32, 34, 0.06),
+    0 18px 40px -16px rgba(18, 32, 34, 0.28);
 }
 
 .dark,
@@ -57,29 +85,37 @@
   --atelier-brand: #224248;
   --atelier-brand-hover: #2b555c;
   --atelier-brand-active: #35666e;
-  --atelier-brand-soft: rgba(34, 66, 72, 0.22);
+  --atelier-brand-soft: rgba(104, 174, 184, 0.16);
 
-  --atelier-bg-app: #101718;
-  --atelier-bg-titlebar: #142022;
-  --atelier-bg-activity: #172628;
-  --atelier-bg-sidebar: #19292b;
-  --atelier-bg-editor: #111a1c;
-  --atelier-bg-panel: #152123;
-  --atelier-bg-elevated: #1d2d30;
-  --atelier-bg-hover: #24383b;
-  --atelier-bg-active: #2a4347;
+  --atelier-bg-app: #0d1314;
+  --atelier-bg-sidebar: #161f21;
+  --atelier-bg-editor: #161f21;
+  --atelier-bg-panel: #131c1e;
+  --atelier-bg-elevated: #1b2628;
+  --atelier-bg-hover: #212f32;
+  --atelier-bg-active: #2a3c40;
 
-  --atelier-border: #2d4144;
-  --atelier-border-subtle: #233538;
-  --atelier-text-primary: #e7eeee;
-  --atelier-text-secondary: #aebfc1;
-  --atelier-text-muted: #93a9ac;
+  /* Dark uses the light end of the brand ramp for the same reason text
+     does: #224248 has no lift left against a #1b2628 card. */
+  --atelier-island-wash: rgba(104, 174, 184, 0.1);
+  --atelier-island-wash-fade: rgba(104, 174, 184, 0);
+
+  --atelier-border: #243235;
+  --atelier-border-subtle: #1d2a2c;
+  --atelier-text-primary: #e9efef;
+  --atelier-text-secondary: #a9bbbd;
+  --atelier-text-muted: #8ea3a6;
 
   --atelier-success: #4fa879;
   --atelier-warning: #d0a85c;
   --atelier-danger: #d66b6b;
   --atelier-info: #69a8b2;
   --atelier-focus: #68aeb8;
+
+  --atelier-scrollbar-track: rgba(104, 174, 184, 0.06);
+  --atelier-scrollbar-thumb: rgba(142, 163, 166, 0.32);
+  --atelier-scrollbar-thumb-hover: rgba(104, 174, 184, 0.52);
+  --atelier-scrollbar-thumb-active: rgba(104, 174, 184, 0.78);
 
   /*
    * #224248 has far too little luminance to be readable *as text* on a dark
@@ -90,6 +126,18 @@
   --primary: var(--atelier-focus);
   --primary-foreground: #0e1a1c;
   --ring: var(--atelier-focus);
+
+  /* On a dark canvas a drop shadow does almost nothing, so cards separate by
+     surface lift instead; the shadow only deepens the floating layers. */
+  --atelier-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --atelier-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32),
+    0 10px 26px -16px rgba(0, 0, 0, 0.6);
+  --atelier-shadow-pop: 0 6px 14px -6px rgba(0, 0, 0, 0.5),
+    0 24px 48px -20px rgba(0, 0, 0, 0.7);
+  /* Dark leans on the wash for the lift and on the shadow only to seat the
+     card; a heavier shadow here would just smear into the canvas. */
+  --atelier-shadow-island: 0 2px 6px rgba(0, 0, 0, 0.38),
+    0 20px 44px -18px rgba(0, 0, 0, 0.72);
 }
 
 /*
@@ -112,20 +160,30 @@
   --warning: var(--atelier-warning);
   --cyan: var(--atelier-info);
   --border: var(--atelier-border);
-  --input: var(--atelier-bg-active);
+  --input: var(--atelier-bg-hover);
   --island: var(--atelier-bg-sidebar);
 
-  /* IDE chrome metrics */
-  --titlebar-h: 36px;
-  --statusbar-h: 22px;
-  --activitybar-w: 44px;
-  --tabbar-h: 32px;
+  /*
+   * Shell metrics. Taller and looser than the IDE set they replace: the top
+   * nav now carries the app's destinations, so it is a real navigation bar
+   * rather than a title strip, and every panel header has room for a title
+   * that is read rather than squinted at.
+   */
+  --topnav-h: 60px;
+  --titlebar-h: var(--topnav-h);
+  /* The bottom strip fits the dock itself; magnified tiles can grow past it
+     through the status-bar wrapper's visible overflow. */
+  --statusbar-h: 56px;
+  --tabbar-h: 44px;
+  --panel-header-h: 48px;
+  /* The gutter between the canvas and the cards floating on it, and between
+     the cards themselves. One number, so the shell keeps a single rhythm. */
+  --shell-gap: 10px;
   /* The chat's changes rail. Fixed, like every other piece of chrome here:
      an animated or draggable width re-lays out the transcript underneath it,
      and framer-motion's layout projection on the messages does not survive
      that cleanly — the run's diffs are not worth a shifting transcript. */
   --changes-rail-w: 420px;
-  --panel-header-h: 30px;
 
   /* Motion: short enough to read as feedback, never as choreography. */
   --motion-fast: 120ms;
@@ -157,12 +215,11 @@
   --color-ring: var(--ring);
 
   /*
-   * Shell regions. VS Code's readability comes largely from each region
-   * sitting on its own surface value, so `bg-card` everywhere is what made
-   * the old shell read as one undifferentiated slab.
+   * Shell regions. Most of them now resolve to the card surface — the shell
+   * separates its regions with a gap and a shadow instead of giving each one
+   * its own tint, which is what made the old layout read as an editor.
    */
-  --color-titlebar: var(--atelier-bg-titlebar);
-  --color-activity: var(--atelier-bg-activity);
+  --color-canvas: var(--atelier-bg-app);
   --color-sidebar: var(--atelier-bg-sidebar);
   --color-editor: var(--atelier-bg-editor);
   --color-panel: var(--atelier-bg-panel);
@@ -171,7 +228,23 @@
   --color-brand-hover: var(--atelier-brand-hover);
   --color-brand-active: var(--atelier-brand-active);
 
-  --radius: 0.25rem;
+  /*
+   * Radius scale, deliberately overriding Tailwind's defaults. Every
+   * `rounded-md` / `rounded-lg` already in the app moves up one step, so the
+   * whole product softens from one place instead of forty edits.
+   */
+  --radius: 0.625rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.75rem;
+
+  --shadow-sm: var(--atelier-shadow-sm);
+  --shadow-card: var(--atelier-shadow-card);
+  --shadow-pop: var(--atelier-shadow-pop);
+
   --font-sans: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
 }
@@ -235,40 +308,150 @@ input:disabled,
 }
 
 /*
- * Former floating "islands", now flat IDE panels. The class stays so the
- * shell and views keep working; separation comes from hairline borders
- * instead of rounded elevation.
+ * The canvas the cards float on.
+ *
+ * A flat fill made the gutters read as dead grey space between panels — the
+ * old IDE seams in a lighter colour. Two very wide, very low-opacity washes in
+ * the brand hues give the page a direction instead: light gathers at the top
+ * left, where the header and the first card are, and falls away toward the
+ * bottom right. Kept under 10% alpha throughout, because this is the surface
+ * every card is judged against and any more turns it into a subject of its
+ * own.
+ */
+.app-canvas {
+  background-color: var(--atelier-bg-app);
+  background-image: radial-gradient(
+      1100px 560px at 6% -10%,
+      rgba(47, 116, 126, 0.12),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 480px at 98% 2%,
+      rgba(34, 66, 72, 0.09),
+      transparent 58%
+    ),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.6), transparent 45%);
+  background-attachment: fixed;
+}
+.dark .app-canvas,
+:root[data-theme="dark"] .app-canvas {
+  background-image: radial-gradient(
+      1100px 560px at 6% -10%,
+      rgba(104, 174, 184, 0.12),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 480px at 98% 2%,
+      rgba(53, 102, 110, 0.16),
+      transparent 58%
+    ),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 45%);
+}
+
+/*
+ * The card. Every panel, pane and dock in the shell is one of these: a white
+ * surface on the tinted canvas, held by its own shadow rather than by shared
+ * borders with its neighbours. The class name is historical — the shell and
+ * the views already use it everywhere, so the new language lands through it.
  */
 .island {
   background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border: 1px solid var(--atelier-border-subtle);
+  border-radius: 0;
+  box-shadow: none;
   overflow: hidden;
 }
 
 /*
- * Sidebar section header. Every view that has one uses these two classes, so
- * the whole app picks up the VS Code density from here: fixed height, so
- * headers line up across views when the sidebar swaps content.
+ * The main card. The work happens here, so it sits a layer above the sidebar
+ * rather than beside it: a deeper shadow lifts it off the canvas, and the
+ * wash spreads from the centre outward, holding its value across the middle
+ * before falling away — a radial that fades straight from its centre point
+ * peaks on one pixel and reads as nothing at these alphas.
+ *
+ * The edges are left clean on purpose. That boundary is where the card is
+ * read against the canvas, so the tint has to be gone by the time it gets
+ * there or the two surfaces merge.
+ *
+ * `--card` is restated as the base layer so the rule stands on its own
+ * regardless of where it lands against `.island`'s `background` shorthand.
  */
-.island-header {
-  @apply flex shrink-0 items-center gap-1.5 px-3;
-  height: var(--panel-header-h);
+.island-main {
+  background: radial-gradient(
+      ellipse 120% 95% at 50% 50%,
+      var(--atelier-island-wash) 0%,
+      var(--atelier-island-wash) 25%,
+      var(--atelier-island-wash-fade) 80%
+    )
+    var(--card);
+  box-shadow: none;
+}
+
+/*
+ * Dialogs are transient desktop windows, not shell regions. Give every modal
+ * the rounded, elevated Ubuntu/GNOME header-bar silhouette while the app
+ * canvas and its docked panes remain square.
+ */
+.modal-surface {
+  border: 1px solid color-mix(in srgb, var(--atelier-border) 82%, transparent);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  box-shadow: var(--atelier-shadow-pop);
+}
+
+.modal-titlebar,
+.modal-surface > :first-child {
+  background: var(--atelier-bg-panel);
   border-bottom: 1px solid var(--atelier-border-subtle);
 }
 
+/*
+ * Panel header. Every view that has one uses these two classes, so the whole
+ * app picks up its density from here: fixed height, so headers line up across
+ * views when the sidebar swaps content. No bottom rule — the header is part
+ * of the card, and the space below it is enough to separate them.
+ */
+.island-header {
+  @apply flex shrink-0 items-center gap-2 px-4;
+  height: var(--panel-header-h);
+}
+
+/*
+ * Sentence case at reading size, not letterspaced micro-caps. The uppercase
+ * 11px label is the single strongest "this is an IDE" tell in the product,
+ * and it is the one thing the reference never does.
+ */
 .island-title {
-  @apply truncate text-[11px] font-semibold uppercase tracking-wider;
-  color: var(--atelier-text-secondary);
+  @apply truncate text-[13px] font-semibold tracking-tight;
+  color: var(--atelier-text-primary);
+}
+
+/*
+ * The reference's core motif: a soft rounded tile carrying the leading icon
+ * of a row or a card title. It is what makes a list read as a set of objects
+ * rather than as lines in a tree.
+ */
+.icon-tile {
+  @apply inline-flex shrink-0 items-center justify-center;
+  height: 34px;
+  width: 34px;
+  border-radius: var(--radius-lg);
+  background: var(--atelier-brand-soft);
+  color: var(--primary);
+}
+.icon-tile-sm {
+  height: 26px;
+  width: 26px;
+  border-radius: var(--radius-md);
 }
 
 /*
  * Toolbar icon button — the shape every view-header and panel-toolbar action
- * shares. 24px visual box with a padded hit area, so the icon stays 14px
- * without the target shrinking to match.
+ * shares. Now a circle: at this size a rounded square reads as a tab, and the
+ * bar is full of them.
  */
 .tool-btn {
-  @apply inline-flex h-6 w-6 shrink-0 items-center justify-center rounded;
+  @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full;
   color: var(--atelier-text-secondary);
   transition: background-color var(--motion-fast) var(--ease-out),
     color var(--motion-fast) var(--ease-out);
@@ -280,6 +463,145 @@ input:disabled,
 .tool-btn:disabled,
 .tool-btn[aria-disabled="true"] {
   opacity: 0.45;
+}
+
+/*
+ * Status / metadata chip. Rounded-full, quiet by default; the tone modifiers
+ * carry meaning, so a chip is never coloured for decoration alone.
+ */
+.chip {
+  @apply inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5;
+  @apply text-[11px] font-medium;
+  background: var(--atelier-bg-hover);
+  color: var(--atelier-text-secondary);
+}
+.chip-accent {
+  background: var(--atelier-brand-soft);
+  color: var(--primary);
+}
+.chip-success {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+.chip-danger {
+  background: color-mix(in srgb, var(--destructive) 14%, transparent);
+  color: var(--destructive);
+}
+
+/*
+ * Pill field — the reference's search shape. Used for the command center and
+ * for any single-line filter input in a panel header.
+ */
+.pill-field {
+  @apply flex h-9 items-center gap-2 rounded-full px-3.5 text-xs;
+  background: var(--card);
+  border: 1px solid var(--atelier-border);
+  color: var(--atelier-text-muted);
+  transition: border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.pill-field:hover {
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+  color: var(--atelier-text-primary);
+}
+
+/*
+ * The dock — one floating bar at the bottom of the canvas holding every icon
+ * control in the app.
+ *
+ * Its own surface, translucent over the canvas rather than opaque like a
+ * card: the dock floats above the work instead of being another region of it,
+ * and the blur is what says so. Elevation, not a border, does the separating
+ * — the hairline is only there to keep the edge legible on a light canvas.
+ */
+.dock {
+  @apply pointer-events-auto flex shrink-0 items-end gap-0.5;
+}
+
+/*
+ * A dock tile. Icon-only, so the active state has to be unmistakable on its
+ * own: the tile fills with the brand wash and takes the accent colour, the
+ * same treatment .icon-tile uses everywhere else.
+ *
+ * It scales from its bottom edge, so magnification grows the glyph up out of
+ * the dock and never pushes its neighbours sideways — the row's layout boxes
+ * do not move at all.
+ */
+.dock-tile {
+  @apply relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg;
+  color: var(--atelier-text-muted);
+  transform-origin: bottom center;
+  transition: transform var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out);
+}
+
+.taskbar-grid {
+  @apply grid h-full items-center gap-3 px-3;
+  grid-template-columns: minmax(0, 1fr) auto;
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(14px) saturate(125%);
+  -webkit-backdrop-filter: blur(14px) saturate(125%);
+}
+.dock-tile:hover {
+  color: var(--atelier-text-primary);
+}
+.dock-tile[aria-current="page"],
+.dock-tile[aria-pressed="true"] {
+  background: var(--atelier-brand-soft);
+  color: var(--primary);
+}
+
+/* Running indicator, in the dock's own idiom: a dot under the destination you
+   are in. Transparent rather than absent when idle, so the row keeps its
+   height whichever tile is active. */
+.dock-dot {
+  @apply mt-[3px] h-1 w-1 shrink-0 rounded-full bg-transparent;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.dock-dot-on {
+  background: var(--primary);
+}
+/* Threshold tones — the dot is how a tile says "look in here" without the
+   user having to open it. Semantic tokens, same two thresholds as the bars. */
+.dock-dot-warning {
+  background: var(--warning);
+}
+.dock-dot-danger {
+  background: var(--destructive);
+}
+
+/* Divides the dock's three jobs: where you are, what the workspace shows,
+   how the app is configured. */
+.dock-sep {
+  @apply mx-1 h-6 w-px shrink-0 self-center;
+  background: var(--atelier-border);
+}
+
+/*
+ * Segmented control — the editor region's pane switcher. Replaces the tab
+ * strip: same job, but it reads as a control rather than as open documents,
+ * which is the distinction the whole rebrand turns on.
+ */
+.segmented {
+  @apply inline-flex items-center gap-0.5 rounded-full p-1;
+  background: var(--atelier-bg-hover);
+}
+.segment {
+  @apply inline-flex h-7 items-center gap-1.5 rounded-full px-3;
+  @apply text-xs font-medium;
+  color: var(--atelier-text-muted);
+  transition: background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.segment:hover {
+  color: var(--atelier-text-primary);
+}
+.segment[aria-selected="true"] {
+  background: var(--card);
+  color: var(--atelier-text-primary);
+  box-shadow: var(--atelier-shadow-sm);
 }
 
 /*
@@ -305,7 +627,7 @@ input:disabled,
     .monaco-editor *
   ) {
   outline: 2px solid var(--atelier-focus);
-  outline-offset: -1px;
+  outline-offset: 2px;
   border-radius: var(--radius);
 }
 
@@ -318,27 +640,47 @@ select:focus-visible {
 }
 
 /*
- * Resize handles between shell regions. Invisible until you approach one,
- * then a brand hairline — a 1px seam you can still grab at 4px.
+ * Resize handles between cards. They sit in the canvas gutter, so at rest
+ * they are simply the gutter; approaching one draws a short rounded grip
+ * rather than a full-length seam.
  */
 .resize-handle {
   position: relative;
   background: transparent;
+}
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 50% 50%;
+  translate: -50% -50%;
+  height: 32px;
+  width: 3px;
+  border-radius: 999px;
+  background: transparent;
   transition: background-color var(--motion-fast) var(--ease-out);
 }
-.resize-handle:hover,
-.resize-handle[data-resize-handle-active] {
-  background: var(--atelier-focus);
+.resize-handle[data-panel-group-direction="vertical"]::after {
+  height: 3px;
+  width: 32px;
+}
+.resize-handle:hover::after,
+.resize-handle[data-resize-handle-active]::after {
+  background: var(--primary);
 }
 
-/* ---- Agentic working indicator: flat pulsing ring ---- */
+/* ---- Agentic working indicator: soft pulsing halo ----
+ * The card's own shadow is repeated in both frames: this animates the
+ * box-shadow property outright, so omitting it would drop the card off the
+ * canvas for as long as an agent is working. */
 @keyframes glow-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 1.5px oklch(from var(--primary) l c h / 0.25);
+    box-shadow: 0 0 0 1.5px oklch(from var(--primary) l c h / 0.18),
+      var(--atelier-shadow-card);
   }
   50% {
-    box-shadow: 0 0 0 1.5px oklch(from var(--primary) l c h / 0.6);
+    box-shadow: 0 0 0 3px oklch(from var(--primary) l c h / 0.4),
+      var(--atelier-shadow-card);
   }
 }
 .glow-working {
@@ -385,32 +727,51 @@ select:focus-visible {
   animation: orb-spin 6s linear infinite;
 }
 
+/* Theme-native scroll chrome. Firefox uses the standard properties while
+ * Chromium/Electron gets the same compact pill with full interaction states. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--atelier-scrollbar-thumb) var(--atelier-scrollbar-track);
+}
+
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 7px;
+  height: 7px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--atelier-scrollbar-track);
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb {
-  @apply rounded-full bg-muted-foreground/25;
-  border: 3px solid transparent;
+  min-height: 36px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--atelier-scrollbar-thumb);
   background-clip: content-box;
+  transition: background-color var(--motion-fast) var(--ease-out);
 }
 ::-webkit-scrollbar-thumb:hover {
-  @apply bg-muted-foreground/40;
+  background-color: var(--atelier-scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--atelier-scrollbar-thumb-active);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /*
- * Markdown inside chat bubbles — matches the terminal-style process log.
- * Sits on a fixed dark chip (bg-black/40) in both light and dark app
- * themes, so text colors here are fixed neutrals, not the foreground /
- * muted-foreground vars (those are calibrated to the page background and
- * go near-invisible on a dark chip in light mode).
+ * Markdown inside chat bubbles.
+ *
+ * Prose is set in the UI sans, not the mono face it used to use: the agent's
+ * answers are written English, and a wall of monospace paragraphs is the
+ * single loudest "you are inside a code editor" signal in the transcript.
+ * Mono is kept for the things that are genuinely code — fenced blocks and
+ * inline spans — where character alignment actually carries meaning.
  */
 .chat-md {
-  @apply text-xs leading-relaxed text-foreground/90;
-  font-family: var(--font-mono);
+  @apply text-[13px] leading-relaxed text-foreground/90;
+  font-family: var(--font-sans);
 }
 .chat-md p {
   @apply mb-2 last:mb-0;
@@ -421,11 +782,11 @@ select:focus-visible {
   text-indent: -1.4em;
 }
 .chat-md pre {
-  @apply my-2 overflow-x-auto rounded-lg bg-black/85 p-3 text-xs text-white;
+  @apply my-2 overflow-x-auto rounded-xl bg-black/85 p-3 text-xs text-white;
   font-family: var(--font-mono);
 }
 .chat-md code {
-  @apply rounded bg-muted px-1 py-0.5 text-[0.85em];
+  @apply rounded-md bg-muted px-1 py-0.5 text-[0.85em];
   font-family: var(--font-mono);
   /* Long URLs and paths in inline code have no spaces to wrap at, so they
      would otherwise stretch the transcript wider than its column. */
@@ -496,7 +857,7 @@ select:focus-visible {
  * state so a drag reads as a drag.
  */
 .xterm .xterm-viewport::-webkit-scrollbar {
-  width: 12px;
+  width: 8px;
 }
 .xterm .xterm-viewport::-webkit-scrollbar-track {
   background: transparent;
@@ -512,6 +873,63 @@ select:focus-visible {
 }
 .xterm .xterm-viewport::-webkit-scrollbar-thumb:active {
   @apply bg-primary/70;
+}
+
+/*
+ * Merge-conflict resolver decorations (Monaco whole-line classes). "Ours"
+ * is the info/cyan family and "theirs" the brand/primary family, the same
+ * pairing the resolver's chips and buttons use, so the colour of a block
+ * says which button keeps it. Marker lines are dimmed rather than hidden:
+ * they are the thing being edited.
+ */
+.conflict-line-ours {
+  background: color-mix(in srgb, var(--cyan) 14%, transparent);
+}
+.conflict-line-theirs {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+.conflict-line-base {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+.conflict-line-marker {
+  background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+  opacity: 0.85;
+}
+.conflict-line-ours-head {
+  box-shadow: inset 3px 0 0 0 var(--cyan);
+}
+.conflict-line-theirs-tail {
+  box-shadow: inset 3px 0 0 0 var(--primary);
+}
+.conflict-glyph-ours::before,
+.conflict-glyph-theirs::before {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  margin: 7px auto 0;
+  border-radius: 9999px;
+}
+.conflict-glyph-ours::before {
+  background: var(--cyan);
+}
+.conflict-glyph-theirs::before {
+  background: var(--primary);
+}
+
+/* Explorer: a conflicted row's badge breathes once a second so a fresh
+ * conflict is found by eye without hunting through the tree. */
+@keyframes conflict-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--destructive) 45%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--destructive) 0%, transparent);
+  }
+}
+.conflict-badge {
+  animation: conflict-pulse 1.6s ease-out infinite;
 }
 
 /*

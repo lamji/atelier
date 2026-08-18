@@ -30,6 +30,23 @@ export const fsMethods = {
     params: z.object({ path: z.string() }),
     result: z.object({ path: z.string(), content: z.string(), mtime: z.number() }),
   },
+  "fs.readImage": {
+    params: z.object({ path: z.string() }),
+    result: z.object({
+      path: z.string(),
+      dataUrl: z.string(),
+      mediaType: z.string(),
+      mtime: z.number(),
+    }),
+  },
+  "fs.writeImage": {
+    params: z.object({
+      path: z.string(),
+      data: z.string(),
+      mediaType: z.string(),
+    }),
+    result: z.object({ path: z.string() }),
+  },
   "fs.writeFile": {
     params: z.object({ path: z.string(), content: z.string() }),
     result: z.object({ diff: Diff }),

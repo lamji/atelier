@@ -5,6 +5,8 @@ import type {
   KnowledgeGraph,
   Lesson,
   RetrievalResult,
+  WikiLintFinding,
+  WikiPageInfo,
 } from "@atelier/protocol";
 
 export interface IndexingProgress {
@@ -32,6 +34,9 @@ interface KnowledgeStore {
   recentUpdates: KnowledgeUpdate[];
   features: Feature[];
   lessons: Lesson[];
+  /** Feature-wiki pages with live freshness, plus lint findings. */
+  wikiPages: WikiPageInfo[];
+  wikiLint: WikiLintFinding[];
   graph: KnowledgeGraph | null;
   graphScope: GraphScope;
   graphTarget: string;
@@ -55,6 +60,7 @@ interface KnowledgeStore {
   noteUpdate: (update: KnowledgeUpdate) => void;
   setFeatures: (features: Feature[]) => void;
   setLessons: (lessons: Lesson[]) => void;
+  setWiki: (pages: WikiPageInfo[], lint: WikiLintFinding[]) => void;
   setGraph: (graph: KnowledgeGraph | null) => void;
   setGraphScope: (scope: GraphScope, target?: string) => void;
   setGraphLoading: (loading: boolean) => void;
@@ -71,6 +77,8 @@ export const useKnowledgeStore = create<KnowledgeStore>((set) => ({
   recentUpdates: [],
   features: [],
   lessons: [],
+  wikiPages: [],
+  wikiLint: [],
   graph: null,
   graphScope: "workspace",
   graphTarget: "",
@@ -89,6 +97,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set) => ({
     set((s) => ({ recentUpdates: [update, ...s.recentUpdates].slice(0, 20) })),
   setFeatures: (features) => set({ features }),
   setLessons: (lessons) => set({ lessons }),
+  setWiki: (wikiPages, wikiLint) => set({ wikiPages, wikiLint }),
   setGraph: (graph) => set({ graph }),
   setGraphScope: (graphScope, graphTarget = "") =>
     set({ graphScope, graphTarget }),

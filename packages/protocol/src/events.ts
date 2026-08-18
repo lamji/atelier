@@ -12,6 +12,7 @@ import { UsageSnapshot } from "./models/usage.js";
 import { EditImpact, ImpactRadius } from "./models/impact.js";
 import { Feature, GraphNode, Lesson, RetrievalResult } from "./models/knowledge.js";
 import { ContextRequestStats } from "./models/context.js";
+import { LlmRequest } from "./models/llm-request.js";
 import { ValidationKind, ValidationResult } from "./models/validation.js";
 import { ProjectInfo } from "./methods/projects.js";
 
@@ -88,6 +89,11 @@ export const eventPayloads = {
   "usage.updated": UsageSnapshot,
   /** Context-engineering accounting for one LLM request. */
   "context.stats": ContextRequestStats,
+  /**
+   * What is about to be sent to a model, published before the call so the
+   * context can be inspected from the execution timeline. See LlmRequest.
+   */
+  "llm.request": LlmRequest,
 
   // pipeline
   "pipeline.stage.started": z.object({
@@ -119,14 +125,24 @@ export const eventPayloads = {
     /** Files this conversation is already working on, newest first. */
     anchors: z.array(z.string()).default([]),
     /**
-     * Whether this turn set the lock (a mention, or a caller that already
-     * knew the project) or inherited an earlier one.
+     * Whether this turn set the lock (a mention, a matched feature, or a
+     * caller that already knew the project) or inherited an earlier one.
      */
-    source: z.enum(["mention", "explicit", "inherited", "none"]),
+    source: z.enum(["mention", "explicit", "feature", "inherited", "none"]),
     /** True when this turn's mentions moved the lock somewhere new. */
     changed: z.boolean().default(false),
     /** Checkout git was pointed at, when the lock resolved to one. */
     repo: z.string().nullable().default(null),
+  }),
+  /**
+   * The lock let a tool through to a path outside it: the file exists and
+   * has no same-named twin under the locked roots, so refusing it would
+   * only strand the task. Shown so a widening lock is never invisible.
+   */
+  "scope.escaped": z.object({
+    path: z.string(),
+    tool: z.string(),
+    roots: z.array(z.string()).default([]),
   }),
   /**
    * Provider-neutral session memory carried into this turn's prompt. Published
@@ -144,6 +160,53 @@ export const eventPayloads = {
     tokens: z.number(),
     /** Short labels for the recalled work, newest first. */
     labels: z.array(z.string()).default([]),
+  }),
+  /**
+   * Investigation carried over from earlier turns of the conversation:
+   * files the agent already read (re-read and inlined when unchanged, or
+   * listed) and searches it already ran. Published on every turn that
+   * reuses anything, so "it remembered" is visible evidence in the rail.
+   */
+  "working-memory.reused": z.object({
+    /** Files whose current content was inlined into this turn's context. */
+    inlined: z.number(),
+    /** Files mentioned by path only. */
+    listed: z.number(),
+    /** Inlined files whose content changed since the agent last read them. */
+    changed: z.number(),
+    /** Earlier searches replayed as query → hits. */
+    searches: z.number(),
+    tokens: z.number(),
+    paths: z.array(z.string()).default([]),
+    /** Owner files pulled in from a matched feature-wiki page. */
+    seeded: z.number().default(0),
+  }),
+  /**
+   * Feature-wiki pages carried into this turn's context: compiled
+   * knowledge about the features the prompt is about, with the sources
+   * that moved since each page was verified.
+   */
+  "wiki.recalled": z.object({
+    pages: z.array(
+      z.object({
+        slug: z.string(),
+        title: z.string(),
+        status: z.string(),
+        /** Sources changed since verification; empty when fresh. */
+        moved: z.array(z.string()).default([]),
+      })
+    ),
+    tokens: z.number(),
+  }),
+  /** A task compiled or updated a feature-wiki page after it finished. */
+  "wiki.updated": z.object({
+    slug: z.string(),
+    title: z.string(),
+    created: z.boolean(),
+    changedSections: z.array(z.string()).default([]),
+    sources: z.number(),
+    /** Workspace-relative path of the page, for the rail to open. */
+    path: z.string(),
   }),
   // Only skills the user invoked explicitly (leading slash command).
   "skills.selected": z.object({
@@ -249,6 +312,10 @@ export const eventPayloads = {
     branch: z.string(),
     isClean: z.boolean(),
     changedFiles: z.number(),
+    /** Unmerged paths — non-zero is how the UI learns a pull conflicted. */
+    conflicts: z.number().optional(),
+    /** Operation in flight (merge/rebase/…), or null when at rest. */
+    mergeKind: z.string().nullable().optional(),
   }),
   /** The agent tried to commit/push/open a PR — the user must confirm. */
   "git.flow.requested": GitFlowRequest,

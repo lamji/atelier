@@ -152,65 +152,76 @@ export function GraphPane({ vm, theme, active = true }: GraphPaneProps) {
   );
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-1.5 px-3 py-2">
-        <Network className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-        {SCOPES.map((scope) => (
-          <button
-            key={scope.id}
-            onClick={() => load(scope.id)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
-              activeScope === scope.id
-                ? "bg-primary/12 text-primary"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {scope.label}
-          </button>
-        ))}
-        <Input
-          value={target}
-          onChange={(e) => setTarget(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              load(activeScope === "workspace" ? "symbol" : activeScope);
-            }
-          }}
-          placeholder="filter: path or symbol + Enter…"
-          className="ml-1 h-7 max-w-60 text-[11px]"
-        />
-        {vm.graphLoading && (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          <ScanFeaturesButton vm={vm} />
-          <p className="hidden pr-2 text-[10px] text-muted-foreground/60 xl:block">
-            {mode === "3d"
-              ? "drag to orbit · click a node to spotlight its connections"
-              : "click a file to open it · click a function for callers/callees"}
-          </p>
-          {(
-            [
-              { id: "3d", icon: Box, label: "3D orbit" },
-              { id: "2d", icon: Square, label: "2D boxes" },
-            ] as const
-          ).map((m) => (
-            <button
-              key={m.id}
-              title={m.label}
-              onClick={() => setMode(m.id)}
-              className={cn(
-                "flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-medium",
-                mode === m.id
-                  ? "bg-primary/12 text-primary"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              <m.icon className="h-3.5 w-3.5" />
-              {m.id.toUpperCase()}
-            </button>
-          ))}
+    <div className="flex h-full flex-col bg-card">
+      <div className="border-b border-border-subtle px-3 py-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Network className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold">Knowledge graph</p>
+              <p className="text-[11px] text-muted-foreground">
+                {activeScope} scope
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1">
+            <ScanFeaturesButton vm={vm} />
+            {(
+              [
+                { id: "3d", icon: Box, label: "3D orbit" },
+                { id: "2d", icon: Square, label: "2D boxes" },
+              ] as const
+            ).map((m) => (
+              <button
+                key={m.id}
+                title={m.label}
+                onClick={() => setMode(m.id)}
+                className={cn(
+                  "flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-colors",
+                  mode === m.id
+                    ? "bg-primary/12 text-primary"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                )}
+              >
+                <m.icon className="h-3.5 w-3.5" />
+                {m.id.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex rounded-lg bg-muted/50 p-0.5">
+            {SCOPES.map((scope) => (
+              <button
+                key={scope.id}
+                onClick={() => load(scope.id)}
+                className={cn(
+                  "h-7 rounded-md px-2.5 text-[11px] font-medium transition-colors",
+                  activeScope === scope.id
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {scope.label}
+              </button>
+            ))}
+          </div>
+          <Input
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                load(activeScope === "workspace" ? "symbol" : activeScope);
+              }
+            }}
+            placeholder="Path or symbol"
+            className="h-8 min-w-0 flex-1 rounded-lg text-[11px] sm:max-w-72"
+          />
+          {vm.graphLoading && (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          )}
         </div>
       </div>
       <div className="min-h-0 flex-1">
@@ -273,10 +284,10 @@ function ScanFeaturesButton({
       disabled={busy}
       title="Scan routes & endpoints and summarize each as a feature (Haiku)"
       className={cn(
-        "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium",
+        "flex h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium transition-colors",
         busy
           ? "text-primary"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground"
+          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       )}
     >
       {busy ? (

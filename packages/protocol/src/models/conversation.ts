@@ -48,6 +48,11 @@ export const ChatMessage = z.object({
   createdAt: z.number(),
   /** Source event topic for a "log" message (e.g. "knowledge.retrieved"). */
   logTopic: z.string().optional(),
+  /**
+   * Long-form body behind a "log" line — the full context an LLM request
+   * carried, for instance. Shown only when the row is expanded.
+   */
+  logDetail: z.string().optional(),
   /** File edit for a "diff" message, shown inline as a VS Code-style diff. */
   diff: ChatMessageDiff.optional(),
 });

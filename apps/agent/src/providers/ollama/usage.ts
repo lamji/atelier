@@ -1,18 +1,18 @@
 import type { SettingsRepo } from "../../storage/repositories/settings.js";
 
 /**
- * Rolling meter for what Atelier spends on Ollama.
+ * Rolling meter for Ollama Cloud activity made by Atelier.
  *
- * Ollama Cloud exposes no usage or quota endpoint — plan limits (5-hourly
- * and weekly) are only visible on ollama.com/settings. What every response
- * does carry is token counts and GPU duration, so we accumulate those.
+ * Ollama Cloud exposes no usage or quota endpoint — the account's remaining
+ * allowance and reset times are only visible on ollama.com/settings. Each
+ * response does carry token counts and GPU duration, so we keep those as an
+ * activity meter without presenting them as a remaining-quota figure.
  *
- * This is therefore Atelier's own consumption, NOT the account total: any
- * other client hitting the same key spends quota this never sees. The UI
- * has to say so rather than imply it is the plan figure.
+ * This is not the account total: activity from other clients using the same
+ * account is not observable here.
  */
 
-const STORAGE_KEY = "ollamaUsageEvents";
+const STORAGE_KEY = "ollamaCloudUsageEvents";
 
 /** Bounds the persisted array; 7 days of heavy use stays well under this. */
 const MAX_EVENTS = 4000;
@@ -69,10 +69,10 @@ export function initUsage(settings: SettingsRepo): void {
 }
 
 /**
- * Records one completed call. Nanosecond durations come straight from the
- * daemon; anything missing is recorded as zero rather than guessed.
+ * Records one completed Ollama Cloud call. Nanosecond durations come straight
+ * from the API; anything missing is recorded as zero rather than guessed.
  */
-export function recordUsage(raw: {
+export function recordCloudUsage(raw: {
   prompt_eval_count?: number;
   eval_count?: number;
   total_duration?: number;

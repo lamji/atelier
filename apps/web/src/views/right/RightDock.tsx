@@ -9,10 +9,11 @@ import {
 } from "react";
 import Editor, { type Monaco } from "@monaco-editor/react";
 import { MonacoDiff } from "@/components/MonacoDiff";
-import { Activity, FileCode2, FileDiff, X } from "lucide-react";
+import { Activity, Eye, FileCode2, FileDiff, ImageIcon, Pencil, X } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
+import { isImagePath } from "@/lib/image-file";
 import { Tooltip } from "@/components/ui/tooltip";
 // three.js + the force-graph runtime live in their own chunk; nothing
 // loads until the Graph tab is first opened.
@@ -28,6 +29,9 @@ import {
   registerMarkdownMentions,
 } from "@/lib/monaco-mentions";
 import { bridge } from "@/services/bridge-client";
+import { useGitMergeStore } from "@/state/git-merge.store";
+import { useMergeConflictViewModel } from "@/hooks/useMergeConflictViewModel";
+import { ConflictResolver } from "@/views/git/ConflictResolver";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import type { SlashCommand } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
@@ -71,6 +75,8 @@ const FILE_EDITOR_OPTIONS = {
   readOnly: true,
   minimap: { enabled: false },
   fontSize: 13,
+  cursorStyle: "block",
+  cursorBlinking: "blink",
   scrollBeyondLastLine: false,
 } as const;
 
@@ -80,6 +86,8 @@ const EDITABLE_FILE_OPTIONS = {
   readOnly: false,
   minimap: { enabled: false },
   fontSize: 13,
+  cursorStyle: "block",
+  cursorBlinking: "blink",
   scrollBeyondLastLine: false,
   wordWrap: "on",
   wordBasedSuggestions: "off",
@@ -104,6 +112,19 @@ const GIT_DIFF_EDITOR_OPTIONS = {
   hideUnchangedRegions: { enabled: true },
 } as const;
 
+/** Decoration for a search match in the editor: subtle outline + tinted
+ *  background, the same amber family as the file-name highlight so the
+ *  two read as one concept. The "active" one (first match) is darker so
+ *  the user's eyes land where the editor scrolled to. */
+const SEARCH_DECORATION = {
+  inlineClassName:
+    "rounded-[2px] bg-amber-300/25 text-foreground ring-1 ring-amber-400/40",
+};
+const SEARCH_DECORATION_ACTIVE = {
+  inlineClassName:
+    "rounded-[2px] bg-amber-300/45 text-foreground ring-1 ring-amber-500/70",
+};
+
 /**
  * The right-side dock: panes only — the tab bar lives in the app header.
  *
@@ -114,6 +135,10 @@ const GIT_DIFF_EDITOR_OPTIONS = {
  */
 export function RightDock(props: RightDockProps) {
   const { rightTab } = props;
+  // A conflicted file opened from the explorer takes over the editor pane
+  // the same way a git diff does — and outranks it, since a merge conflict
+  // is the more urgent thing to be looking at.
+  const conflictOpen = useGitMergeStore((s) => s.openPath !== null);
   // The graph chunk loads on first open, then the pane stays mounted so
   // its WebGL scene survives tab switches (same rule as Monaco/xterm).
   const graphOpened = useRef(false);
@@ -134,7 +159,9 @@ export function RightDock(props: RightDockProps) {
         </Pane>
 
         <Pane active={rightTab === "editor"}>
-          {props.gitDiff !== null ? (
+          {conflictOpen ? (
+            <ConflictPane />
+          ) : props.gitDiff !== null ? (
             <GitDiffPane
               gitDiff={props.gitDiff}
               monacoTheme={props.monacoTheme}
@@ -236,6 +263,25 @@ function isEditablePath(path: string | null): boolean {
   return path?.startsWith(".atelier/") ?? false;
 }
 
+/** The file pane is just a Monaco view — except for markdown, where the
+ *  user expects a rendered preview. Both tabs share the same body so the
+ *  scroll position, autosave state and dirty flag carry over. */
+function isMarkdownPath(path: string | null): boolean {
+  return path?.toLowerCase().endsWith(".md") ?? false;
+}
+
+/** HTML files get the same Editor/Preview treatment as markdown: source in
+ *  Monaco, sandboxed iframe in Preview. .htm is the legacy short form. */
+function isHtmlPath(path: string | null): boolean {
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  return lower.endsWith(".html") || lower.endsWith(".htm");
+}
+
+function isPreviewablePath(path: string | null): boolean {
+  return isMarkdownPath(path) || isHtmlPath(path);
+}
+
 const FilePane = memo(function FilePane(props: {
   selectedPath: string | null;
   fileContent: string | null;
@@ -243,9 +289,25 @@ const FilePane = memo(function FilePane(props: {
   monacoTheme: string;
 }) {
   const editable = isEditablePath(props.selectedPath);
+  const markdown = isMarkdownPath(props.selectedPath);
+  const html = isHtmlPath(props.selectedPath);
+  const previewable = isPreviewablePath(props.selectedPath);
   const [saveState, setSaveState] = useState<SaveState>("clean");
+  /** "editor" keeps the source in Monaco; "preview" renders HTML or Markdown. */
+  const [view, setView] = useState<"editor" | "preview">("editor");
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
   const timerRef = useRef<number | undefined>(undefined);
+  // The Monaco editor instance, kept in a ref so the search-decoration
+  // effect can re-paint highlights after a search query or content change
+  // without re-running onMount. The previous decoration IDs are tracked
+  // separately so we can clear them in one deltaDecorations call.
+  const editorRef = useRef<Parameters<
+    NonNullable<React.ComponentProps<typeof Editor>["onMount"]>
+  >[0] | null>(null);
+  const searchDecorationsRef = useRef<string[]>([]);
+  /** The active file-name search, lifted out of the panel so Monaco (which
+   *  lives in a different view tree) can highlight the same matches. */
+  const searchQuery = useWorkspaceStore((s) => s.searchQuery);
 
   const flush = useCallback(async () => {
     window.clearTimeout(timerRef.current);
@@ -268,6 +330,7 @@ const FilePane = memo(function FilePane(props: {
   // {path, content} pair keeps the write pointed at the right file.
   useEffect(() => {
     setSaveState("clean");
+    setView("editor");
     return () => void flush();
   }, [props.selectedPath, flush]);
 
@@ -296,6 +359,7 @@ const FilePane = memo(function FilePane(props: {
     editor: Parameters<NonNullable<React.ComponentProps<typeof Editor>["onMount"]>>[0],
     monaco: Monaco
   ) => {
+    editorRef.current = editor;
     registerMarkdownMentions(monaco);
     editor.addCommand(
       monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
@@ -303,13 +367,83 @@ const FilePane = memo(function FilePane(props: {
     );
   };
 
+  // Unmount releases the editor ref and any decorations the search effect
+  // put down — a fresh FilePane (workspace switch) starts with a clean view.
+  useEffect(() => {
+    return () => {
+      editorRef.current = null;
+      searchDecorationsRef.current = [];
+    };
+  }, []);
+
+  // Paint search highlights whenever the user types in the explorer search
+  // box, the open file changes, or the file's text mutates (e.g. agent
+  // refresh on the bridge). An empty query clears everything; a non-empty
+  // query drops all matches into one decoration set and scrolls the FIRST
+  // match into view, so the user lands somewhere useful after picking a
+  // result from the list.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+    // Clear whatever we drew before — important when the query empties.
+    searchDecorationsRef.current = editor.deltaDecorations(
+      searchDecorationsRef.current,
+      []
+    );
+    const needle = searchQuery.trim();
+    if (!needle) return;
+    const matches = model.findMatches(
+      needle,
+      true, // searchOnlyEditableRange
+      false, // isRegex
+      false, // matchCase
+      needle, // wholeWord
+      true, // captureMatches
+      1000 // limitResultCount — caps to a sane number
+    );
+    if (matches.length === 0) return;
+    const newDecorations = matches.map((m, i) => ({
+      range: m.range,
+      options: i === 0 ? SEARCH_DECORATION_ACTIVE : SEARCH_DECORATION,
+    }));
+    searchDecorationsRef.current = editor.deltaDecorations(
+      [],
+      newDecorations
+    );
+    // Center the first match in the viewport so the user does not have to
+    // hunt for the highlighted region after opening a file from search.
+    const first = matches[0]?.range;
+    if (first) editor.revealRangeInCenterIfOutsideViewport(first);
+  }, [searchQuery, props.fileContent, props.selectedPath]);
+
   if (props.fileContent === null) {
     return <Empty icon={FileCode2} text="Select a file in the explorer." />;
   }
+  if (isImagePath(props.selectedPath)) {
+    return (
+      <div className="flex h-full flex-col">
+        <p className="flex items-center gap-2 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+          <ImageIcon className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">{props.selectedPath}</span>
+        </p>
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-muted/15 p-6">
+          <img
+            src={props.fileContent}
+            alt={props.selectedPath ?? "Selected image"}
+            className="block max-h-full max-w-full object-contain"
+          />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex h-full flex-col">
-      <p className="flex items-center gap-2 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
-        <span className="truncate">{props.selectedPath}</span>
+      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5">
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+          {props.selectedPath}
+        </span>
         {editable && saveState !== "clean" && (
           <span
             className={cn(
@@ -328,21 +462,89 @@ const FilePane = memo(function FilePane(props: {
                   : "Unsaved"}
           </span>
         )}
-      </p>
+        {previewable && (
+          <div
+            role="tablist"
+            aria-label={
+              markdown ? "Markdown view" : "HTML view"
+            }
+            className="flex shrink-0 items-center gap-1 rounded-full bg-muted/60 p-0.5"
+          >
+            <MarkdownViewTab
+              active={view === "editor"}
+              icon={Pencil}
+              label="Editor"
+              onClick={() => setView("editor")}
+            />
+            <MarkdownViewTab
+              active={view === "preview"}
+              icon={Eye}
+              label="Preview"
+              onClick={() => setView("preview")}
+            />
+          </div>
+        )}
+      </div>
       <div className="min-h-0 flex-1">
-        <Editor
-          path={props.selectedPath ?? undefined}
-          value={props.fileContent}
-          language={props.language}
-          theme={props.monacoTheme}
-          onChange={editable ? onChange : undefined}
-          onMount={onMount}
-          options={editable ? EDITABLE_FILE_OPTIONS : FILE_EDITOR_OPTIONS}
-        />
+        {previewable && view === "preview" ? (
+          markdown ? (
+            <div className="h-full overflow-y-auto px-6 py-5">
+              <div className="chat-md mx-auto max-w-3xl">
+                <Markdown remarkPlugins={[remarkGfm]}>
+                  {props.fileContent ?? ""}
+                </Markdown>
+              </div>
+            </div>
+          ) : html ? (
+            <iframe
+              title={props.selectedPath ?? "HTML preview"}
+              srcDoc={props.fileContent ?? ""}
+              sandbox=""
+              className="h-full w-full border-0 bg-background"
+            />
+          ) : null
+        ) : (
+          <Editor
+            path={props.selectedPath ?? undefined}
+            value={props.fileContent}
+            language={props.language}
+            theme={props.monacoTheme}
+            onChange={editable ? onChange : undefined}
+            onMount={onMount}
+            options={editable ? EDITABLE_FILE_OPTIONS : FILE_EDITOR_OPTIONS}
+          />
+        )}
       </div>
     </div>
   );
 });
+
+/** One pill of the Editor/Preview toggle in the markdown file pane. */
+function MarkdownViewTab(props: {
+  active: boolean;
+  icon: typeof Pencil;
+  label: string;
+  onClick: () => void;
+}) {
+  const Icon = props.icon;
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={props.active}
+      onClick={props.onClick}
+      className={cn(
+        "flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium transition-colors",
+        props.active
+          ? "bg-background text-foreground shadow-sm"
+          : "text-muted-foreground hover:text-foreground"
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {props.label}
+    </button>
+  );
+}
 
 /** Full-height DiffEditor for a git working-tree/index diff of one file. */
 const GitDiffPane = memo(function GitDiffPane(props: {
@@ -380,6 +582,16 @@ const GitDiffPane = memo(function GitDiffPane(props: {
     </div>
   );
 });
+
+/** The merge resolver, hosted in the editor pane (explorer / chat views). */
+function ConflictPane() {
+  const vm = useMergeConflictViewModel();
+  return (
+    <div className="h-full">
+      <ConflictResolver vm={vm} compact />
+    </div>
+  );
+}
 
 /**
  * One dock pane. `mountWhenHidden` panes (the default) are kept in the tree

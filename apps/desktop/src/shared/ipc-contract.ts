@@ -19,13 +19,17 @@ export const IPC_CHANNELS = {
   workspacePort: "atelier:workspace-port",
   // desktop chrome
   pickFolder: "atelier:pick-folder",
+  captureRegion: "atelier:capture-region",
   openExternal: "atelier:open-external",
   exportPdf: "atelier:export-pdf",
   windowMinimize: "atelier:window:minimize",
   windowMaximizeToggle: "atelier:window:maximize-toggle",
+  windowKioskToggle: "atelier:window:kiosk-toggle",
   windowClose: "atelier:window:close",
   windowIsMaximized: "atelier:window:is-maximized",
+  windowIsKiosk: "atelier:window:is-kiosk",
   windowMaximizedChanged: "atelier:window:maximized-changed",
+  windowKioskChanged: "atelier:window:kiosk-changed",
 } as const;
 
 /** window.postMessage type used by preload to hand a MessagePort to the
@@ -63,9 +67,30 @@ export interface DesktopProjectsApi {
 export interface DesktopWindowApi {
   minimize(): void;
   maximizeToggle(): void;
+  kioskToggle(): void;
   close(): void;
   isMaximized(): Promise<boolean>;
+  isKiosk(): Promise<boolean>;
   onMaximizedChanged(cb: (maximized: boolean) => void): () => void;
+  onKioskChanged(cb: (kiosk: boolean) => void): () => void;
+}
+
+export interface DesktopCaptureRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DesktopCaptureRequest extends DesktopCaptureRect {
+  /** Preview URL used to identify the navigated iframe in Electron. */
+  previewUrl?: string;
+}
+
+export interface DesktopCaptureResult {
+  dataUrl: string;
+  /** Live iframe URL, including client-side route, when Electron can resolve it. */
+  frameUrl: string | null;
 }
 
 export interface AtelierDesktopApi {
@@ -74,6 +99,8 @@ export interface AtelierDesktopApi {
   projects: DesktopProjectsApi;
   /** Native directory picker; resolves null when cancelled. */
   pickFolder(): Promise<string | null>;
+  /** Captures a renderer-relative rectangle and its live preview route. */
+  captureRegion(request: DesktopCaptureRequest): Promise<DesktopCaptureResult | null>;
   /** Filesystem path of a dropped File (null if unavailable). */
   pathForFile(file: File): string | null;
   openExternal(url: string): Promise<void>;

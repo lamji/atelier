@@ -62,10 +62,12 @@ check(
   parseTypedPaths("fix it and/or tell me", root).length === 0
 );
 
+const grants = parseTypedPaths("update docs/plan.md please", root);
 const locked: SessionScope = {
   roots: ["FinOps_Backend", "spndx-admin-console"],
   anchors: [],
-  allowed: parseTypedPaths("update docs/plan.md please", root),
+  allowed: grants,
+  named: grants,
   source: "mention",
   changed: false,
 };

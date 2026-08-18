@@ -99,7 +99,7 @@ export function RepoSwitcher({ repos, active, onSelect }: RepoSwitcherProps) {
             className={cn(
               "absolute left-1.5 right-1.5 top-full z-50 mt-0.5",
               "max-h-[min(60vh,22rem)] overflow-y-auto rounded-lg",
-              "border border-white/10 bg-card p-1 shadow-xl"
+              "border border-border bg-card p-1 shadow-pop"
             )}
           >
             {repos.map((repo) => {

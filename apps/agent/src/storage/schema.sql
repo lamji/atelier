@@ -275,6 +275,25 @@ CREATE TABLE IF NOT EXISTS context_sent_chunks (
   PRIMARY KEY (conversation_id, chunk_hash)
 );
 
+-- What the agent already looked at in a conversation: files it read (with
+-- the range and a hash of what it saw) and searches it ran. Replayed into
+-- the next turn as "previously gathered context" so a follow-up does not
+-- start by re-reading what the last turn already gathered.
+CREATE TABLE IF NOT EXISTS conversation_working_memory (
+  conversation_id TEXT NOT NULL,
+  -- 'read' | 'search'
+  kind TEXT NOT NULL,
+  -- read: "<path>#<offset>-<limit>"; search: "<tool>:<query>"
+  key TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  -- JSON: read {path, offset, limit, hash, chars}; search {tool, query, paths}
+  meta TEXT NOT NULL,
+  noted_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, kind, key)
+);
+CREATE INDEX IF NOT EXISTS idx_working_memory_conv
+  ON conversation_working_memory(conversation_id, noted_at);
+
 -- Compressed per-task outcomes ("conversation memory"): injected into
 -- later tasks instead of replaying raw history.
 CREATE TABLE IF NOT EXISTS task_summaries (

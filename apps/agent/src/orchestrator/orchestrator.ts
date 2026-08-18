@@ -1,6 +1,16 @@
 import type { Logger } from "pino";
-import type { Diff, ImageAttachment, ReasoningEffort } from "@atelier/protocol";
-import { conversationTitle, newId } from "@atelier/shared";
+import type {
+  Diff,
+  ImageAttachment,
+  LlmRequest,
+  ReasoningEffort,
+} from "@atelier/protocol";
+import {
+  conversationTitle,
+  llmRequestDetail,
+  llmRequestSummary,
+  newId,
+} from "@atelier/shared";
 import type { EventBus, PublishedEvent } from "../events/event-bus.js";
 import type { AttachmentStore } from "../context/attachments/attachment-store.js";
 import type { NoteJournal } from "../notes/note-journal.js";
@@ -45,6 +55,11 @@ interface QueuedTask {
  * button appearing to do nothing at all.
  */
 const CANCEL_GRACE_MS = 4000;
+
+/** Explicit continuation language opts into the newest unfinished checkpoint. */
+function isResumePrompt(prompt: string): boolean {
+  return /\b(continue|resume|pick\s+up|carry\s+on)\b/i.test(prompt);
+}
 
 export interface TaskOptions {
   model?: string;
@@ -152,6 +167,7 @@ export class Orchestrator {
       return;
     }
     const payload = event.payload as Record<string, unknown>;
+    const detail = logDetail(event.topic, payload);
     this.conversations.addMessage({
       // taskId keeps this unique across agent restarts — the bus seq
       // counter is in-memory and restarts at 1, which used to collide
@@ -163,6 +179,7 @@ export class Orchestrator {
       text: logSummary(event.topic, payload),
       createdAt: Date.now(),
       logTopic: event.topic,
+      ...(detail ? { logDetail: detail } : {}),
     });
   }
 
@@ -202,6 +219,7 @@ export class Orchestrator {
       startedAt: Date.now(),
       endedAt: null,
     });
+    this.planTracker.bindTask(conversationId, taskId, prompt);
     this.conversations.addMessage({
       id: newId("msg"),
       conversationId,
@@ -425,6 +443,10 @@ export class Orchestrator {
     }
   }
 
+  removePlanCheckpoints(conversationId: string): void {
+    this.planTracker.removeConversation(conversationId);
+  }
+
   private async runTask(
     taskId: string,
     conversationId: string,
@@ -458,6 +480,9 @@ export class Orchestrator {
       taskId,
       conversationId,
       prompt,
+      recoveryPlan: isResumePrompt(prompt)
+        ? this.planTracker.resumeContext(conversationId, taskId)
+        : "",
       priorTurns,
       messageId,
       images: opts.images ?? [],
@@ -468,9 +493,15 @@ export class Orchestrator {
       imagePaths: this.attachmentPaths(conversationId, taskId, opts.images),
       opts,
       abort,
+      // One per task, filled by the first Ollama pass and continued by every
+      // pass after it. Claude's equivalent is sdkSessionId, which the SDK
+      // fills the same way.
+      ollamaTranscript: { messages: [] },
       // Replaced by the real lock in the pipeline's first step; unlocked
       // is the safe default if that step ever fails.
       scope: EMPTY_SCOPE,
+      // Filled by the retrieve stage from the lock and this turn's hits.
+      workingSet: [],
       // Cross-task continuity is Atelier-owned context, not a provider-native
       // session id. streamSession may still keep an in-memory id for the same
       // Claude task so validation/review repair rounds can continue cleanly.
@@ -478,6 +509,13 @@ export class Orchestrator {
       onSdkSessionId: () => undefined,
       collectedText: "",
       nudges: 0,
+      gateNudges: 0,
+      // The execute stage sets this from the intent; until then the safe
+      // default is "this turn owes no edit", so nothing pushes to implement.
+      mustEdit: false,
+      turnLimitContinuations: 0,
+      turnLimitStalls: 0,
+      wiki: [],
       record: newTaskRecord(),
     };
 
@@ -677,6 +715,11 @@ const PINNED_TOPICS = new Set([
   "diff.created",
   "knowledge.retrieved",
   "session.recalled",
+  "working-memory.reused",
+  "scope.escaped",
+  "wiki.recalled",
+  "wiki.updated",
+  "llm.request",
   "skills.selected",
   "impact.radius",
   "edit.impact",
@@ -699,6 +742,27 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
     }
     case "session.recalled":
       return sessionRecalledSummary(payload);
+    case "working-memory.reused":
+      return workingMemorySummary(payload);
+    case "wiki.recalled": {
+      const pages = Array.isArray(payload.pages) ? payload.pages : [];
+      const labels = pages.map((page) => {
+        const p = page as { title?: string; moved?: string[] };
+        const moved = Array.isArray(p.moved) ? p.moved.length : 0;
+        return `${String(p.title ?? "")}${moved > 0 ? ` (stale: ${moved} source(s) moved)` : ""}`;
+      });
+      return `Feature wiki: ${labels.join("; ") || "no page"} · ~${Number(payload.tokens ?? 0)} tok`;
+    }
+    case "wiki.updated": {
+      const sections = Array.isArray(payload.changedSections)
+        ? payload.changedSections.map(String)
+        : [];
+      const what = payload.created ? "created" : "updated";
+      const detail = sections.length > 0 ? ` — ${sections.slice(0, 4).join(", ")}` : "";
+      return `Feature wiki ${what}: ${String(payload.title ?? "")} (${String(payload.path ?? "")})${detail}`;
+    }
+    case "scope.escaped":
+      return `Scope lock let ${String(payload.tool ?? "a tool")} through to ${String(payload.path ?? "")}`;
     case "skills.selected": {
       const skills = Array.isArray(payload.skills) ? payload.skills : [];
       const names = skills
@@ -720,9 +784,51 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
       const summary = String(payload.summary ?? "").slice(0, 90);
       return `${symbol} · ${reach} · ${summary}`;
     }
+    case "llm.request":
+      return llmRequestSummary(payload as unknown as LlmRequest);
     default:
       return "";
   }
+}
+
+/**
+ * The long-form body behind a pinned log line, when the event has one.
+ * Only the model-request row carries a body today: the full context that
+ * was sent, so "what did it know when it did that?" can be answered from
+ * a reloaded conversation, not just from the live run.
+ */
+function logDetail(topic: string, payload: Record<string, unknown>): string {
+  if (topic !== "llm.request") return "";
+  return llmRequestDetail(payload as unknown as LlmRequest);
+}
+
+
+/**
+ * What earlier turns' investigation this turn started from, in one line.
+ * Mirrored in apps/web/src/services/event-dispatcher.ts.
+ */
+function workingMemorySummary(payload: Record<string, unknown>): string {
+  const inlined = Number(payload.inlined ?? 0);
+  const listed = Number(payload.listed ?? 0);
+  const changed = Number(payload.changed ?? 0);
+  const searches = Number(payload.searches ?? 0);
+  const tokens = Number(payload.tokens ?? 0);
+  const paths = Array.isArray(payload.paths)
+    ? payload.paths.map(String).filter(Boolean)
+    : [];
+  const parts: string[] = [];
+  if (inlined > 0) parts.push(`${inlined} file(s) re-used from earlier turns`);
+  if (changed > 0) parts.push(`${changed} changed since`);
+  if (listed > 0) parts.push(`${listed} more remembered by path`);
+  const seeded = Number(payload.seeded ?? 0);
+  if (seeded > 0) parts.push(`${seeded} owner file(s) from the feature wiki`);
+  if (searches > 0) parts.push(`${searches} earlier search(es)`);
+  const head = parts.length > 0 ? parts.join(" · ") : "nothing to reuse";
+  const tail =
+    paths.length > 0
+      ? ` — ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ", …" : ""}`
+      : "";
+  return `Reused gathered context: ${head} · ~${tokens} tok${tail}`;
 }
 
 /**

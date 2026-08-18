@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { SlashCommand } from "@atelier/protocol";
 import {
   GLOBAL_SESSION_COMMAND_ID,
@@ -23,11 +24,12 @@ const GLOBAL_SESSION_DETAIL = `# Global session\n\n` +
   `Running it again updates the same stable memory instead of duplicating it.`;
 
 /**
- * Discovers the slash commands and skills the Claude Agent SDK will
- * load for a query — the same files Claude Code reads:
+ * Discovers the app-owned skills plus the Claude Code-compatible commands
+ * and skills used for a query:
  *
- *   <base>/.claude/commands/**\/*.md   (custom slash commands)
- *   <base>/.claude/skills/*\/SKILL.md  (skills, invocable as /name)
+ *   <atelier>/skills/*\/SKILL.md        (app skills)
+ *   <base>/.claude/commands/**\/*.md    (custom slash commands)
+ *   <base>/.claude/skills/*\/SKILL.md   (skills, invocable as /name)
  *
  * with <base> = the user's home dir ("user" scope) and the workspace
  * root ("project" scope). Scanned fresh per request so edits on disk
@@ -40,6 +42,7 @@ export function listSlashCommands(
   const disabled = new Set(disabledSkills);
   const commands: SlashCommand[] = [
     GLOBAL_SESSION_COMMAND,
+    ...scanSkills(bundledSkillsRoot(), "app"),
     ...scanBase(os.homedir(), "user"),
     ...scanBase(workspaceRoot, "project"),
   ].map((command) => ({
@@ -59,6 +62,17 @@ export function readSlashCommandDetail(
     return { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL };
   }
   const disabled = new Set(disabledSkills);
+  for (const entry of scanSkillDetails(bundledSkillsRoot(), "app")) {
+    if (entry.command.id === id) {
+      return {
+        command: {
+          ...entry.command,
+          enabled: entry.command.kind !== "skill" || !disabled.has(id),
+        },
+        content: entry.content,
+      };
+    }
+  }
   for (const entry of scanDetails(os.homedir(), "user")) {
     if (entry.command.id === id) {
       return {
@@ -91,6 +105,7 @@ export function listSlashCommandDetails(
   const disabled = new Set(disabledSkills);
   const details = [
     { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL },
+    ...scanSkillDetails(bundledSkillsRoot(), "app"),
     ...scanDetails(os.homedir(), "user"),
     ...scanDetails(workspaceRoot, "project"),
   ].map((entry) => ({
@@ -103,6 +118,15 @@ export function listSlashCommandDetails(
   }));
   details.sort((a, b) => a.command.name.localeCompare(b.command.name));
   return details;
+}
+
+/** Resolve source and packaged application skill directories. */
+function bundledSkillsRoot(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const packaged = path.join(moduleDir, "skills");
+  return fs.existsSync(packaged)
+    ? packaged
+    : path.resolve(moduleDir, "../../skills");
 }
 
 function scanBase(base: string, scope: SlashCommand["scope"]): SlashCommand[] {

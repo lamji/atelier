@@ -14,13 +14,15 @@ export function MonitorPanel(props: MonitorPanelProps) {
   return (
     <div className="flex h-full flex-col">
       <div className="island-header">
-        <Gauge className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="icon-tile icon-tile-sm">
+          <Gauge className="h-3.5 w-3.5" />
+        </span>
         <span className="island-title">Monitor</span>
-        <span className="ml-auto rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+        <span className="chip chip-accent ml-auto">
           {props.workingCount}/{props.sessions.length} active
         </span>
       </div>
-      <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2">
+      <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-2 pb-2">
         {props.sessions.map((session) => (
           <motion.button
             key={session.conversation.id}
@@ -28,7 +30,7 @@ export function MonitorPanel(props: MonitorPanelProps) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             onClick={() => props.onSelect(session.conversation.id)}
-            className="w-full rounded-xl bg-muted/50 px-3 py-2 text-left hover:bg-accent/50"
+            className="w-full rounded-xl bg-muted/60 px-3 py-2.5 text-left transition-colors hover:bg-accent"
           >
             <div className="flex items-center gap-2">
               <StatusDot status={session.status} />

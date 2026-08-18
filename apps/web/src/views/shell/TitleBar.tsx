@@ -13,8 +13,7 @@ export function TitleBar(props: { children: React.ReactNode }) {
   return (
     <div
       className={cn(
-        "app-drag flex h-[var(--titlebar-h)] shrink-0 items-stretch",
-        "border-b border-border bg-titlebar"
+        "app-drag flex h-[var(--topnav-h)] shrink-0 items-stretch"
       )}
     >
       {/* The bar itself stays draggable; interactive children inside

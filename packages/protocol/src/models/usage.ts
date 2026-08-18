@@ -13,6 +13,17 @@ export const UsageWindow = z.object({
 });
 export type UsageWindow = z.infer<typeof UsageWindow>;
 
+/** Activity reported by Ollama Cloud responses, not account quota. */
+export const OllamaCloudUsageWindow = z.object({
+  kind: z.string(),
+  label: z.string(),
+  requests: z.number(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  seconds: z.number(),
+});
+export type OllamaCloudUsageWindow = z.infer<typeof OllamaCloudUsageWindow>;
+
 /**
  * Plan usage as last seen. `available` is false for API-key / Bedrock /
  * Vertex sessions, where plan limits do not apply.
@@ -24,6 +35,8 @@ export const UsageSnapshot = z.object({
     .nullable()
     .default(null),
   windows: z.array(UsageWindow).default([]),
+  /** Cloud activity observed by this Atelier instance, not remaining quota. */
+  ollamaCloudUsage: z.array(OllamaCloudUsageWindow).default([]),
   /** Epoch ms of the last update, so the UI can show staleness. */
   updatedAt: z.number().nullable().default(null),
 });

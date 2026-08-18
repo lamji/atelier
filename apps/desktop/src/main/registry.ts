@@ -21,6 +21,7 @@ export interface ProjectRecord {
 
 /** Base dir for all Atelier data (LOCALAPPDATA on Windows, ~/.local/share). */
 export function atelierDataRoot(): string {
+  if (process.env.ATELIER_DATA_DIR) return process.env.ATELIER_DATA_DIR;
   const base =
     process.env.LOCALAPPDATA ?? path.join(os.homedir(), ".local", "share");
   return path.join(base, "atelier");

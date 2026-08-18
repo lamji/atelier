@@ -15,6 +15,7 @@ import type { PathGuard } from "./path-guard.js";
 import type { WorkspaceIgnore } from "./ignore.js";
 
 const MAX_READ_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
 const MAX_TREE_NODES = 10_000;
 
@@ -469,11 +470,65 @@ export class FileService {
     };
   }
 
+  async readImage(
+    relPath: string
+  ): Promise<{ dataUrl: string; mediaType: string; mtime: number }> {
+    const abs = this.guard.toAbsolute(relPath, "read");
+    const stat = await statOrThrow(abs, relPath, "file");
+    if (stat.size > MAX_IMAGE_BYTES) {
+      throw new Error(`Image too large (${stat.size} bytes): ${relPath}`);
+    }
+    const mediaType = imageMediaType(relPath);
+    if (!mediaType) throw new Error(`Unsupported image file: ${relPath}`);
+    let buffer: Buffer;
+    try {
+      buffer = await fs.readFile(abs);
+    } catch (error) {
+      throw workspaceFsError(error, relPath, "file");
+    }
+    return {
+      dataUrl: `data:${mediaType};base64,${buffer.toString("base64")}`,
+      mediaType,
+      mtime: stat.mtimeMs,
+    };
+  }
+
+  async writeImage(
+    relPath: string,
+    data: string,
+    mediaType: string
+  ): Promise<string> {
+    const wirePath = this.guard.toRelative(this.guard.toAbsolute(relPath));
+    if (!/^\.atelier\/images\/[^/]+\.png$/i.test(wirePath)) {
+      throw new Error("Screenshots must be saved as .atelier/images/*.png");
+    }
+    if (mediaType !== "image/png") {
+      throw new Error(`Unsupported screenshot type: ${mediaType}`);
+    }
+    const buffer = Buffer.from(data, "base64");
+    if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) {
+      throw new Error("Screenshot must be between 1 byte and 20 MB");
+    }
+    const abs = this.guard.toAbsolute(wirePath);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, buffer, { flag: "wx" });
+    return wirePath;
+  }
+
   async writeFile(
     relPath: string,
     content: string,
     opts: WriteOptions = {}
   ): Promise<Diff> {
+    // Same model-side bug as replace_code: a tool call that omits content
+    // (or sends a non-string) would crash preserveEol below with a TypeError.
+    // Catch it here so the model gets a clear, field-named error instead.
+    if (typeof content !== "string") {
+      throw new Error(
+        "write_file missing required string field: content. Re-send the " +
+          "call with content as a string."
+      );
+    }
     const abs = this.guard.toAbsolute(relPath);
     const wirePath = this.guard.toRelative(abs);
     let before = "";
@@ -502,6 +557,19 @@ export class FileService {
     const abs = this.guard.toAbsolute(relPath);
     const wirePath = this.guard.toRelative(abs);
     const { content: before } = await this.readFile(wirePath);
+    // A model that drops or mis-types a required field gets a specific
+    // error here instead of a TypeError from the matcher below. The shared
+    // matcher now treats non-string args as an empty hit, so this branch
+    // is the one that tells the model which field is wrong.
+    if (typeof oldString !== "string" || typeof newString !== "string") {
+      const missing: string[] = [];
+      if (typeof oldString !== "string") missing.push("oldString");
+      if (typeof newString !== "string") missing.push("newString");
+      throw new Error(
+        `replace_code missing required string field(s): ${missing.join(", ")}. ` +
+          "Re-send the call with both oldString and newString as strings."
+      );
+    }
     const edit = resolveEdit(before, oldString, newString);
     if (edit.count === 0) {
       throw new Error(`oldString not found in ${relPath}`);
@@ -724,6 +792,20 @@ export class FileService {
   }
 }
 
+function imageMediaType(filePath: string): string | null {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".webp": return "image/webp";
+    case ".bmp": return "image/bmp";
+    case ".ico": return "image/x-icon";
+    case ".avif": return "image/avif";
+    default: return null;
+  }
+}
+
 /** A path that simply is not there — the recoverable failure. */
 function isMissing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
@@ -872,22 +954,35 @@ export function resolveEdit(
   oldString: string,
   newString: string
 ): ResolvedEdit {
-  const asIs = countOccurrences(content, oldString);
-  if (asIs > 0 || !oldString) return { oldString, newString, count: asIs };
+  // A model can emit a tool call whose oldString / newString is missing or
+  // typed wrong (Ollama sometimes drops the field, or sends a number when
+  // the schema asked for a string). The early-return below is what used to
+  // throw "Cannot read properties of undefined (reading 'replace')" — the
+  // string methods are called on whatever the model sent, and the result
+  // is a TypeError instead of a recoverable "oldString not found" message.
+  // Coerce to a string here so the shared matcher behaves identically and
+  // the upstream tool can keep returning a clear, specific error.
+  const oldText = typeof oldString === "string" ? oldString : "";
+  const newText = typeof newString === "string" ? newString : "";
+  if (typeof oldString !== "string" || typeof newString !== "string") {
+    return { oldString: oldText, newString: newText, count: 0 };
+  }
+  const asIs = countOccurrences(content, oldText);
+  if (asIs > 0 || !oldText) return { oldString: oldText, newString: newText, count: asIs };
 
-  const lf = oldString.replace(/\r\n/g, "\n");
+  const lf = oldText.replace(/\r\n/g, "\n");
   const variants: Array<[string, (s: string) => string]> = [
     [lf.replace(/\n/g, "\r\n"), toCrlf],
     [lf, toLf],
   ];
   for (const [variant, align] of variants) {
-    if (variant === oldString) continue;
+    if (variant === oldText) continue;
     const count = countOccurrences(content, variant);
     if (count > 0) {
-      return { oldString: variant, newString: align(newString), count };
+      return { oldString: variant, newString: align(newText), count };
     }
   }
-  return { oldString, newString, count: 0 };
+  return { oldString: oldText, newString: newText, count: 0 };
 }
 
 function toLf(text: string): string {

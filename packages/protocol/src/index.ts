@@ -17,5 +17,7 @@ export * from "./models/validation.js";
 export * from "./models/git.js";
 export * from "./models/conversation.js";
 export * from "./models/context.js";
+export * from "./models/llm-request.js";
+export * from "./models/wiki.js";
 export * from "./models/fs.js";
 export { Settings, UserRule } from "./methods/settings.js";

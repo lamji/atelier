@@ -92,6 +92,7 @@ function toModelOption(model: CodexCatalogModel): ModelOption {
     resolvedModel: model.slug,
     provider: "codex" as const,
     supportsEffort: reasoningLevels.length > 0,
+    supportsImages: true,
     ...(reasoningLevels.length > 0 ? { reasoningLevels } : {}),
   };
 }
@@ -121,6 +122,7 @@ function fallbackCodexModels(): ModelOption[] {
       description: "Codex CLI - signed-in ChatGPT/Codex session",
       provider: "codex" as const,
       supportsEffort: false,
+      supportsImages: true,
     },
   ];
 }

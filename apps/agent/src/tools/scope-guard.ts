@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { toPosix } from "@atelier/shared";
 import {
   inScope,
   scopeGlob,
@@ -39,6 +42,22 @@ const GLOB_FIELD: Record<string, string> = {
  */
 export class ScopeGuard {
   private active = new Map<string, SessionScope>();
+  /** Outside-lock paths this task was let through to, so a retry is silent. */
+  private granted = new Map<string, Set<string>>();
+
+  constructor(
+    private deps: {
+      workspaceRoot: string;
+      /**
+       * Whether a file with this basename exists under any of the locked
+       * roots. That twin is the whole hazard the lock guards against; when
+       * there is none, an existing file outside the lock is unambiguous.
+       */
+      twinExists: (roots: string[], basename: string) => boolean;
+      /** Told when a task is let outside its lock, for the rail and log. */
+      onEscape?: (taskId: string, path: string, tool: string) => void;
+    } = { workspaceRoot: process.cwd(), twinExists: () => false }
+  ) {}
 
   bind(taskId: string, scope: SessionScope): void {
     if (scope.roots.length === 0) {
@@ -50,6 +69,50 @@ export class ScopeGuard {
 
   release(taskId: string): void {
     this.active.delete(taskId);
+    this.granted.delete(taskId);
+  }
+
+  /**
+   * Whether an out-of-lock path may pass anyway.
+   *
+   * The lock exists for ONE hazard: the same-named file in a project the
+   * user never mentioned. It does not exist to strand a task on a file
+   * that is plainly the one it needs — an existing path with no twin under
+   * the lock, reached from retrieval or from an earlier turn's memory. That
+   * refusal is how a session locked to one app answered a request about
+   * another with "cannot read or edit the target file" and gave up. Such a
+   * path is let through and reported; a path with a twin, or one that does
+   * not exist yet (a create outside the lock), is still refused.
+   */
+  private mayEscape(
+    taskId: string,
+    scope: SessionScope,
+    tool: string,
+    target: string
+  ): boolean {
+    const rel = toPosix(target).replace(/^\.\//, "");
+    if (this.granted.get(taskId)?.has(rel)) return true;
+    if (!this.existsInWorkspace(rel)) return false;
+    if (this.deps.twinExists(scope.roots, path.posix.basename(rel))) {
+      return false;
+    }
+    let paths = this.granted.get(taskId);
+    if (!paths) {
+      paths = new Set();
+      this.granted.set(taskId, paths);
+    }
+    paths.add(rel);
+    this.deps.onEscape?.(taskId, rel, tool);
+    return true;
+  }
+
+  private existsInWorkspace(rel: string): boolean {
+    if (rel.includes("..")) return false;
+    try {
+      return fs.statSync(path.resolve(this.deps.workspaceRoot, rel)).isFile();
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -63,8 +126,12 @@ export class ScopeGuard {
     const field = PATH_FIELD[name];
     if (field) {
       const value = input[field];
-      if (typeof value === "string" && !inScope(scope, value)) {
-        throw new Error(denial(name, value, scope));
+      if (
+        typeof value === "string" &&
+        !inScope(scope, value) &&
+        !this.mayEscape(taskId, scope, name, value)
+      ) {
+        throw new Error(denial(name, value, scope, this.hasTwin(scope, value)));
       }
       return input;
     }
@@ -75,8 +142,14 @@ export class ScopeGuard {
       if (Array.isArray(entries)) {
         for (const entry of entries) {
           const entryPath = isRecord(entry) ? entry.path : undefined;
-          if (typeof entryPath === "string" && !inScope(scope, entryPath)) {
-            throw new Error(denial(name, entryPath, scope));
+          if (
+            typeof entryPath === "string" &&
+            !inScope(scope, entryPath) &&
+            !this.mayEscape(taskId, scope, name, entryPath)
+          ) {
+            throw new Error(
+              denial(name, entryPath, scope, this.hasTwin(scope, entryPath))
+            );
           }
         }
       }
@@ -103,20 +176,31 @@ export class ScopeGuard {
 
     return input;
   }
+
+  private hasTwin(scope: SessionScope, target: string): boolean {
+    return this.deps.twinExists(scope.roots, path.posix.basename(toPosix(target)));
+  }
 }
 
 function denial(
   name: string,
   target: string,
-  scope: SessionScope
+  scope: SessionScope,
+  twin: boolean
 ): string {
   const roots = scope.roots.map((root) => `${root}/`).join(", ");
+  const why = twin
+    ? "A file with this name also exists inside the lock; that is the one " +
+      "this session is about — use it. "
+    : "The path does not exist in the workspace, so it cannot be created " +
+      "outside the lock. ";
   return (
-    `"${target}" is outside this session's scope. The user locked this ` +
-    `conversation to ${roots} — ${name} may only touch paths under ` +
+    `"${target}" is outside this session's scope. This conversation is ` +
+    `locked to ${roots} — ${name} may only touch paths under ` +
     `${scope.roots.length === 1 ? "that prefix" : "those prefixes"}. ` +
-    "A file with this name also exists there; use that one. If the work " +
-    "truly needs this path, stop and ask the user to widen the scope."
+    why +
+    "If the work truly needs this path, say so in your report as a blocker " +
+    "the user must resolve by widening the scope."
   );
 }
 
@@ -130,4 +214,41 @@ function inScopeGlob(scope: SessionScope, glob: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/**
+ * Whether a file called `basename` exists anywhere under `absDir`, walking
+ * the tree while skipping ignored folders. Bounded — a workspace with a
+ * hundred thousand files must not turn one guard check into a scan — so
+ * a huge tree may answer "no" where the index would have said "yes"; the
+ * index is asked first for exactly that reason.
+ */
+export function fileNamedUnder(
+  absDir: string,
+  basename: string,
+  ignore: { ignoresAbsolute(absPath: string, isDir?: boolean): boolean },
+  budget = 20_000
+): boolean {
+  const stack = [absDir];
+  let visited = 0;
+  while (stack.length > 0 && visited < budget) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      visited += 1;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === ".git" || ignore.ignoresAbsolute(abs, true)) continue;
+        stack.push(abs);
+      } else if (entry.name === basename) {
+        return true;
+      }
+    }
+  }
+  return false;
 }

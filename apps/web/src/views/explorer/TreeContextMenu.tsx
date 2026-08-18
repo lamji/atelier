@@ -66,7 +66,7 @@ export function TreeContextMenu(props: TreeContextMenuProps) {
       role="menu"
       style={{ left: pos.left, top: pos.top, width: MENU_WIDTH }}
       className={cn(
-        "island fixed z-50 py-1 shadow-xl"
+        "island fixed z-50 py-1 shadow-pop"
       )}
     >
       {props.items.map((item, index) =>

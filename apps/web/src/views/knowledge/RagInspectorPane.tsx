@@ -1,4 +1,4 @@
-import { Loader2, ScanSearch, Send } from "lucide-react";
+import { Database, Loader2, ScanSearch, Send } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,62 +14,80 @@ export interface RagInspectorPaneProps {
  */
 export function RagInspectorPane({ vm }: RagInspectorPaneProps) {
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 px-3 py-2">
-        <ScanSearch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-        <Input
-          value={vm.query}
-          onChange={(e) => vm.setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void vm.run();
-          }}
-          placeholder='Ask the index — e.g. "where are git commits handled?"'
-          className="h-8 text-xs"
-          disabled={!vm.connected}
-        />
-        <Button
-          size="sm"
-          className="h-8 gap-1.5 px-3"
-          disabled={!vm.connected || vm.loading || !vm.query.trim()}
-          onClick={() => void vm.run()}
-        >
-          {vm.loading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Send className="h-3.5 w-3.5" />
-          )}
-          Retrieve
-        </Button>
+    <div className="flex h-full flex-col bg-card">
+      <div className="border-b border-border-subtle px-3 py-3">
+        <div className="mb-3 flex items-center gap-2">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <ScanSearch className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">RAG inspector</p>
+            <p className="text-[11px] text-muted-foreground">
+              Current workspace index
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            value={vm.query}
+            onChange={(e) => vm.setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void vm.run();
+            }}
+            placeholder='Ask the index, e.g. "where are git commits handled?"'
+            className="h-8 rounded-lg text-xs"
+            disabled={!vm.connected}
+          />
+          <Button
+            size="sm"
+            className="h-8 gap-1.5 rounded-lg px-3"
+            disabled={!vm.connected || vm.loading || !vm.query.trim()}
+            onClick={() => void vm.run()}
+          >
+            {vm.loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Send className="h-3.5 w-3.5" />
+            )}
+            Retrieve
+          </Button>
+        </div>
       </div>
 
       {vm.retrieval === null ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2">
-          <ScanSearch className="h-6 w-6 text-muted-foreground/50" />
+          <Database className="h-6 w-6 text-muted-foreground/50" />
           <p className="max-w-64 text-center text-xs text-muted-foreground">
-            Inspect what the agent retrieves from its knowledge before it
-            answers.
+            No retrieval loaded.
           </p>
         </div>
       ) : (
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="secondary" className="text-[10px]">
-              {vm.retrieval.strategy}
-            </Badge>
-            {vm.retrieval.graphNodes.map((node) => (
-              <Badge
-                key={node.id}
-                variant="outline"
-                className="font-mono text-[10px]"
-                title={node.path}
-              >
-                {node.label} · {node.kind}
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+          <div className="rounded-lg border border-border-subtle bg-muted/25 p-2">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-muted-foreground">
+                Strategy
+              </span>
+              <Badge variant="secondary" className="text-[10px]">
+                {vm.retrieval.strategy}
               </Badge>
-            ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {vm.retrieval.graphNodes.map((node) => (
+                <Badge
+                  key={node.id}
+                  variant="outline"
+                  className="font-mono text-[10px]"
+                  title={node.path}
+                >
+                  {node.label} · {node.kind}
+                </Badge>
+              ))}
+            </div>
           </div>
 
           {vm.retrieval.chunks.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="rounded-lg border border-border-subtle px-3 py-6 text-center text-xs text-muted-foreground">
               No chunks matched. Is the workspace indexed?
             </p>
           ) : (
@@ -77,7 +95,7 @@ export function RagInspectorPane({ vm }: RagInspectorPaneProps) {
               <button
                 key={chunk.id}
                 onClick={() => vm.openChunk(chunk.path)}
-                className="block w-full rounded-xl bg-muted/40 p-2.5 text-left transition-colors hover:bg-muted/70"
+                className="block w-full rounded-lg border border-border-subtle bg-card p-2.5 text-left shadow-sm transition-colors hover:bg-muted/45"
               >
                 <div className="flex items-center gap-2">
                   {chunk.kind === "lesson" ? (

@@ -101,7 +101,7 @@ export function RulesTab() {
   return (
     <section className="space-y-1.5">
       <div className="flex items-center gap-1.5 px-0.5">
-        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+        <h3 className="text-[11px] font-semibold text-muted-foreground/60">
           Your rules{rules ? ` · ${rules.length}` : ""}
         </h3>
         <Button

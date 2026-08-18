@@ -56,18 +56,12 @@ interface CodexJsonEvent {
 // prohibition here; say what to avoid concretely instead. The old
 // "tool-less completion" escape hatch is gone for the same reason — the
 // ping gate retries a tool-less run rather than accepting its answer.
-const ATELIER_CODEX_INSTRUCTIONS =
-  "You are the Codex execution backend inside Atelier. Atelier has already " +
-  "resolved the task scope, selected the workflow, and assembled the " +
-  "conversation and knowledge context in the initial prompt. Treat that " +
-  "prompt as the complete source of task instructions; do not seek " +
-  "instructions anywhere else, and do not start a second planning or " +
-  "debugging workflow. Your FIRST action in every run, before anything " +
-  "else: call the Atelier `ping` tool once to confirm the bridge. Do all " +
+const ATELIER_CODEX_TOOL_INSTRUCTIONS =
+  "CODEX BRIDGE CONTRACT: Your FIRST action in this tool-enabled run, " +
+  "before anything else, is to call the Atelier `ping` tool once. Do all " +
   "workspace work through the Atelier tools — read, search, edit and run " +
   "only through them, never through native shell, apply_patch, filesystem, " +
-  "git, browser, subagent, or computer-use tools. Finish the requested " +
-  "task directly and return one concise final report.";
+  "git, browser, subagent, or computer-use tools.";
 
 /** A healthy run emits JSONL continuously; this much silence is a corpse. */
 const IDLE_TIMEOUT_MS = 180_000;
@@ -244,7 +238,14 @@ async function runAttempt(
     const delta = handleCodexEvent(event, opts.telemetry);
     if (delta) text += delta;
   });
-  const input = `${ATELIER_CODEX_INSTRUCTIONS}\n\n${opts.prompt}`;
+  // Interactive runs already carry the provider-neutral executor contract
+  // in opts.prompt. Only the bridge-specific ping/tool routing belongs here.
+  // Tool-less one-shot calls must not be ordered to ping a bridge they do not
+  // have — that contradictory instruction made Codex spend the completion
+  // explaining why it could not comply.
+  const input = opts.toolBridge
+    ? `${ATELIER_CODEX_TOOL_INSTRUCTIONS}\n\n${opts.prompt}`
+    : opts.prompt;
   // TEMP diagnostic — remove after the codex MCP investigation.
   if (process.env.ATELIER_CODEX_BRIDGE_DEBUG) {
     console.error(`[codex-args] ${JSON.stringify(args)}`);

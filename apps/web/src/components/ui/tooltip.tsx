@@ -94,9 +94,28 @@ export function Tooltip({
     const onScrollOrResize = () => computePosition();
     window.addEventListener("scroll", onScrollOrResize, true);
     window.addEventListener("resize", onScrollOrResize);
+
+    // Ancestors can be hidden with a CSS `visibility` toggle (e.g. switching
+    // between overlaid panels) without the anchor ever losing hover/focus,
+    // so no mouseleave/blur fires to close us. Poll actual visibility so a
+    // hidden anchor can't leave its tooltip floating over whatever's on top.
+    let raf = 0;
+    const checkVisibility = () => {
+      const anchor = wrapperRef.current?.firstElementChild as
+        | (Element & { checkVisibility?: () => boolean })
+        | undefined;
+      if (anchor?.checkVisibility && !anchor.checkVisibility()) {
+        setOpen(false);
+        return;
+      }
+      raf = requestAnimationFrame(checkVisibility);
+    };
+    raf = requestAnimationFrame(checkVisibility);
+
     return () => {
       window.removeEventListener("scroll", onScrollOrResize, true);
       window.removeEventListener("resize", onScrollOrResize);
+      cancelAnimationFrame(raf);
     };
   }, [open, computePosition]);
 

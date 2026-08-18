@@ -4,16 +4,24 @@ import type { ProjectEntry, WorkspaceProfile } from "./types.js";
  * Renders the profile as a static system-prompt block. Kept byte-stable
  * for the lifetime of the process so it never invalidates the provider
  * prompt cache, and kept short — this rides on every single turn.
+ *
+ * Styled like a file explorer: a root node with the workspace's own
+ * branches drawn as a directory tree, so the model can "see" the shape of
+ * what it is standing in at a glance instead of reading a flat list.
  */
 export function renderWorkspaceProfile(profile: WorkspaceProfile): string {
-  const lines = [`WORKSPACE LAYOUT — ${headline(profile)}`];
+  const tree = renderTree(profile);
+  const lines = [`WORKSPACE LAYOUT — ${headline(profile)}`, ""];
 
-  if (profile.rootProject && profile.rootProject.topDirs.length > 0) {
-    lines.push(`Root directories: ${profile.rootProject.topDirs.join(", ")}`);
+  lines.push(tree);
+
+  const rootDirs = profile.rootProject?.topDirs ?? [];
+  if (rootDirs.length > 0) {
+    lines.push(
+      `Root directories: ${rootDirs.map((d) => `${d}/`).join("  ")}`
+    );
   }
-  for (const project of profile.projects) {
-    lines.push(`- ${describe(project)}`);
-  }
+
   if (profile.truncated) {
     lines.push("- (more projects exist — list_dir the root to see them)");
   }
@@ -34,6 +42,34 @@ export function renderWorkspaceProfile(profile: WorkspaceProfile): string {
       "retrieve_knowledge, or list_dir before using a path."
   );
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Builds the file-explorer tree: a top row with the root glyph, then one
+ * indented branch per project, each with a folder glyph and its flags, and
+ * the project's confirmed top-level folders nested beneath it.
+ */
+function renderTree(profile: WorkspaceProfile): string {
+  const rows: string[] = [`📦 ${profile.rootName}/`];
+  const entries = profile.projects;
+
+  entries.forEach((project, i) => {
+    const isLast = i === entries.length - 1;
+    const branch = isLast ? "└─" : "├─";
+    const flag = project.isGitRepo ? "  (git)" : "";
+    rows.push(`${branch} 📁 ${describe(project)}${flag}`);
+
+    // Fold the project's confirmed top-level folders in as children, so the
+    // explorer shows real structure rather than a bare folder list.
+    const dirs = project.topDirs;
+    dirs.forEach((dir, j) => {
+      const childLast = j === dirs.length - 1;
+      const child = childLast ? "└─" : "├─";
+      rows.push(`   ${child} 📂 ${dir}/`);
+    });
+  });
+
+  return rows.join("\n");
 }
 
 function headline(profile: WorkspaceProfile): string {
@@ -66,8 +102,7 @@ function headline(profile: WorkspaceProfile): string {
 
 function describe(project: ProjectEntry): string {
   const facts = [project.stack];
-  if (project.isGitRepo) facts.push("git repo");
   const dirs =
-    project.topDirs.length > 0 ? ` — dirs: ${project.topDirs.join(", ")}` : "";
-  return `${project.path}/ (${facts.join(", ")})${dirs}`;
+    project.topDirs.length > 0 ? ` — ${project.topDirs.length} top dirs` : "";
+  return `${project.path || project.name}/${dirs}`;
 }

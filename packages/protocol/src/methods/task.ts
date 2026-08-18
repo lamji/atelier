@@ -70,7 +70,13 @@ export const taskMethods = {
     result: z.object({ cancelled: z.boolean() }),
   },
   "task.list": {
-    params: z.object({ activeOnly: z.boolean().optional() }).optional(),
+    params: z
+      .object({
+        activeOnly: z.boolean().optional(),
+        /** Restrict persisted execution history to one conversation. */
+        conversationId: z.string().optional(),
+      })
+      .optional(),
     result: z.object({ tasks: z.array(TaskInfo) }),
   },
   "task.getTimeline": {

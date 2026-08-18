@@ -315,13 +315,11 @@ export function createAtelierMcpServer(
     ),
     tool(
       "set_plan",
-      "Publish the plan for this task — the checklist the user watches " +
-        "while you work. Call it ONCE, as soon as you know the shape of " +
-        "the work and before you start changing things, for anything " +
-        "beyond a single trivial edit. State the steps you will actually " +
-        "take, in order, naming the files each one touches; do not pad it " +
-        "with steps you have no intention of doing. Returns the step ids " +
-        "— drive them with update_plan_step as you go.",
+      "Create the execution timeline before editing. State the steps you " +
+        "will actually take, in order, naming the files each one touches. " +
+        "If necessary work is discovered later, call set_plan again with " +
+        "ONLY the new steps; they append and cannot replace existing steps. " +
+        "Returns ids to drive strictly with update_plan_step.",
       {
         goal: z
           .string()
@@ -340,9 +338,9 @@ export function createAtelierMcpServer(
                 .array(z.string())
                 .optional()
                 .describe(
-                  "Workspace-relative files this step touches. The checklist " +
-                    "advances itself when one of them is edited, so these are " +
-                    "worth getting right."
+                  "Workspace-relative files this step touches. A matching edit " +
+                    "may start the current step, but its checkmark still " +
+                    "requires an explicit done update."
                 ),
             })
           )
@@ -352,10 +350,10 @@ export function createAtelierMcpServer(
     ),
     tool(
       "update_plan_step",
-      "Report progress on the current task plan. Call when you start a " +
-        "step (in-progress) and when you finish it (done/failed/skipped). " +
-        "Step ids come back from set_plan and appear in the PLAN section " +
-        "of your context.",
+      "Execute the timeline in order. Mark the current step in-progress " +
+        "when it starts and done only after it is complete. Later steps are " +
+        "blocked until earlier ones are done; failed/cancelled/skipped do " +
+        "not clear the final-report gate. Step ids come from set_plan.",
       {
         stepId: z.string().describe("The [step_...] id from the plan"),
         status: z.enum([
@@ -396,6 +394,21 @@ export function createAtelierMcpServer(
           .describe("Workspace-relative file paths this applies to"),
       },
       (input) => run("save_lesson", input)
+    ),
+    tool(
+      "preview_review",
+      "Debug the live local Page preview in headless Chromium at desktop and " +
+        "mobile sizes. Returns a status and decision plus the chronological " +
+        "DevTools console, console/page errors, failed HTTP requests, DOM audit, " +
+        "and screenshots. Obey the decision: unavailable means ask the user to " +
+        "start or reopen Page preview and stop without retrying or starting a " +
+        "server; issues means report the exact diagnostics, then fix when the " +
+        "task allows edits or skip; failed means report the tool error and skip.",
+      {
+        url: z.string().describe("The local http(s) URL shown in Page preview"),
+      },
+      (input) => run("preview_review", input),
+      { annotations: { readOnlyHint: true } }
     ),
     tool(
       "run_terminal",

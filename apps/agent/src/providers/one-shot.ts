@@ -11,6 +11,7 @@ import {
 } from "./model-routing.js";
 import { runCodexExec } from "./codex/client.js";
 import { grokChat } from "./grok/client.js";
+import { isTurnLimitError } from "../orchestrator/claude-budget.js";
 
 /**
  * Tool-less call sites in the agent (pipeline stage calls, git
@@ -116,9 +117,17 @@ async function runClaudeOneShot(opts: OneShotOptions): Promise<string> {
     },
   });
   let text = "";
-  for await (const message of stream) {
-    const m = message as Record<string, unknown>;
-    if (m.type === "result" && typeof m.result === "string") text = m.result;
+  try {
+    for await (const message of stream) {
+      const m = message as Record<string, unknown>;
+      if (m.type === "result" && typeof m.result === "string") text = m.result;
+    }
+  } catch (error) {
+    // These calls are drafts and summaries, and the SDK reports a spent
+    // ceiling by throwing. Killing the user's turn over a commit message
+    // that ran one round long is never the right trade — callers already
+    // treat empty text as "no draft".
+    if (!isTurnLimitError(error)) throw error;
   }
   return text;
 }

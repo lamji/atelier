@@ -52,6 +52,7 @@ copyDir(path.join(repoRoot, "apps", "web", "dist"), webOut);
 
 // 2. Agent bundles — identical esbuild options to apps/cli/src/build.ts.
 console.log("[build-backend] bundling agent (esbuild)");
+fs.rmSync(agentOut, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 fs.mkdirSync(agentOut, { recursive: true });
 const agentPkg = JSON.parse(
   fs.readFileSync(path.join(repoRoot, "apps", "agent", "package.json"), "utf8"),

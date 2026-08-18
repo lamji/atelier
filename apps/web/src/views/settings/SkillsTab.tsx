@@ -113,7 +113,7 @@ function Group({
 }) {
   return (
     <section className="space-y-1.5">
-      <h3 className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+      <h3 className="px-0.5 text-[11px] font-semibold text-muted-foreground/60">
         {title} - {items.length}
       </h3>
       {items.length === 0 ? (

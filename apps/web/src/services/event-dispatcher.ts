@@ -1,15 +1,25 @@
 import type {
   ContextRequestStats,
   ApprovalRequest,
+  LlmRequest,
   DbApprovalRequest,
   Diff,
   EventFrame,
   GitFlowRequest,
+  Plan,
   TerminalSession,
+  TaskInfo,
   UsageSnapshot,
 } from "@atelier/protocol";
 import { bridge } from "./bridge-client.js";
-import { actionDetail, actionLabel } from "@/lib/tool-labels";
+import { actionDetail, actionLabel, actionResult } from "@/lib/tool-labels";
+import { isImagePath } from "@/lib/image-file";
+import { llmRequestDetail, llmRequestSummary } from "@atelier/shared";
+import {
+  FRONTEND_REVIEW_REQUEST_EVENT,
+  frontendReviewRequest,
+  frontendReviewTimelineContext,
+} from "@/lib/frontend-review";
 import { isCliConsoleSession, useCliConsoleStore } from "./cli-console.js";
 import { terminalRegistry } from "./terminal-registry.js";
 import { useConnectionStore } from "@/state/connection.store";
@@ -21,7 +31,12 @@ import { useMarkdownStore } from "@/state/markdown.store";
 import { useProcessConsoleStore } from "@/state/process-console.store";
 import type { ConsoleSource } from "@/state/process-console.store";
 import type { IndexingProgress } from "@/state/knowledge.store";
-import { useSessionsStore } from "@/state/sessions.store";
+import {
+  useSessionsStore,
+  type AgentAction,
+  type ExecutionTimelineVm,
+  type LiveDiff,
+} from "@/state/sessions.store";
 import { useTerminalStore } from "@/state/terminal.store";
 import { useTimelineStore } from "@/state/timeline.store";
 import { useUsageStore } from "@/state/usage.store";
@@ -83,6 +98,195 @@ export async function replayProcessTimeline(taskId: string): Promise<void> {
   } while (cursor !== undefined);
 }
 
+/** Reconstruct one reviewable execution from the persisted SQLite event log. */
+export async function loadExecutionTimeline(
+  task: TaskInfo
+): Promise<ExecutionTimelineVm> {
+  const entries: EventFrame[] = [];
+  let cursor: number | undefined;
+  do {
+    const page = await bridge.rpc("task.getTimeline", {
+      taskId: task.id,
+      cursor,
+      limit: REPLAY_PAGE,
+    });
+    entries.push(...page.entries);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+  const execution = buildExecutionTimeline(task, entries);
+  const review = frontendReviewTimelineContext(task.prompt);
+  if (!review) return execution;
+  const images = review.screenshotPath
+    ? await bridge
+        .rpc("fs.readImage", { path: review.screenshotPath })
+        .then((image) => [image.dataUrl])
+        .catch(() => [])
+    : [];
+  return {
+    ...execution,
+    frontendReview: true,
+    ...(review.displayRequest ? { request: review.displayRequest } : {}),
+    ...(images.length > 0 ? { images } : {}),
+  };
+}
+
+function buildExecutionTimeline(
+  task: TaskInfo,
+  entries: EventFrame[]
+): ExecutionTimelineVm {
+  let plan: Plan | null = null;
+  let activeStepId: string | undefined;
+  let order = 0;
+  const actions: AgentAction[] = [];
+  const diffs: LiveDiff[] = [];
+  const logs: ExecutionTimelineVm["logs"] = [];
+
+  for (const frame of entries) {
+    const payload = (frame.payload ?? {}) as Record<string, unknown>;
+    if (frame.topic === "plan.created") {
+      plan = structuredClone(frame.payload as NonNullable<typeof plan>);
+      activeStepId = activePlanStep(plan);
+      continue;
+    }
+    if (frame.topic === "plan.step.updated" && plan) {
+      const currentPlan: Plan = plan;
+      const stepId = String(payload.stepId);
+      const status = String(payload.status) as (typeof currentPlan.steps)[number]["status"];
+      plan = {
+        ...currentPlan,
+        steps: currentPlan.steps.map((step) =>
+          step.id === stepId
+            ? {
+                ...step,
+                status,
+                note: payload.note ? String(payload.note) : step.note,
+              }
+            : step
+        ),
+      };
+      activeStepId = status === "in-progress" ? stepId : activePlanStep(plan);
+      continue;
+    }
+    if (frame.topic === "tool.started") {
+      const name = String(payload.name);
+      actions.push({
+        id: String(payload.toolCallId),
+        label: actionLabel(name, payload.input),
+        name,
+        detail: actionDetail(name, payload.input),
+        status: "running",
+        stepId: activeStepId,
+        seq: order++,
+      });
+      continue;
+    }
+    if (frame.topic === "tool.output") {
+      const action = actions.find((item) => item.id === String(payload.toolCallId));
+      if (action) action.output = appendReviewOutput(action.output, String(payload.chunk));
+      continue;
+    }
+    if (frame.topic === "tool.completed" || frame.topic === "tool.failed") {
+      const action = actions.find((item) => item.id === String(payload.toolCallId));
+      if (action) {
+        action.status = frame.topic === "tool.failed" ? "failed" : "done";
+        action.error = payload.error ? String(payload.error) : undefined;
+        action.durationMs = numberOrUndefined(payload.durationMs);
+        if (frame.topic === "tool.completed") {
+          action.result = actionResult(action.name, payload.result);
+        }
+      }
+      continue;
+    }
+    if (frame.topic === "diff.created") {
+      const diff = frame.payload as Diff;
+      diffs.push({
+        id: diff.id,
+        path: diff.path,
+        before: diff.before,
+        after: diff.after,
+        stepId: activeStepId ?? lastActionStepId(actions),
+        seq: order++,
+      });
+      continue;
+    }
+    if (frame.topic === "validation.output") {
+      const kind = String(payload.kind);
+      const id = `validation:${kind}:${activeStepId ?? "unassigned"}`;
+      let action = actions.find((item) => item.id === id);
+      if (!action) {
+        action = {
+          id,
+          label: `Validation · ${kind}`,
+          name: `validation.${kind}`,
+          status: "done",
+          stepId: activeStepId,
+          seq: order++,
+        };
+        actions.push(action);
+      }
+      action.output = appendReviewOutput(action.output, String(payload.chunk));
+      continue;
+    }
+    if (PERSISTED_LOG_TOPICS.has(frame.topic)) {
+      const text = logSummary(frame.topic, payload);
+      if (text) {
+        const detail = logDetail(frame.topic, payload);
+        logs.push({
+          id: `${task.id}:${frame.topic}:${frame.seq}:${frame.ts}`,
+          role: "log",
+          text,
+          logTopic: frame.topic,
+          ...(detail ? { logDetail: detail } : {}),
+        });
+      }
+    }
+  }
+
+  return {
+    taskId: task.id,
+    request: task.prompt,
+    report: "",
+    requestedAt: task.startedAt,
+    status: task.status,
+    startedAt: task.startedAt,
+    endedAt: task.endedAt,
+    durationMs: task.endedAt ? task.endedAt - task.startedAt : null,
+    plan,
+    actions,
+    diffs,
+    logs,
+  };
+}
+
+const PERSISTED_LOG_TOPICS = new Set([
+  "knowledge.retrieved",
+  "session.recalled",
+  "working-memory.reused",
+  "scope.escaped",
+  "wiki.recalled",
+  "wiki.updated",
+  "llm.request",
+  "scope.locked",
+  "skills.selected",
+  "impact.radius",
+  "edit.impact",
+]);
+
+function activePlanStep(plan: ExecutionTimelineVm["plan"]): string | undefined {
+  return plan?.steps.find((step) => step.status === "in-progress")?.id;
+}
+
+function lastActionStepId(actions: AgentAction[]): string | undefined {
+  for (let index = actions.length - 1; index >= 0; index -= 1) {
+    if (actions[index]?.stepId) return actions[index]?.stepId;
+  }
+  return undefined;
+}
+
+function appendReviewOutput(current: string | undefined, chunk: string): string {
+  return `${current ?? ""}${chunk}`.slice(-4_000);
+}
+
 let started = false;
 
 /**
@@ -122,6 +326,27 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
     }
     case "session.recalled":
       return sessionRecalledSummary(payload);
+    case "working-memory.reused":
+      return workingMemorySummary(payload);
+    case "wiki.recalled": {
+      const pages = Array.isArray(payload.pages) ? payload.pages : [];
+      const labels = pages.map((page) => {
+        const p = page as { title?: string; moved?: string[] };
+        const moved = Array.isArray(p.moved) ? p.moved.length : 0;
+        return `${String(p.title ?? "")}${moved > 0 ? ` (stale: ${moved} source(s) moved)` : ""}`;
+      });
+      return `Feature wiki: ${labels.join("; ") || "no page"} · ~${Number(payload.tokens ?? 0)} tok`;
+    }
+    case "wiki.updated": {
+      const sections = Array.isArray(payload.changedSections)
+        ? payload.changedSections.map(String)
+        : [];
+      const what = payload.created ? "created" : "updated";
+      const detail = sections.length > 0 ? ` — ${sections.slice(0, 4).join(", ")}` : "";
+      return `Feature wiki ${what}: ${String(payload.title ?? "")} (${String(payload.path ?? "")})${detail}`;
+    }
+    case "scope.escaped":
+      return `Scope lock let ${String(payload.tool ?? "a tool")} through to ${String(payload.path ?? "")}`;
     case "scope.locked":
       return scopeLockedSummary(payload);
     case "skills.selected": {
@@ -145,9 +370,49 @@ function logSummary(topic: string, payload: Record<string, unknown>): string {
       const summary = String(payload.summary ?? "").slice(0, 90);
       return `${symbol} · ${reach} · ${summary}`;
     }
+    case "llm.request":
+      return llmRequestSummary(payload as unknown as LlmRequest);
     default:
       return "";
   }
+}
+
+/**
+ * The expandable body behind a log line. Mirrors the agent's copy in
+ * orchestrator.ts so a live row and its reloaded twin read the same.
+ */
+function logDetail(topic: string, payload: Record<string, unknown>): string {
+  if (topic !== "llm.request") return "";
+  return llmRequestDetail(payload as unknown as LlmRequest);
+}
+
+
+/**
+ * What earlier turns' investigation this turn started from, in one line.
+ * Mirrored in apps/web/src/services/event-dispatcher.ts.
+ */
+function workingMemorySummary(payload: Record<string, unknown>): string {
+  const inlined = Number(payload.inlined ?? 0);
+  const listed = Number(payload.listed ?? 0);
+  const changed = Number(payload.changed ?? 0);
+  const searches = Number(payload.searches ?? 0);
+  const tokens = Number(payload.tokens ?? 0);
+  const paths = Array.isArray(payload.paths)
+    ? payload.paths.map(String).filter(Boolean)
+    : [];
+  const parts: string[] = [];
+  if (inlined > 0) parts.push(`${inlined} file(s) re-used from earlier turns`);
+  if (changed > 0) parts.push(`${changed} changed since`);
+  if (listed > 0) parts.push(`${listed} more remembered by path`);
+  const seeded = Number(payload.seeded ?? 0);
+  if (seeded > 0) parts.push(`${seeded} owner file(s) from the feature wiki`);
+  if (searches > 0) parts.push(`${searches} earlier search(es)`);
+  const head = parts.length > 0 ? parts.join(" · ") : "nothing to reuse";
+  const tail =
+    paths.length > 0
+      ? ` — ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ", …" : ""}`
+      : "";
+  return `Reused gathered context: ${head} · ~${tokens} tok${tail}`;
 }
 
 /**
@@ -251,7 +516,8 @@ function dispatch(frame: EventFrame): void {
         sessions.completeAssistantMessage(
           convId,
           String(payload.messageId),
-          String(payload.text)
+          String(payload.text),
+          frame.taskId
         );
       }
       break;
@@ -307,6 +573,11 @@ function dispatch(frame: EventFrame): void {
       // had no consumer here, so the output was crossing the wire and being
       // dropped. The console pane is what reads it.
       if (convId) {
+        sessions.actionOutput(
+          convId,
+          String(payload.toolCallId),
+          String(payload.chunk)
+        );
         processConsole.append(convId, "shell", String(payload.chunk));
       }
       break;
@@ -326,7 +597,8 @@ function dispatch(frame: EventFrame): void {
           String(payload.toolCallId),
           "done",
           undefined,
-          numberOrUndefined(payload.durationMs)
+          numberOrUndefined(payload.durationMs),
+          actionResult(String(payload.name), payload.result)
         );
       }
       break;
@@ -354,11 +626,17 @@ function dispatch(frame: EventFrame): void {
     case "task.completed":
       if (convId) {
         sessions.taskEnded(convId, "completed", undefined, frame.taskId);
+        if (frame.taskId) {
+          void refreshFinishedExecution(convId, frame.taskId).catch(() => undefined);
+        }
       }
       break;
     case "task.cancelled":
       if (convId) {
         sessions.taskEnded(convId, "cancelled", undefined, frame.taskId);
+        if (frame.taskId) {
+          void refreshFinishedExecution(convId, frame.taskId).catch(() => undefined);
+        }
       }
       break;
     case "task.error":
@@ -369,6 +647,9 @@ function dispatch(frame: EventFrame): void {
           String(payload.message),
           frame.taskId
         );
+        if (frame.taskId) {
+          void refreshFinishedExecution(convId, frame.taskId).catch(() => undefined);
+        }
       }
       break;
     case "diff.created": {
@@ -418,6 +699,9 @@ function dispatch(frame: EventFrame): void {
         branch: String(payload.branch),
         isClean: Boolean(payload.isClean),
         changedFiles: Number(payload.changedFiles ?? 0),
+        conflicts: Number(payload.conflicts ?? 0),
+        mergeKind:
+          typeof payload.mergeKind === "string" ? payload.mergeKind : null,
       });
       useGitStore.getState().bumpStateVersion();
       break;
@@ -484,10 +768,15 @@ function dispatch(frame: EventFrame): void {
     }
     case "knowledge.retrieved":
     case "session.recalled":
+    case "working-memory.reused":
+    case "scope.escaped":
+    case "wiki.recalled":
+    case "wiki.updated":
     case "scope.locked":
     case "skills.selected":
     case "impact.radius":
     case "edit.impact":
+    case "llm.request":
       // Pinned into the chat transcript (in addition to the activity feed
       // and the Timeline cards) so the reasoning behind a change stays
       // visible after the task finishes scrolling past it.
@@ -496,9 +785,13 @@ function dispatch(frame: EventFrame): void {
           convId,
           `${frame.topic}:${frame.seq}`,
           frame.topic,
-          logSummary(frame.topic, payload)
+          logSummary(frame.topic, payload),
+          logDetail(frame.topic, payload) || undefined
         );
       }
+      // A compiled page is knowledge too: the panel's wiki list refetches
+      // on the same version bump the features and lessons use.
+      if (frame.topic === "wiki.updated") scheduleKnowledgeRefetch(true);
       break;
     case "plan.created":
       if (convId) {
@@ -527,8 +820,13 @@ function dispatch(frame: EventFrame): void {
       ) {
         ws.clearSelected();
       } else if (ws.selectedPath === changedPath) {
-        void bridge
-          .rpc("fs.readFile", { path: changedPath })
+        const refreshed = isImagePath(changedPath)
+          ? bridge.rpc("fs.readImage", { path: changedPath }).then((image) => ({
+              content: image.dataUrl,
+              mtime: image.mtime,
+            }))
+          : bridge.rpc("fs.readFile", { path: changedPath });
+        void refreshed
           .then((file) =>
             useWorkspaceStore
               .getState()
@@ -558,5 +856,49 @@ function dispatch(frame: EventFrame): void {
       conversationId: convId,
       payload: frame.payload,
     });
+  }
+}
+
+const offeredFrontendReviews = new Set<string>();
+
+async function refreshFinishedExecution(
+  conversationId: string,
+  taskId: string
+): Promise<void> {
+  const [{ tasks }, { messages }] = await Promise.all([
+    bridge.rpc("task.list", { conversationId }),
+    bridge.rpc("session.getMessages", { conversationId }),
+  ]);
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) return;
+  const execution = await loadExecutionTimeline(task);
+  const request = messages.find(
+    (message) => message.taskId === taskId && message.role === "user"
+  );
+  const report = [...messages]
+    .reverse()
+    .find((message) => message.taskId === taskId && message.role === "assistant");
+  const restored: ExecutionTimelineVm = {
+    ...execution,
+    request: execution.frontendReview
+      ? execution.request
+      : request?.text ?? execution.request,
+    report: report?.text ?? execution.report,
+    requestedAt: request?.createdAt ?? execution.requestedAt,
+  };
+  const store = useSessionsStore.getState();
+  const existing = store.sessions[conversationId]?.executions ?? [];
+  store.setExecutions(conversationId, [
+    ...existing.filter((item) => item.taskId !== taskId),
+    restored,
+  ]);
+  const reviewRequest = frontendReviewRequest(conversationId, restored);
+  if (reviewRequest && !offeredFrontendReviews.has(taskId)) {
+    offeredFrontendReviews.add(taskId);
+    window.dispatchEvent(
+      new CustomEvent(FRONTEND_REVIEW_REQUEST_EVENT, {
+        detail: reviewRequest,
+      })
+    );
   }
 }

@@ -24,18 +24,9 @@ import {
   type ModelChoice,
 } from "@/state/preferences.store";
 import { useMentionBrowser, type MentionBrowser } from "./useMentionBrowser";
+import type { PendingImage } from "@/types";
 
-export type { EffortChoice, ModelChoice };
-
-/** An image staged in the composer (screenshot paste / drop / file pick). */
-export interface PendingImage {
-  id: string;
-  mediaType: string;
-  /** Base64 payload sent to the agent (no data: prefix). */
-  data: string;
-  /** Full data URL for the composer/message thumbnail. */
-  dataUrl: string;
-}
+export type { EffortChoice, ModelChoice, PendingImage };
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -235,6 +226,7 @@ export interface ComposerViewModel {
   /** Currently selected file in the explorer, used by the attach button. */
   attachCandidate: string | null;
   images: PendingImage[];
+  addImage: (image: PendingImage) => void;
   addImages: (files: File[] | FileList) => void;
   removeImage: (id: string) => void;
   slashCommands: SlashCommand[];
@@ -412,12 +404,24 @@ export function useComposerViewModel(): ComposerViewModel {
         body = composePromptFilePrompt(clipPromptFile(content), text, note);
       }
 
-      const prompt =
+      const previewUrls = Array.from(
+        new Set(
+          images.flatMap((image) => (image.sourceUrl ? [image.sourceUrl] : []))
+        )
+      );
+      const prompt = [
+        body || (images.length > 0 ? "(see attached image)" : ""),
         attachments.length > 0
-          ? `${body}\n\nAttached files:\n${attachments
-              .map((p) => `- ${p}`)
+          ? `Attached files:\n${attachments.map((path) => `- ${path}`).join("\n")}`
+          : "",
+        previewUrls.length > 0
+          ? `Screenshot context:\n${previewUrls
+              .map((url) => `- Current page preview URL: ${url}`)
               .join("\n")}`
-          : body || "(see attached image)";
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       const prefs = usePreferencesStore.getState();
       const pick = { ...prefs.defaults, ...prefs.byChat[id] };
       let taskImages = images;
@@ -555,6 +559,21 @@ export function useComposerViewModel(): ComposerViewModel {
     }
   }, []);
 
+  /** Stage an already-decoded image, such as a captured preview screenshot. */
+  const addImage = useCallback((image: PendingImage) => {
+    setImages((prev) => (prev.some((item) => item.id === image.id) ? prev : [...prev, image]));
+    setError(null);
+  }, []);
+
+  useEffect(() => {
+    const onScreenshot = (event: Event) => {
+      const image = (event as CustomEvent<PendingImage>).detail;
+      if (image?.dataUrl) addImage(image);
+    };
+    window.addEventListener("atelier:screenshot-captured", onScreenshot);
+    return () => window.removeEventListener("atelier:screenshot-captured", onScreenshot);
+  }, [addImage]);
+
   /** Stage image Files (from picker, paste, or drop); rejects report why. */
   const addImages = useCallback((files: File[] | FileList) => {
     void Promise.all(Array.from(files).map(readImage)).then((results) => {
@@ -660,6 +679,7 @@ export function useComposerViewModel(): ComposerViewModel {
     removeAttachment,
     attachCandidate,
     images,
+    addImage,
     addImages,
     removeImage,
     slashCommands,

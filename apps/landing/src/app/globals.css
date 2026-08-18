@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+:root {
+  --background: #edf0ff;
+  --foreground: #17191f;
+  --card: #ffffff;
+  --card-foreground: #17191f;
+  --muted: #eef2f3;
+  --muted-foreground: #647074;
+  --primary: #1f3f46;
+  --primary-foreground: #ffffff;
+  --accent: #ff8a3d;
+  --border: rgba(34, 66, 72, 0.14);
+  --ring: #2f747e;
+  --editor: #151b20;
+  --editor-raised: #1d252b;
+  --editor-line: rgba(255, 255, 255, 0.1);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --color-editor: var(--editor);
+  --color-editor-raised: var(--editor-raised);
+  --color-editor-line: var(--editor-line);
+  --font-sans: var(--font-inter), "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0)),
+    var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  text-rendering: geometricPrecision;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+a[href],
+summary {
+  cursor: pointer;
+}
+
+::selection {
+  background: rgba(255, 138, 61, 0.28);
+}
+
+.hero-shell {
+  min-height: 92svh;
+  background-image:
+    linear-gradient(90deg, rgba(238, 240, 255, 0.98) 0%, rgba(238, 240, 255, 0.78) 40%, rgba(238, 240, 255, 0.22) 72%),
+    url("/images/atelier-hero.png");
+  background-position: center;
+  background-size: cover;
+}
+
+.section-wrap {
+  margin-inline: auto;
+  width: min(1180px, calc(100% - 32px));
+}
+
+.marquee-track {
+  animation: marquee 22s linear infinite;
+}
+
+.font-mono {
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .hero-shell {
+    min-height: auto;
+    background-image:
+      linear-gradient(180deg, rgba(238, 240, 255, 0.98) 0%, rgba(238, 240, 255, 0.88) 54%, rgba(238, 240, 255, 0.46) 100%),
+      url("/images/atelier-hero.png");
+    background-position: 58% top;
+  }
+}

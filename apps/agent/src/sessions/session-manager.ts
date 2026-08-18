@@ -82,6 +82,7 @@ export function registerSessionHandlers(
         orchestrator.cancelTask(task.id);
       }
     }
+    orchestrator.removePlanCheckpoints(conversationId);
     return { deleted: conversations.remove(conversationId) };
   });
 
@@ -157,7 +158,10 @@ export function registerSessionHandlers(
   }));
 
   router.register("task.list", (params) => {
-    const tasks = conversations.listTasks(params?.activeOnly);
+    const tasks = conversations.listTasks(
+      params?.activeOnly,
+      params?.conversationId
+    );
     if (!params?.activeOnly) return { tasks };
     // "Active" must mean live in the orchestrator, not just a "running" DB
     // row: if the agent restarted mid-task the row stays "running" forever.

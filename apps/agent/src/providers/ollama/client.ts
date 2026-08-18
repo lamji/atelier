@@ -21,7 +21,7 @@ import {
   setModelSubscriptionRequired,
 } from "../credentials.js";
 import type { OllamaTarget } from "../model-routing.js";
-import { recordUsage } from "./usage.js";
+import { recordCloudUsage } from "./usage.js";
 
 const DEFAULT_HOST = "http://127.0.0.1:11434";
 const CLOUD_HOST = "https://ollama.com";
@@ -256,8 +256,9 @@ function numCtxCap(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : MAX_NUM_CTX;
 }
 
-/** Thinking capability per endpoint+model, filled by the same /api/show. */
+/** Model capabilities per endpoint+model, filled by the same /api/show. */
 const thinkingSupport = new Map<string, boolean>();
+const visionSupport = new Map<string, boolean>();
 
 /**
  * Whether the model advertises the "thinking" capability — i.e. it is a
@@ -272,9 +273,21 @@ export async function supportsThinking(
   const key = `${target}:${model}`;
   const cached = thinkingSupport.get(key);
   if (cached !== undefined) return cached;
-  // Populates both caches on the way through.
+  // Populates every capability cache on the way through.
   await modelContextLength(model, target);
   return thinkingSupport.get(key) ?? false;
+}
+
+/** Whether the model advertises Ollama's image-input capability. */
+export async function supportsVision(
+  model: string,
+  target: OllamaTarget = "ollama-cloud"
+): Promise<boolean> {
+  const key = `${target}:${model}`;
+  const cached = visionSupport.get(key);
+  if (cached !== undefined) return cached;
+  await modelContextLength(model, target);
+  return visionSupport.get(key) ?? false;
 }
 
 /**
@@ -307,6 +320,7 @@ async function modelContextLength(
       `${target}:${model}`,
       capabilities.includes("thinking")
     );
+    visionSupport.set(`${target}:${model}`, capabilities.includes("vision"));
     const info = body.model_info ?? {};
     for (const [key, value] of Object.entries(info)) {
       if (!key.endsWith("context_length")) continue;
@@ -402,17 +416,20 @@ export async function ollamaChat(opts: OllamaChatOptions): Promise<string> {
     setModelSubscriptionRequired(target, opts.model, false);
   }
 
-  // Ollama has no usage endpoint, so the per-response counters are the only
-  // measure of what we spend. Metering must never break a completion.
-  try {
-    recordUsage({
-      prompt_eval_count: body.prompt_eval_count,
-      eval_count: body.eval_count,
-      total_duration: body.total_duration,
-      createdAt: Date.now(),
-    });
-  } catch {
-    // metering is best-effort
+  // Ollama Cloud has no usage endpoint, so its response counters are the
+  // only activity measure available to Atelier. Local daemon calls are
+  // intentionally excluded: this section is Cloud-only.
+  if (target === OLLAMA_CLOUD) {
+    try {
+      recordCloudUsage({
+        prompt_eval_count: body.prompt_eval_count,
+        eval_count: body.eval_count,
+        total_duration: body.total_duration,
+        createdAt: Date.now(),
+      });
+    } catch {
+      // metering is best-effort
+    }
   }
 
   return body.message?.content ?? "";

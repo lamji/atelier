@@ -5,6 +5,10 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openExternal } from "@/lib/desktop";
 import { retintDarkSurfaces, TuiSurfaceFilter } from "@/lib/tui-surface";
+import {
+  terminalProfile,
+  type TerminalProfileId,
+} from "@/services/terminal-appearance";
 import { bridge } from "./bridge-client.js";
 
 interface Entry {
@@ -31,6 +35,8 @@ interface Entry {
    * its bytes exactly as the program wrote them.
    */
   surfaces: TuiSurfaceFilter | null;
+  /** Non-null only for the floating modal terminal. */
+  profile: TerminalProfileId | null;
 }
 
 export interface TerminalMountOptions {
@@ -40,6 +46,8 @@ export interface TerminalMountOptions {
    * only ever a no-op in dark theme.
    */
   retintDarkSurfaces?: boolean;
+  /** Linux-style palette for the floating modal terminal only. */
+  profile?: TerminalProfileId;
 }
 
 /**
@@ -137,26 +145,8 @@ class TerminalRegistry {
     };
   }
 
-  themeFor(dark: boolean) {
-    // cursor = the block colour, cursorAccent = the glyph UNDER the block.
-    // Without a solid accent the character vanishes on a transparent bg,
-    // which read as an "invisible white cursor".
-    // Background is fully transparent (alpha 0) so the terminal sits on
-    // whichever surface hosts it — the bottom dock's panel or the CLI pane's
-    // editor surface — without knowing which. The RGB channels are 0,0,0 in
-    // BOTH themes, though, which matters for one thing besides the pixels:
-    // xterm answers a program's "what's your background?" query (OSC 11)
-    // with this exact value. A CLI that asks — Codex and Claude Code both
-    // do, to pick a light/dark palette for their own UI — was always told
-    // "black", in light theme too, and drew itself dark regardless. See
-    // effectiveBackgroundRgb(), which intercepts that one query and answers
-    // with the surface's REAL colour instead of this placeholder.
-    //
-    // That is the whole fix wherever the query survives the trip. On Windows
-    // it does not: a ConPTY re-emits what it understood of its program's
-    // output, and an OSC colour query is not on that list, so it is dropped
-    // before xterm ever sees it and there is nothing here to answer. See
-    // TuiSurfaceFilter for what has to happen instead.
+  themeFor(dark: boolean, profile: TerminalProfileId | null = null) {
+    if (profile) return terminalProfile(profile).theme;
     return dark
       ? {
           background: "#00000000",
@@ -195,7 +185,7 @@ class TerminalRegistry {
         fontSize: 12.5,
         cursorBlink: true,
         allowTransparency: true,
-        theme: this.themeFor(dark),
+        theme: this.themeFor(dark, options.profile ?? null),
         scrollback: 5000,
         // Typing must always bring the prompt back into view, however far
         // back the user had scrolled to read.
@@ -245,6 +235,7 @@ class TerminalRegistry {
         detach: null,
         lastCtrlC: 0,
         surfaces: options.retintDarkSurfaces ? new TuiSurfaceFilter() : null,
+        profile: options.profile ?? null,
       };
       this.entries.set(termId, entry);
       term.attachCustomKeyEventHandler((event) =>
@@ -267,6 +258,8 @@ class TerminalRegistry {
     // A CLI pane is unmounted when CLI mode is switched off, so its
     // replacement is a different node even though the terminal is still live.
     if (entry.element !== container) {
+      entry.profile = options.profile ?? null;
+      entry.term.options.theme = this.themeFor(dark, entry.profile);
       if (entry.term.element) container.appendChild(entry.term.element);
       else entry.term.open(container);
       entry.element = container;
@@ -359,7 +352,7 @@ class TerminalRegistry {
     const changed = this.dark !== dark;
     this.dark = dark;
     for (const entry of this.entries.values()) {
-      entry.term.options.theme = this.themeFor(dark);
+      entry.term.options.theme = this.themeFor(dark, entry.profile);
     }
     if (!changed) return;
     // Re-tinting only touches bytes on their way in, so a TUI's already
@@ -368,6 +361,15 @@ class TerminalRegistry {
     // terminal gets when its window changes.
     for (const [termId, entry] of this.entries) {
       if (entry.surfaces) this.nudgeRedraw(termId);
+    }
+  }
+
+  setProfile(profile: TerminalProfileId): void {
+    for (const entry of this.entries.values()) {
+      if (!entry.profile) continue;
+      entry.profile = profile;
+      entry.term.options.theme = this.themeFor(this.dark, profile);
+      entry.term.refresh(0, entry.term.rows - 1);
     }
   }
 

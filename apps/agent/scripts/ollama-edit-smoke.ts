@@ -228,12 +228,40 @@ async function main(): Promise<void> {
     signal: new AbortController().signal,
   };
 
+  const missingOldString = await runCall(
+    "replace_code",
+    { path: rel, newString: "replacement" },
+    deps
+  );
+  check(
+    "replace_code rejects a missing oldString before execution",
+    missingOldString.includes("missing required string field(s): oldString"),
+    missingOldString
+  );
+  const malformedBatch = await runCall(
+    "replace_many",
+    {
+      edits: [
+        { path: rel, oldString: "Send", newString: "Post" },
+        { path: rel, newString: "Publish" },
+      ],
+    },
+    deps
+  );
+  check(
+    "replace_many rejects a malformed entry before partial execution",
+    malformedBatch.includes("edits[1]") &&
+      malformedBatch.includes("oldString"),
+    malformedBatch
+  );
+
   // Ollama's live loop supplies this per-turn ledger. A stale RAG chunk may
   // name a plausible file, but it cannot authorize a write by itself.
   const grounding: EditGrounding = {
     required: true,
     discovered: false,
     readPaths: new Set(),
+    readCalls: new Set(),
   };
   const groundedDeps = { ...deps, grounding };
   const allToolSchemas = atelierToolsFor(undefined);
@@ -254,25 +282,31 @@ async function main(): Promise<void> {
     blind.includes("blind edit blocked") && blind.includes("Locate the live owner"),
     blind.split("\n")[0]
   );
-  await runCall(
-    "search_text",
-    { query: "function Composer", glob: "src/**/*.tsx" },
-    groundedDeps
+  const firstRead = await runCall("read_file", { path: rel }, groundedDeps);
+  check(
+    "a successful direct read counts as live discovery",
+    grounding.discovered && grounding.readPaths.has(rel)
   );
-  const unread = await runCall(
-    "replace_code",
-    { path: rel, oldString: "        Send\n", newString: "        Post\n" },
+  check(
+    "the live read tells Ollama to move into editing",
+    firstRead.includes("Grounding complete") &&
+      firstRead.includes("make the requested edit now"),
+    firstRead.slice(-120)
+  );
+  const repeatedRead = await runCall(
+    "read_file",
+    { path: rel },
     groundedDeps
   );
   check(
-    "discovery alone cannot authorize an unread target",
-    unread.includes("Read the current target"),
-    unread.split("\n")[0]
+    "an exact unchanged re-read is stopped before another tool run",
+    repeatedRead.includes("already succeeded") &&
+      repeatedRead.includes("Use replace_code or replace_many now"),
+    repeatedRead
   );
-  await runCall("read_file", { path: rel }, groundedDeps);
   const visibleAfterGrounding = groundedToolsFor(allToolSchemas, grounding);
   check(
-    "edit tools appear only after live discovery and a successful read",
+    "an anchored target read reveals edit tools without a redundant search",
     JSON.stringify(visibleAfterGrounding).includes('"name":"replace_code"')
   );
   const grounded = await runCall(
@@ -281,10 +315,34 @@ async function main(): Promise<void> {
     groundedDeps
   );
   check(
-    "discovery plus a current target read authorizes the edit",
+    "a current target read authorizes the edit",
     !grounded.includes("blind edit blocked") &&
       (await files.readFile(rel)).content.includes("        Post"),
     grounded.slice(0, 60)
+  );
+  const verificationRead = await runCall(
+    "read_file",
+    { path: rel },
+    groundedDeps
+  );
+  check(
+    "the same read is allowed again after an edit for verification",
+    !verificationRead.includes("already succeeded") &&
+      verificationRead.includes("Post"),
+    verificationRead.slice(0, 80)
+  );
+  const unreadRel = "src/unread.tsx";
+  await fs.writeFile(path.join(root, unreadRel), SOURCE, "utf8");
+  const unread = await runCall(
+    "replace_code",
+    { path: unreadRel, oldString: "        Send\n", newString: "        Post\n" },
+    groundedDeps
+  );
+  check(
+    "a grounded turn still blocks an unread target",
+    unread.includes("Read the current target") &&
+      (await files.readFile(unreadRel)).content.includes("        Send"),
+    unread.split("\n")[0]
   );
   const batchRel = "src/batch.tsx";
   await fs.writeFile(path.join(root, batchRel), SOURCE, "utf8");
