@@ -1,6 +1,6 @@
 {
   "name": "@atelier/desktop",
-  "version": "1.0.13",
+  "version": "1.0.0",
   "private": true,
   "description": "Atelier desktop shell (Electron). Hosts the existing web renderer and backend unchanged.",
   "main": "dist/main.cjs",
@@ -11,6 +11,7 @@
     "build:backend": "node scripts/build-backend.mjs",
     "build:icon": "node scripts/build-icon.mjs",
     "dist": "node scripts/bundle.mjs && node scripts/build-backend.mjs && node scripts/build-icon.mjs && electron-builder --config electron-builder.yml",
+    "dist:publish": "node scripts/bundle.mjs && node scripts/build-backend.mjs && node scripts/build-icon.mjs && electron-builder --config electron-builder.yml --publish always",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
