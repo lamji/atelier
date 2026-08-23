@@ -20,8 +20,16 @@ import {
   harnessPrompt,
   loopHarnessLimits,
   reportsHardBlocker,
+  reportsNoChangeNeeded,
 } from "../src/orchestrator/loop-harness.js";
-import { canRunNudge } from "../src/orchestrator/pipeline-executor.js";
+import {
+  canRunNudge,
+  completionGatePrompt,
+  completionStopHookDecision,
+  looksInformational,
+  StreamStallWatch,
+} from "../src/orchestrator/pipeline-executor.js";
+import { streamStallLimits } from "../src/orchestrator/loop-harness.js";
 
 let failures = 0;
 function check(ok: boolean, label: string): void {
@@ -160,8 +168,126 @@ function harness(): void {
   );
 }
 
+/**
+ * The gate's declared exits. Both were unreachable: the Stop hook erased
+ * the report carrying them, so a turn with nothing left to do could only
+ * end by spending its stall budget and warning the user it might be
+ * unfinished.
+ */
+function honestExits(): void {
+  const open = completionGatePrompt([], false, true, false);
+  check(
+    open.includes("NO CHANGE NEEDED:"),
+    "the no-edit gate item names the exit that closes it"
+  );
+  check(
+    reportsNoChangeNeeded(
+      "read it all.\n\nNO CHANGE NEEDED: the user pasted a curl result"
+    ) &&
+      reportsNoChangeNeeded("**NO CHANGE NEEDED:** already correct") &&
+      !reportsNoChangeNeeded("no change needed to the schema, but the route needs one"),
+    "NO CHANGE NEEDED: is recognised only as a line"
+  );
+  check(
+    completionStopHookDecision(open, false).decision === "block",
+    "an ordinary report is still refused while the gate is open"
+  );
+  check(
+    completionStopHookDecision(open, false, "NO CHANGE NEEDED: nothing to do").decision ===
+      undefined &&
+      completionStopHookDecision(open, false, "BLOCKED: needs your approval").decision ===
+        undefined,
+    "a declared exit ends the turn instead of erasing the report"
+  );
+  check(
+    completionStopHookDecision("", false).decision === undefined,
+    "a closed gate accepts anything"
+  );
+}
+
+/** Turns that only tell Atelier something must not owe it an edit. */
+function informational(): void {
+  const stated = [
+    "i will prove you wrong curl --url https://dev.spndx.ai/api/v1/auth/login",
+    "that was the dev environment",
+    "fyi the refresh token already expired",
+    "here's what the endpoint returns: {\"error\":\"Not Found\"}",
+    "i just ran it and it returned 404",
+  ];
+  for (const prompt of stated) {
+    check(looksInformational(prompt), `informational: ${prompt.slice(0, 40)}`);
+  }
+  const work = [
+    "i just ran it and it 404s, fix the route",
+    "that was the dev url — update the base path",
+    "add a superadmin login route",
+    "can you center the login?",
+  ];
+  for (const prompt of work) {
+    check(!looksInformational(prompt), `still work: ${prompt.slice(0, 40)}`);
+  }
+}
+
+/**
+ * The silence watchdog. Nothing else on the stream path can see a stall:
+ * every other bound needs a message to arrive.
+ */
+async function stallWatch(): Promise<void> {
+  check(
+    streamStallLimits({} as NodeJS.ProcessEnv).warnMs === 180_000 &&
+      streamStallLimits({ ATELIER_STREAM_WARN_MS: "20" } as NodeJS.ProcessEnv)
+        .warnMs === 20 &&
+      streamStallLimits({ ATELIER_STREAM_ABORT_MS: "0" } as NodeJS.ProcessEnv)
+        .abortMs === Infinity,
+    "stall limits default, override, and switch off"
+  );
+
+  const said: string[] = [];
+  let aborted = 0;
+  const watch = new StreamStallWatch(
+    (detail) => said.push(detail),
+    () => {
+      aborted += 1;
+    },
+    { warnMs: 20, abortMs: 40 }
+  );
+  const wait = (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  // A chatty stream never trips it: each beat re-arms from now.
+  for (let i = 0; i < 5; i += 1) {
+    await wait(10);
+    watch.beat();
+  }
+  check(said.length === 0 && aborted === 0, "a beating stream never trips");
+
+  await wait(30);
+  check(
+    said.length === 1 && (said[0] ?? "").startsWith("no provider output for"),
+    "silence past the warning is reported instead of shown as progress"
+  );
+  check(!watch.abandoned && aborted === 0, "a warning alone does not cut the turn");
+
+  // Speaking again clears the warning rather than leaving it on screen.
+  watch.beat();
+  check(said[said.length - 1] === "working", "output after a warning clears it");
+
+  await wait(70);
+  check(
+    watch.abandoned &&
+      aborted === 1 &&
+      watch.note().includes("stopped responding") &&
+      (said[said.length - 1] ?? "").includes("abandoned"),
+    "sustained silence aborts, and says so before the cancel path takes over"
+  );
+  watch.stop();
+}
+
 scopeGuard();
 harness();
+honestExits();
+informational();
+await stallWatch();
 if (failures > 0) {
   console.error(`${failures} check(s) failed`);
   process.exit(1);

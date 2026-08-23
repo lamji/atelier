@@ -12,6 +12,10 @@ import { useWorkspaceStore } from "@/state/workspace.store";
 /** A burst of agent writes should cost one tree read, not one per file. */
 const TREE_REFETCH_DEBOUNCE_MS = 400;
 
+/** Re-reads of a tree that failed, and how long before the first one. */
+const TREE_RETRIES = 3;
+const TREE_RETRY_MS = 800;
+
 /** An in-progress "New File" / "New Folder" row, shown inside `parent`. */
 export interface ExplorerDraft {
   parent: string;
@@ -57,25 +61,54 @@ export function useFileExplorerViewModel() {
   const [error, setError] = useState<string | null>(null);
   /** The path the delete confirmation is asking about. */
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  /** Why the tree could not be read, or null while it is fine. */
+  const [treeError, setTreeError] = useState<string | null>(null);
 
-  // Debounced by construction: a new treeVersion re-runs the effect, whose
-  // cleanup cancels the pending read, so only the last one in a burst fires.
+  /*
+   * Debounced by construction: a new treeVersion re-runs the effect, whose
+   * cleanup cancels the pending read, so only the last one in a burst fires.
+   *
+   * The read RETRIES, and a failure is reported. It used to swallow every
+   * error and never ask again — so one failed call (an agent that died
+   * mid-boot, a workspace switch that raced the port) left the panel saying
+   * "Waiting for workspace…" for the rest of the session, with nothing on
+   * screen to say what had gone wrong or anything the user could press.
+   *
+   * `epoch` is in the deps for the same reason: a project switch resets
+   * treeVersion to 0, so switching from a workspace that had never seen a
+   * file event changed neither dependency and the tree was never re-read.
+   */
   useEffect(() => {
     if (!connected) return;
     let cancelled = false;
-    const timer = setTimeout(() => {
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const load = (): void => {
       void bridge
         .rpc("fs.tree", { depth: 6 })
         .then(({ root }) => {
-          if (!cancelled) useWorkspaceStore.getState().setTree(root);
+          if (cancelled) return;
+          setTreeError(null);
+          useWorkspaceStore.getState().setTree(root);
         })
-        .catch(() => undefined);
-    }, treeVersion === 0 ? 0 : TREE_REFETCH_DEBOUNCE_MS);
+        .catch((cause: unknown) => {
+          if (cancelled) return;
+          setTreeError(
+            cause instanceof Error ? cause.message : String(cause)
+          );
+          if (attempt >= TREE_RETRIES) return;
+          attempt += 1;
+          timer = setTimeout(load, TREE_RETRY_MS * attempt);
+        });
+    };
+
+    timer = setTimeout(load, treeVersion === 0 ? 0 : TREE_REFETCH_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [connected, treeVersion]);
+  }, [connected, treeVersion, epoch]);
 
   // A different project must not inherit the old one's pending rename or a
   // clipboard entry pointing at a path that no longer exists.
@@ -318,6 +351,7 @@ export function useFileExplorerViewModel() {
       renaming,
       clipboard,
       error,
+      treeError,
       pendingDelete,
       openFile,
       toggleDir,
@@ -349,6 +383,7 @@ export function useFileExplorerViewModel() {
       renaming,
       clipboard,
       error,
+      treeError,
       pendingDelete,
       openFile,
       toggleDir,

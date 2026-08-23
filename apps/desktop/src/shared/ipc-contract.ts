@@ -17,6 +17,10 @@ export const IPC_CHANNELS = {
   projectsAttach: "atelier:projects:attach",
   /** main -> preload; carries the MessagePort for an attach() call. */
   workspacePort: "atelier:workspace-port",
+  /** renderer -> main; resolves the loopback URL used for desktop OAuth. */
+  oauthCallbackUrl: "atelier:auth:callback-url",
+  /** main -> preload; carries a validated Supabase OAuth callback. */
+  oauthCallback: "atelier:auth:callback",
   // desktop chrome
   pickFolder: "atelier:pick-folder",
   captureRegion: "atelier:capture-region",
@@ -28,6 +32,15 @@ export const IPC_CHANNELS = {
   windowClose: "atelier:window:close",
   windowIsMaximized: "atelier:window:is-maximized",
   windowIsKiosk: "atelier:window:is-kiosk",
+  // updates
+  updatesCheck: "atelier:updates:check",
+  updatesDownload: "atelier:updates:download",
+  /** Download + verify + launch the installer, without leaving the app. */
+  updatesInstall: "atelier:updates:install",
+  /** main -> renderer, while that runs. */
+  updatesProgress: "atelier:updates:progress",
+  updatesChangelog: "atelier:updates:changelog",
+  updatesAcknowledge: "atelier:updates:acknowledge",
   windowMaximizedChanged: "atelier:window:maximized-changed",
   windowKioskChanged: "atelier:window:kiosk-changed",
 } as const;
@@ -46,6 +59,13 @@ export interface DesktopProjectInfo {
   working: boolean;
   lastOpenedAt?: number;
   error?: string;
+}
+
+export interface DesktopAuthApi {
+  /** Starts the loopback listener and returns its Supabase redirect URL. */
+  callbackUrl(): Promise<string>;
+  /** Receives a validated OAuth callback after browser sign-in. */
+  onCallback(cb: (url: string) => void): () => void;
 }
 
 export interface DesktopProjectsApi {
@@ -93,10 +113,53 @@ export interface DesktopCaptureResult {
   frameUrl: string | null;
 }
 
+/** What a release check found. */
+export interface DesktopUpdateStatus {
+  current: string;
+  latest: string | null;
+  available: boolean;
+  url: string | null;
+  downloadUrl: string | null;
+  notes: string | null;
+  error?: string;
+}
+
+/** Release notes shown once, on the first launch after an upgrade. */
+export interface DesktopChangelogEntry {
+  version: string;
+  notes: string | null;
+  url: string | null;
+}
+
+/** Progress of an in-app update. */
+export interface DesktopUpdateProgress {
+  phase: "downloading" | "verifying" | "launching" | "error";
+  percent: number | null;
+  receivedBytes?: number;
+  totalBytes?: number;
+  message?: string;
+}
+
+export interface DesktopUpdatesApi {
+  /** `force` skips the cache — for a Check now button. */
+  check(force?: boolean): Promise<DesktopUpdateStatus>;
+  /** Opens the installer download (or the release page) in the browser. */
+  download(): Promise<void>;
+  /** Downloads and runs the installer in place; the app quits to let it. */
+  install(): Promise<void>;
+  /** Progress for install(); returns an unsubscribe. */
+  onProgress(cb: (progress: DesktopUpdateProgress) => void): () => void;
+  /** The changelog to show once, or null when there is nothing new. */
+  changelog(): Promise<DesktopChangelogEntry | null>;
+  acknowledge(version: string): Promise<void>;
+}
+
 export interface AtelierDesktopApi {
   platform: "win32" | "darwin" | "linux";
   version: string;
+  auth: DesktopAuthApi;
   projects: DesktopProjectsApi;
+  updates: DesktopUpdatesApi;
   /** Native directory picker; resolves null when cancelled. */
   pickFolder(): Promise<string | null>;
   /** Captures a renderer-relative rectangle and its live preview route. */

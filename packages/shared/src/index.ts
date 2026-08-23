@@ -8,3 +8,4 @@ export * from "./prompt-file.js";
 export * from "./glob.js";
 export * from "./tokens/index.js";
 export * from "./llm-request-text.js";
+export * from "./terminal-prompt.js";

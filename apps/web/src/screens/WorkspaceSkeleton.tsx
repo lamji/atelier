@@ -1,6 +1,5 @@
 import { BrandMark } from "@/components/BrandMark";
 import { BareTitleBar } from "@/views/shell/WindowControls";
-import { cn } from "@/lib/cn";
 
 /**
  * The workbench, before it has anything to put in it.
@@ -42,23 +41,34 @@ export function WorkspaceSkeleton() {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-[var(--shell-gap)] px-[var(--shell-gap)] pb-[var(--shell-gap)]">
-        <div className="island w-[clamp(210px,22%,20rem)] shrink-0">
-          <div
-            className="flex items-center px-4"
-            style={{ height: "var(--panel-header-h)" }}
-          >
-            <span className="h-2.5 w-20 rounded-full bg-muted-foreground/20" />
-          </div>
-          <div className="space-y-3 px-4 pb-4">
-            {[92, 76, 84, 64, 88].map((width, index) => (
-              <span
-                key={index}
-                className="block h-2 rounded-full bg-muted-foreground/12"
-                style={{ width: `${width}%` }}
-              />
-            ))}
-          </div>
+      <div className="flex min-h-0 flex-1">
+        <div className="dock-rail items-center gap-1.5 py-2" aria-hidden>
+          <span className="h-8 w-8 rounded-lg bg-muted-foreground/15" />
+          {[0, 1, 2, 3, 4].map((index) => (
+            <span
+              key={index}
+              className="h-9 w-9 rounded-lg bg-muted-foreground/10"
+            />
+          ))}
+          <span className="mt-auto h-9 w-9 rounded-lg bg-muted-foreground/10" />
+        </div>
+        <div className="flex min-h-0 flex-1 gap-[var(--shell-gap)] px-[var(--shell-gap)] pb-[var(--shell-gap)]">
+          <div className="island sidebar-panel w-[clamp(240px,22%,21rem)] shrink-0">
+            <div
+              className="flex items-center px-4"
+              style={{ height: "var(--panel-header-h)" }}
+            >
+              <span className="h-2.5 w-20 rounded-full bg-muted-foreground/20" />
+            </div>
+            <div className="space-y-3 px-4 pb-4">
+              {[92, 76, 84, 64, 88].map((width, index) => (
+                <span
+                  key={index}
+                  className="block h-2 rounded-full bg-muted-foreground/12"
+                  style={{ width: `${width}%` }}
+                />
+              ))}
+            </div>
         </div>
 
         {/* Centre: the one place a progress signal belongs, since it is the
@@ -75,14 +85,7 @@ export function WorkspaceSkeleton() {
             <p className="text-xs text-muted-foreground">Opening workspace…</p>
           </div>
         </div>
-      </div>
-
-      <div
-        className={cn("flex shrink-0 items-center gap-3 px-4")}
-        style={{ height: "var(--statusbar-h)" }}
-      >
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-        <span className="text-[11px] text-muted-foreground">Connecting…</span>
+        </div>
       </div>
     </div>
   );

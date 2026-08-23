@@ -1,5 +1,9 @@
 appId: dev.atelier.desktop
 productName: Atelier
+protocols:
+  - name: Atelier OAuth callback
+    schemes:
+      - atelier
 directories:
   output: release
 # Only the tiny main/preload bundles live in the asar; the whole backend
@@ -13,15 +17,40 @@ extraResources:
     to: web
   - from: build/backend/agent
     to: agent
+# Where `--publish` sends the installer. Declaring it does NOT publish on its
+# own: a plain `pnpm dist` still only writes release/ locally, and only
+# `pnpm dist:publish` (or a tagged CI build) uploads. It also makes
+# electron-builder emit latest.yml beside the exe, which is what an
+# auto-updater would later read to find a new version.
+publish:
+  provider: github
+  owner: lamji
+  repo: atelier
+
 win:
   target: nsis
   artifactName: Atelier-Setup-${version}.exe
   # Generated from apps/web/public/icon.svg by scripts/build-icon.mjs; the
   # .ico for the exe and installer is derived from this PNG.
   icon: build/icon.png
+  # WHETHER this build is signed comes from the environment — a certificate
+  # in CSC_LINK, or the Azure Trusted Signing options scripts/release.mjs
+  # passes on the command line — so no signer is frozen into this file.
+  # These settle HOW it signs when it does: SHA-256 only (Windows has not
+  # trusted SHA-1 Authenticode since 2016), and an RFC 3161 countersignature
+  # so the signature keeps validating after the certificate expires.
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
+    rfc3161TimeStampServer: http://timestamp.digicert.com
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  # Checks for git (required by the agent), node (for the projects opened in
+  # it) and the optional provider CLIs, offering to install the missing ones
+  # with winget. Everything it does is printed into the installer log, which
+  # customHeader opens by default.
+  include: installer/deps.nsh
 # The backend is staged by scripts/build-backend.mjs for the Electron ABI;
 # the main bundle inlines its JavaScript dependencies.
 npmRebuild: false

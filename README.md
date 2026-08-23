@@ -10,8 +10,10 @@ the machine.
 ![Electron 34](https://img.shields.io/badge/electron-34-47848F)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
-[**Landing page**](https://lamji.github.io/atelier/) · [The console](#the-console)
-· [Features](#features) · [Run it locally](#run-it-locally)
+[**Landing page**](https://lamji.github.io/atelier/) · [Download](#download)
+· [The console](#the-console) · [Features](#features)
+· [Run it locally](#run-it-locally) · [Releasing](#releasing)
+· [FAQ — how it works and what it stores](FAQ.md)
 
 Open a folder and Atelier parses it with tree-sitter into a local SQLite
 symbol graph and vector store, then runs agent sessions against that index
@@ -22,6 +24,103 @@ knowledge graph are one console, not seven windows.
 > **Alpha, and honest about it.** Windows is the platform it is developed and
 > packaged on; the code is cross-platform but macOS/Linux are unverified and
 > the installer script is NSIS-only.
+
+## Download
+
+Windows only for now (see the note above). The installer is
+`Atelier-Setup.exe` on the
+[latest release](https://github.com/lamji/atelier/releases/latest).
+
+### From the command line
+
+`Atelier-Setup.exe` has no version in its name on purpose, so this URL keeps
+working across releases:
+
+```powershell
+cd $env:USERPROFILE\Downloads
+curl.exe -fL https://github.com/lamji/atelier/releases/latest/download/Atelier-Setup.exe -o Atelier-Setup.exe
+.\Atelier-Setup.exe
+```
+
+> **`curl.exe`, not `curl`.** In Windows PowerShell `curl` is an alias for
+> `Invoke-WebRequest`, which does not understand `-L` or `-o` — the plain
+> version of this line fails there. In **cmd.exe** and **Git Bash**, `curl`
+> is the real binary and works as written. `-f` makes curl fail on an HTTP
+> error instead of saving the error page as a 270 MB-shaped `.exe`.
+
+Without curl at all:
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/lamji/atelier/releases/latest/download/Atelier-Setup.exe -OutFile Atelier-Setup.exe
+```
+
+A specific version, rather than the newest:
+
+```powershell
+curl.exe -fL https://github.com/lamji/atelier/releases/download/v1.0.0/Atelier-Setup-1.0.0.exe -o Atelier-Setup-1.0.0.exe
+```
+
+Every release also carries `Atelier-Setup-<version>.exe` — the same bytes
+under a name that stays meaningful once it is sitting in a downloads folder.
+
+### Verify what you downloaded
+
+Each release publishes a `SHA256SUMS.txt` and repeats the hash in its notes:
+
+```powershell
+curl.exe -fL https://github.com/lamji/atelier/releases/latest/download/SHA256SUMS.txt -o SHA256SUMS.txt
+(Get-FileHash Atelier-Setup.exe -Algorithm SHA256).Hash
+Get-Content SHA256SUMS.txt
+```
+
+The two should match, case aside — `Get-FileHash` returns uppercase.
+
+Download, verify and run in one go, refusing to launch on a mismatch:
+
+```powershell
+cd $env:USERPROFILE\Downloads
+curl.exe -fL https://github.com/lamji/atelier/releases/latest/download/Atelier-Setup.exe -o Atelier-Setup.exe
+curl.exe -fL https://github.com/lamji/atelier/releases/latest/download/SHA256SUMS.txt -o SHA256SUMS.txt
+$want = (Select-String -Path SHA256SUMS.txt -Pattern 'Atelier-Setup\.exe').Line.Split(' ')[0]
+$got  = (Get-FileHash Atelier-Setup.exe -Algorithm SHA256).Hash.ToLower()
+if ($got -eq $want) { .\Atelier-Setup.exe } else { Write-Warning "hash mismatch" }
+```
+
+> **Releases up to v1.0.2 are not code-signed**, so Windows SmartScreen says
+> *"Windows protected your PC — unknown publisher"* for them: choose
+> **More info** → **Run anyway**. The hash above proves the file was not
+> altered in transit; it does not remove that dialog, because SmartScreen
+> asks who signed the code rather than whether the bytes match. Later
+> releases are signed — `npm run release` refuses to build without a signing
+> credential and refuses to publish an installer Windows does not report as
+> validly signed. Each release's notes say which kind of build it is, and a
+> signed one can be checked yourself:
+>
+> ```powershell
+> Get-AuthenticodeSignature Atelier-Setup.exe | Format-List Status, SignerCertificate
+> ```
+>
+> See [`docs/code-signing.md`](docs/code-signing.md).
+
+### What the installer does
+
+It is a normal wizard — welcome, install location, then a **Required tools**
+page that reports what Atelier needs from your machine:
+
+| Tool | Why | If missing |
+|---|---|---|
+| **git** | the agent runs it directly for status, diff, commit, merges and the push wizard | offered, ticked by default |
+| **Node.js** | for the projects you open — npm installs, dev servers, tests. Atelier itself ships its own | offered, ticked by default |
+| **Codex CLI** | optional provider | reported only |
+| **Ollama** | optional provider | reported only |
+
+Ticked tools are installed with **winget** during the install, with its
+output printed in the progress log. Untick anything you would rather handle
+yourself; the install continues either way. Where winget is unavailable the
+page reports what is missing and installs nothing.
+
+Atelier installs per-user, so no administrator prompt — except from winget
+itself, if it needs one for a package.
 
 ## The console
 
@@ -226,11 +325,74 @@ workspace database live under your local app-data directory, never in the repo.
 ## Packaging (Windows)
 
 ```sh
-pnpm --filter @atelier/desktop dist   # NSIS installer
+pnpm --filter @atelier/desktop dist   # NSIS installer -> apps/desktop/release/
 ```
 
 `build-backend.mjs` stages the web dist + agent bundle + natives
 retargeted to the Electron ABI under `resources/`. No system Node needed.
+The installer's dependency page lives in
+[`apps/desktop/installer/deps.nsh`](apps/desktop/installer/deps.nsh).
+
+## Releasing
+
+One command does the whole thing:
+
+```sh
+npm run release              # 1.0.0 -> 1.0.1
+npm run release -- minor     # 1.0.0 -> 1.1.0
+npm run release -- major     # 1.0.0 -> 2.0.0
+npm run release -- 1.2.3     # exactly this version
+```
+
+It runs these steps, in order:
+
+1. **Preflight** — refuses early if the tag already exists, `gh` is not
+   signed in, or there is no signing credential, so a twelve-minute build
+   never gets thrown away at the end. A dirty working tree is a warning, not
+   a stop: what ships is your working tree, and it says so.
+2. **Bump** `apps/desktop/package.json` — the one place the version lives.
+   electron-builder names the artifact from it and the git tag follows it,
+   so the three can never disagree.
+3. **Build** the NSIS installer, signed.
+4. **Hash** it, copy it to the version-less `Atelier-Setup.exe`, and check
+   the signature Windows sees on it — anything other than `Valid` stops the
+   release here, with the build on disk and nothing tagged.
+5. **Commit** `Release <version>`, **tag** `v<version>`, push both.
+6. **Publish** the GitHub release with the installer, the stable copy and
+   `SHA256SUMS.txt`, with notes generated from the commits since the last
+   tag.
+
+Rehearse it first — this changes nothing at all:
+
+```sh
+npm run release -- --dry-run
+```
+
+Build and tag without publishing (upload by hand later):
+
+```sh
+npm run release -- --no-publish
+```
+
+**Signing.** Every release is signed. The credential comes from the
+environment — Azure Trusted Signing (`AZURE_SIGN_ENDPOINT`,
+`AZURE_SIGN_ACCOUNT`, `AZURE_SIGN_PROFILE` plus the Entra ID service
+principal), or a certificate file in `CSC_LINK` + `CSC_KEY_PASSWORD` — and
+the script checks it twice: it refuses to start the build without one, and
+after the build it asks Windows whether the installer is really signed
+(`Get-AuthenticodeSignature` must say `Valid`), stopping before the commit,
+tag and upload if it is not. The signer's name then goes into the release
+notes. `--allow-unsigned` is the deliberate, loud exception. See
+[`docs/code-signing.md`](docs/code-signing.md).
+
+**If the upload fails** after the build succeeded, the tag is already pushed
+and the artifact is on disk — the script prints the exact `gh release create`
+line to retry with.
+
+**What users get.** `Atelier-Setup.exe` on `/releases/latest/download/` keeps
+its URL forever, which is what makes the `curl` line in
+[Download](#download) work; the versioned copy and the checksums sit beside
+it.
 
 ## Layout
 

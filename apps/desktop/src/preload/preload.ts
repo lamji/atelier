@@ -4,6 +4,7 @@ import type {
   AtelierDesktopApi,
   DesktopCaptureRequest,
   DesktopProjectInfo,
+  DesktopUpdateProgress,
 } from "../shared/ipc-contract";
 
 /**
@@ -16,9 +17,28 @@ ipcRenderer.on(IPC_CHANNELS.workspacePort, (event, attachId: string) => {
   window.postMessage({ type: PORT_MESSAGE_TYPE, attachId }, "*", event.ports);
 });
 
+const oauthListeners = new Set<(url: string) => void>();
+const pendingOAuthCallbacks: string[] = [];
+ipcRenderer.on(IPC_CHANNELS.oauthCallback, (_event, url: string) => {
+  if (oauthListeners.size === 0) {
+    pendingOAuthCallbacks.push(url);
+    return;
+  }
+  for (const listener of oauthListeners) listener(url);
+});
+
 const api: AtelierDesktopApi = {
   platform: process.platform as AtelierDesktopApi["platform"],
   version: process.env.ATELIER_APP_VERSION ?? "dev",
+
+  auth: {
+    callbackUrl: () => ipcRenderer.invoke(IPC_CHANNELS.oauthCallbackUrl),
+    onCallback: (cb: (url: string) => void) => {
+      oauthListeners.add(cb);
+      for (const url of pendingOAuthCallbacks.splice(0)) cb(url);
+      return () => oauthListeners.delete(cb);
+    },
+  },
 
   projects: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.projectsList),
@@ -37,6 +57,24 @@ const api: AtelierDesktopApi = {
     },
     attach: (id: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.projectsAttach, id),
+  },
+
+  updates: {
+    check: (force?: boolean) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updatesCheck, force ?? false),
+    download: () => ipcRenderer.invoke(IPC_CHANNELS.updatesDownload),
+    install: () => ipcRenderer.invoke(IPC_CHANNELS.updatesInstall),
+    onProgress: (cb: (progress: DesktopUpdateProgress) => void) => {
+      const listener = (_e: unknown, progress: DesktopUpdateProgress): void =>
+        cb(progress);
+      ipcRenderer.on(IPC_CHANNELS.updatesProgress, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.updatesProgress, listener);
+      };
+    },
+    changelog: () => ipcRenderer.invoke(IPC_CHANNELS.updatesChangelog),
+    acknowledge: (version: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.updatesAcknowledge, version),
   },
 
   pickFolder: () => ipcRenderer.invoke(IPC_CHANNELS.pickFolder),

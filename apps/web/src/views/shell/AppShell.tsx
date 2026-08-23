@@ -12,8 +12,11 @@ import { TitleBar } from "./TitleBar";
 import { BottomPanel } from "./BottomPanel";
 import { CommandPalette } from "./CommandPalette";
 import { EditorTabBar } from "./EditorTabBar";
-import { StatusBar } from "./StatusBar";
-import { CommandCenter } from "./CommandCenter";
+import { RailStatus } from "./RailStatus";
+import { UserProfile } from "./UserProfile";
+import { ChangelogModal } from "./ChangelogModal";
+import { useUpdatesViewModel } from "@/hooks/useUpdatesViewModel";
+import { useWebTargetViewModel } from "@/hooks/useWebTargetViewModel";
 import { BrandMark } from "@/components/BrandMark";
 import { Dock } from "./dock/Dock";
 import { ChatPanel } from "@/views/chat/ChatPanel";
@@ -30,7 +33,6 @@ import { SessionListPanel } from "@/views/sessions/SessionListPanel";
 import { MonitorPanel } from "@/views/monitor/MonitorPanel";
 import { KnowledgePanel } from "@/views/knowledge/KnowledgePanel";
 import { IndexingWelcome } from "@/views/knowledge/IndexingWelcome";
-import { HooksPanel } from "@/views/hooks/HooksPanel";
 import { MarkdownPanel } from "@/views/markdown/MarkdownPanel";
 import { SettingsPanel } from "@/views/settings/SettingsPanel";
 import { SettingsModal } from "@/views/settings/SettingsModal";
@@ -50,8 +52,8 @@ import { useFileExplorerViewModel } from "@/hooks/useFileExplorerViewModel";
 import { useEditorViewModel } from "@/hooks/useEditorViewModel";
 import { useGitViewModel } from "@/hooks/useGitViewModel";
 import { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
-import { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 import { useHooksViewModel } from "@/hooks/useHooksViewModel";
+import { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 import { useMarkdownViewModel } from "@/hooks/useMarkdownViewModel";
 import { useDbApprovalViewModel } from "@/hooks/useDbApprovalViewModel";
 import { useUsageViewModel } from "@/hooks/useUsageViewModel";
@@ -128,10 +130,9 @@ export function AppShell() {
   const explorer = useFileExplorerViewModel();
   const editor = useEditorViewModel();
   const git = useGitViewModel();
-  const terminal = useTerminalViewModel();
   const knowledge = useKnowledgeViewModel();
-  const rag = useRagInspectorViewModel();
-  const hooksVm = useHooksViewModel();
+  const hooks = useHooksViewModel();
+  const terminal = useTerminalViewModel();
   const markdownVm = useMarkdownViewModel();
   const dbApproval = useDbApprovalViewModel();
   const usage = useUsageViewModel();
@@ -615,10 +616,6 @@ export function AppShell() {
         workingCount={sessions.workingCount}
         onSelect={sessions.selectSession}
       />
-    ) : activeView === "knowledge" ? (
-      <KnowledgePanel vm={knowledge} onOpenRag={() => editor.setRightTab("rag")} />
-    ) : activeView === "hooks" ? (
-      <HooksPanel vm={hooksVm} />
     ) : (
       <SettingsPanel />
     );
@@ -675,10 +672,23 @@ export function AppShell() {
   );
   const commands = useCommandRegistry(commandSources);
 
+  // App-level, not workspace-level: a release is news about Atelier itself,
+  // so it survives project switches and lives in the header, not the rail.
+  const updates = useUpdatesViewModel();
+  // Whether this workspace has a web app at all. Decides if Page preview is
+  // offered — an API or a native-only project has no page to preview.
+  const webTarget = useWebTargetViewModel();
+
   const headerBar = (
     <HeaderBar
       activeAgentSurface={activeView === "agents" ? agentSurface : null}
       pagePreviewRunning={pagePreviewTermId !== null}
+      showPagePreview={webTarget.runtime !== null}
+      pagePreviewLabel={
+        webTarget.runtime?.framework === "Expo (web)"
+          ? "Web preview"
+          : "Page preview"
+      }
       onSelectAgent={() => {
         setAgentSurface("agent");
         setActiveView("agents");
@@ -688,6 +698,12 @@ export function AppShell() {
         setActiveView("agents");
       }}
       onStopPagePreview={stopPagePreview}
+      onOpenPalette={(query) => setPalette({ open: true, query })}
+      updateAvailable={updates.available}
+      onInstallUpdate={updates.install}
+      updateStage={updates.stage}
+      updatePercent={updates.percent}
+      updateError={updates.error}
     />
   );
 
@@ -773,202 +789,225 @@ export function AppShell() {
       ) : (
         <div className="h-[var(--topnav-h)] shrink-0">{headerBar}</div>
       )}
+      {/*
+       * The dock rail down the left edge, then the editor region with the
+       * bottom panel docked under it. `relative` is what a maximized panel
+       * anchors to: it covers the editor and nothing else, leaving the
+       * header, the status bar and the rail reachable.
+       */}
       <div className="flex min-h-0 flex-1">
-        {activeView === "agents" ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <WorkspacePageBody
-              wide
-              className="flex min-h-0 flex-1"
-            >
-              <PanelGroup direction="horizontal" className="min-w-0 flex-1">
-          {/*
-           * Primary sidebar. `minSize` in percent would let the sidebar be
-           * squeezed to unreadable at small window widths, so it is floored in
-           * pixels too — below ~190px the tree indentation and the header
-           * actions stop fitting.
-           */}
-          <Panel
-            defaultSize={15}
-            minSize={12}
-            maxSize={18}
-            className="min-w-[220px] max-w-[300px]"
-          >
-            <div className="island h-full">{leftPanel}</div>
-          </Panel>
-          <PanelResizeHandle className="resize-handle w-px" />
-          <Panel defaultSize={85} minSize={72} className="min-w-[360px]">
-            <div
-              className={cn(
-                "island island-main relative flex h-full flex-col",
-                busy && "glow-working"
-              )}
-            >
-              <AnimatePresence>
-                {agentSurface === "agent" && showIndexingWelcome && (
-                  <IndexingWelcome
-                    vm={knowledge}
-                    workspaceRoot={connection.workspaceRoot}
-                  />
-                )}
-              </AnimatePresence>
-              {agentSurface === "agent" && workbenchVisible && (
-                <EditorTabBar
-                  rightTab={editor.rightTab}
-                  selectedPath={editor.selectedPath}
-                  diffPath={null}
-                  onSelectTab={selectHeaderTab}
-                />
-              )}
-              <div className="relative min-h-0 flex-1">
+        <aside className="dock-rail" aria-label="Dock">
+          <BrandMark
+            className="mx-auto mt-2 h-8 w-8 shrink-0"
+            tile
+            title="Atelier"
+          />
+          {dock}
+          <RailStatus
+            connection={connection.state}
+            agentStatusDetail={connection.agentStatusDetail}
+            workspaceRoot={connection.workspaceRoot}
+            contextStats={contextStats}
+            indexingActive={knowledge.indexingActive}
+            indexing={knowledge.indexing}
+            lastIndexedAt={knowledge.stats?.lastIndexedAt ?? null}
+          />
+          <UserProfile />
+        </aside>
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1">
+            {activeView === "agents" ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <WorkspacePageBody
+                  wide
+                  className="flex min-h-0 flex-1"
+                >
+                  <PanelGroup direction="horizontal" className="min-w-0 flex-1">
+              {/*
+               * Primary sidebar. The percentage is what the drag handle moves;
+               * `.sidebar-panel` is the pixel floor underneath it, because 15%
+               * of a 1366px laptop is 205px and the panel opened cramped there.
+               * The default is now chosen so a normal window opens ABOVE the
+               * floor rather than being clamped up to it.
+               */}
+              <Panel
+                defaultSize={20}
+                minSize={16}
+                maxSize={26}
+                className="sidebar-panel max-w-[340px]"
+              >
+                <div className="island h-full">{leftPanel}</div>
+              </Panel>
+              <PanelResizeHandle className="resize-handle w-px" />
+              <Panel defaultSize={80} minSize={68} className="min-w-[360px]">
                 <div
                   className={cn(
-                    "absolute inset-0",
-                    agentSurface !== "agent" && "invisible pointer-events-none"
+                    "island island-main relative flex h-full flex-col",
+                    busy && "glow-working"
                   )}
-                  aria-hidden={agentSurface !== "agent"}
                 >
-                  <RightDock
-                    rightTab={editor.rightTab}
-                    chatPane={chatPane}
-                    skillDetail={skillDetail}
-                    onCloseSkillDetail={closeSkillDetail}
-                    selectedPath={editor.selectedPath}
-                    fileContent={editor.fileContent}
-                    language={editor.language}
-                    monacoTheme={editor.monacoTheme}
-                    gitDiff={null}
-                    onCloseGitDiff={git.closeDiff}
-                    knowledgeVm={knowledge}
-                    ragVm={rag}
-                    appTheme={theme}
-                    timelineEntries={timeline.entries}
-                    processConsoleVm={processConsole}
-                  />
-                </div>
-                <div
-                  className={cn(
-                    "absolute inset-0",
-                    agentSurface !== "preview" && "invisible pointer-events-none"
+                  <AnimatePresence>
+                    {agentSurface === "agent" && showIndexingWelcome && (
+                      <IndexingWelcome
+                        vm={knowledge}
+                        workspaceRoot={connection.workspaceRoot}
+                      />
+                    )}
+                  </AnimatePresence>
+                  {agentSurface === "agent" && workbenchVisible && (
+                    <EditorTabBar
+                      rightTab={editor.rightTab}
+                      selectedPath={editor.selectedPath}
+                      diffPath={null}
+                      onSelectTab={selectHeaderTab}
+                    />
                   )}
-                  aria-hidden={agentSurface !== "preview"}
-                >
-                  <ComponentPreviewPane
-                    managedTermId={pagePreviewTermId}
-                    onManagedTermChange={setPagePreviewTermId}
-                    currentSessionTitle={currentSessionTitle}
-                    onAttachScreenshot={attachPreviewScreenshot}
-                    reviewTaskId={approvedFrontendReview?.taskId ?? null}
-                    onPreviewUrlChange={setPagePreviewUrl}
-                    onCaptureForReview={captureFrontendReview}
-                  />
+                  <div className="relative min-h-0 flex-1">
+                    <div
+                      className={cn(
+                        "absolute inset-0",
+                        agentSurface !== "agent" && "invisible pointer-events-none"
+                      )}
+                      aria-hidden={agentSurface !== "agent"}
+                    >
+                      <RightDock
+                        rightTab={editor.rightTab}
+                        chatPane={chatPane}
+                        skillDetail={skillDetail}
+                        onCloseSkillDetail={closeSkillDetail}
+                        selectedPath={editor.selectedPath}
+                        fileContent={editor.fileContent}
+                        language={editor.language}
+                        monacoTheme={editor.monacoTheme}
+                        gitDiff={null}
+                        onCloseGitDiff={git.closeDiff}
+                        appTheme={theme}
+                        timelineEntries={timeline.entries}
+                        processConsoleVm={processConsole}
+                      />
+                    </div>
+                    <div
+                      className={cn(
+                        "absolute inset-0",
+                        agentSurface !== "preview" && "invisible pointer-events-none"
+                      )}
+                      aria-hidden={agentSurface !== "preview"}
+                    >
+                      <ComponentPreviewPane
+                        managedTermId={pagePreviewTermId}
+                        onManagedTermChange={setPagePreviewTermId}
+                        currentSessionTitle={currentSessionTitle}
+                        onAttachScreenshot={attachPreviewScreenshot}
+                        reviewTaskId={approvedFrontendReview?.taskId ?? null}
+                        onPreviewUrlChange={setPagePreviewUrl}
+                        onCaptureForReview={captureFrontendReview}
+                      />
+                    </div>
+                  </div>
                 </div>
+              </Panel>
+                  </PanelGroup>
+                </WorkspacePageBody>
               </div>
-            </div>
-          </Panel>
-              </PanelGroup>
-            </WorkspacePageBody>
+            ) : activeView === "explorer" ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <WorkspacePageBody className="flex min-h-0 flex-1">
+                  <PanelGroup direction="horizontal" className="min-w-0 flex-1">
+                    <Panel
+                      defaultSize={30}
+                      minSize={18}
+                      maxSize={45}
+                      className="sidebar-panel"
+                    >
+                      <div className="island h-full">{leftPanel}</div>
+                    </Panel>
+                    <PanelResizeHandle className="resize-handle w-px" />
+                    <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
+                      <div className="island island-main h-full overflow-hidden">
+                        <RightDock
+                          rightTab="editor"
+                          chatPane={chatPane}
+                          skillDetail={skillDetail}
+                          onCloseSkillDetail={closeSkillDetail}
+                          selectedPath={editor.selectedPath}
+                          fileContent={editor.fileContent}
+                          language={editor.language}
+                          monacoTheme={editor.monacoTheme}
+                          gitDiff={git.gitDiff}
+                          onCloseGitDiff={git.closeDiff}
+                          appTheme={theme}
+                          timelineEntries={timeline.entries}
+                          processConsoleVm={processConsole}
+                        />
+                      </div>
+                    </Panel>
+                  </PanelGroup>
+                </WorkspacePageBody>
+              </div>
+            ) : activeView === "markdown" ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <WorkspacePageBody className="flex min-h-0 flex-1">
+                  <PanelGroup direction="horizontal" className="min-w-0 flex-1">
+                    <Panel
+                      defaultSize={30}
+                      minSize={18}
+                      maxSize={45}
+                      className="sidebar-panel"
+                    >
+                      <div className="island h-full">{leftPanel}</div>
+                    </Panel>
+                    <PanelResizeHandle className="resize-handle w-px" />
+                    <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
+                      <div className="island island-main h-full overflow-hidden">
+                        <RightDock
+                          rightTab="editor"
+                          chatPane={chatPane}
+                          skillDetail={skillDetail}
+                          onCloseSkillDetail={closeSkillDetail}
+                          selectedPath={editor.selectedPath}
+                          fileContent={editor.fileContent}
+                          language={editor.language}
+                          monacoTheme={editor.monacoTheme}
+                          gitDiff={null}
+                          onCloseGitDiff={git.closeDiff}
+                          appTheme={theme}
+                          timelineEntries={timeline.entries}
+                          processConsoleVm={processConsole}
+                        />
+                      </div>
+                    </Panel>
+                  </PanelGroup>
+                </WorkspacePageBody>
+              </div>
+            ) : (
+              <main className="island island-main w-full min-w-0 flex-1 overflow-hidden">
+                {leftPanel}
+              </main>
+            )}
           </div>
-        ) : activeView === "explorer" ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <WorkspacePageBody className="flex min-h-0 flex-1">
-              <PanelGroup direction="horizontal" className="min-w-0 flex-1">
-                <Panel
-                  defaultSize={30}
-                  minSize={18}
-                  maxSize={45}
-                  className="min-w-[240px]"
-                >
-                  <div className="island h-full">{leftPanel}</div>
-                </Panel>
-                <PanelResizeHandle className="resize-handle w-px" />
-                <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
-                  <div className="island island-main h-full overflow-hidden">
-                    <RightDock
-                      rightTab="editor"
-                      chatPane={chatPane}
-                      skillDetail={skillDetail}
-                      onCloseSkillDetail={closeSkillDetail}
-                      selectedPath={editor.selectedPath}
-                      fileContent={editor.fileContent}
-                      language={editor.language}
-                      monacoTheme={editor.monacoTheme}
-                      gitDiff={git.gitDiff}
-                      onCloseGitDiff={git.closeDiff}
-                      knowledgeVm={knowledge}
-                      ragVm={rag}
-                      appTheme={theme}
-                      timelineEntries={timeline.entries}
-                      processConsoleVm={processConsole}
-                    />
-                  </div>
-                </Panel>
-              </PanelGroup>
-            </WorkspacePageBody>
-          </div>
-        ) : activeView === "markdown" ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <WorkspacePageBody className="flex min-h-0 flex-1">
-              <PanelGroup direction="horizontal" className="min-w-0 flex-1">
-                <Panel
-                  defaultSize={30}
-                  minSize={18}
-                  maxSize={45}
-                  className="min-w-[240px]"
-                >
-                  <div className="island h-full">{leftPanel}</div>
-                </Panel>
-                <PanelResizeHandle className="resize-handle w-px" />
-                <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
-                  <div className="island island-main h-full overflow-hidden">
-                    <RightDock
-                      rightTab="editor"
-                      chatPane={chatPane}
-                      skillDetail={skillDetail}
-                      onCloseSkillDetail={closeSkillDetail}
-                      selectedPath={editor.selectedPath}
-                      fileContent={editor.fileContent}
-                      language={editor.language}
-                      monacoTheme={editor.monacoTheme}
-                      gitDiff={null}
-                      onCloseGitDiff={git.closeDiff}
-                      knowledgeVm={knowledge}
-                      ragVm={rag}
-                      appTheme={theme}
-                      timelineEntries={timeline.entries}
-                      processConsoleVm={processConsole}
-                    />
-                  </div>
-                </Panel>
-              </PanelGroup>
-            </WorkspacePageBody>
-          </div>
-        ) : (
-          <main className="island island-main w-full min-w-0 flex-1 overflow-hidden">
-            {leftPanel}
-          </main>
-        )}
-      </div>
 
-      <BottomPanel
-        open={bottomOpen}
-        onClose={() => setBottomPanel(false)}
-        terminalSessions={terminal.sessions}
-        activeTermId={terminal.activeTermId}
-        onSelectTerm={terminal.setActive}
-        onCreateTerm={() => void terminal.create()}
-        onKillTerm={(id) => {
-          if (terminal.sessions.length <= 1) setBottomPanel(false);
-          void terminal.kill(id);
-        }}
-        onRenameTerm={terminal.rename}
-        onMountTerm={terminal.mount}
-        onRefitTerm={terminal.refit}
-        termSearchOpen={terminal.searchOpen}
-        terminalProfileId={terminal.profile}
-        onTerminalProfileChange={terminal.setProfile}
-        onOpenTermSearch={terminal.openSearch}
-        onCloseTermSearch={terminal.closeSearch}
-      />
+          <BottomPanel
+            open={bottomOpen}
+            onClose={() => setBottomPanel(false)}
+            terminalSessions={terminal.sessions}
+            activeTermId={terminal.activeTermId}
+            onSelectTerm={terminal.setActive}
+            onCreateTerm={() => void terminal.create()}
+            onKillTerm={(id) => {
+              if (terminal.sessions.length <= 1) setBottomPanel(false);
+              void terminal.kill(id);
+            }}
+            onRenameTerm={terminal.rename}
+            onMountTerm={terminal.mount}
+            onRefitTerm={terminal.refit}
+            termSearchOpen={terminal.searchOpen}
+            terminalProfileId={terminal.profile}
+            onTerminalProfileChange={terminal.setProfile}
+            onOpenTermSearch={terminal.openSearch}
+            onCloseTermSearch={terminal.closeSearch}
+          />
+        </div>
+      </div>
 
       {/* Shell-level: the palette overlays every region, so it cannot live
           inside one of them. */}
@@ -990,6 +1029,12 @@ export function AppShell() {
       <GitSyncModal />
       {/* Shell-level: one stack for every git operation's outcome. */}
       <AlertHost />
+      {/* Shell-level: what changed, once, on the first launch after an
+          upgrade. */}
+      <ChangelogModal
+        entry={updates.changelog}
+        onClose={updates.dismissChangelog}
+      />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />
       <FrontendReviewModal
@@ -1008,36 +1053,6 @@ export function AppShell() {
         onDismiss={dismissFrontendReview}
         onClosed={captureApprovedFrontendReview}
       />
-      {/* The bottom strip: the dock floating in the middle of it, workspace
-          state reading quietly along both edges. No border and no bar surface
-          — the canvas runs under it, which is what lets the dock read as
-          something floating above the work rather than a fourth region of
-          it. `overflow-visible`, because a magnified tile grows past the
-          dock's own top edge by design. */}
-      <div
-        className={cn(
-          "h-[var(--statusbar-h)] shrink-0 overflow-visible"
-        )}
-      >
-        <StatusBar
-          left={
-            <>
-              <BrandMark className="h-9 w-9 shrink-0" tile title="Atelier" />
-              <div className="w-[20rem] shrink-0">
-                <CommandCenter onOpen={(query) => setPalette({ open: true, query })} />
-              </div>
-              {dock}
-            </>
-          }
-          connection={connection.state}
-          agentStatusDetail={connection.agentStatusDetail}
-          workspaceRoot={connection.workspaceRoot}
-          contextStats={contextStats}
-          indexingActive={knowledge.indexingActive}
-          indexing={knowledge.indexing}
-          lastIndexedAt={knowledge.stats?.lastIndexedAt ?? null}
-        />
-      </div>
     </div>
   );
 }

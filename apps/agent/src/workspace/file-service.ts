@@ -17,6 +17,50 @@ import type { WorkspaceIgnore } from "./ignore.js";
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
+
+/**
+ * Wall-clock budget for one search, and the file count that goes with it.
+ *
+ * A miss costs the WHOLE workspace: the walk only stops early when it fills
+ * maxResults, so a query with no matches reads every non-ignored file in the
+ * repo. On a small project that is a second; on a VS Code fork it is minutes
+ * of full-file reads, and the model's tool call simply never came back —
+ * the turn sat on "Waiting for the tool result…" until it was abandoned.
+ *
+ * A partial answer that arrives is worth more than a complete one that does
+ * not, so the search returns what it found and says it was cut short. The
+ * model can then narrow with a glob, which is the right move anyway.
+ */
+const SEARCH_BUDGET_MS = 8_000;
+const SEARCH_MAX_FILES = 20_000;
+
+/**
+ * Files read at once.
+ *
+ * Profiling one search over a VS Code fork: 7.8s of an 8s budget went to
+ * fs.readFile, against 57ms of actual regex matching. The walk was awaiting
+ * one file at a time, so it was paying per-file latency (on Windows, with
+ * on-access AV scanning, that is milliseconds each) with the disk idle in
+ * between. Reads overlap now; matching stays sequential because it was never
+ * the cost.
+ */
+const SEARCH_READ_CONCURRENCY = 16;
+
+/** What a bounded search found, and whether it saw the whole workspace. */
+export interface SearchOutcome {
+  matches: SearchMatch[];
+  /** Files actually opened and scanned. */
+  scanned: number;
+  /** True when the budget, the file cap, or an abort ended the walk. */
+  truncated: boolean;
+}
+
+interface SearchBudget {
+  deadline: number;
+  files: number;
+  truncated: boolean;
+  signal?: AbortSignal;
+}
 const MAX_TREE_NODES = 10_000;
 
 /** Caps for the markdown catalog: file count, head bytes, blurb length. */
@@ -129,7 +173,10 @@ export class FileService {
       if (budget.nodes >= MAX_TREE_NODES) break;
       const abs = path.join(absDir, entry.name);
       const isDir = entry.isDirectory();
-      if (this.ig.ignoresAbsolute(abs, isDir)) continue;
+      // The VIEW filter: build output and node_modules stay out, but a
+      // gitignored file the user made (.env is the everyday case) is theirs
+      // to see. Indexing and search keep the stricter rule.
+      if (this.ig.hiddenFromTreeAbsolute(abs, isDir)) continue;
       if (!isDir && !entry.isFile()) continue;
       budget.nodes += 1;
       const rel = this.guard.toRelative(abs);
@@ -252,7 +299,9 @@ export class FileService {
     for (const entry of entries) {
       const abs = path.join(absDir, entry.name);
       const isDir = entry.isDirectory();
-      if (this.ig.ignoresAbsolute(abs, isDir)) continue;
+      // Same view filter as the tree: this is what list_dir and the
+      // explorer's lazy expansion return.
+      if (this.ig.hiddenFromTreeAbsolute(abs, isDir)) continue;
       if (!isDir && !entry.isFile()) continue;
       const stat = await fs.stat(abs);
       result.push({
@@ -728,15 +777,29 @@ export class FileService {
     query: string,
     glob?: string,
     maxResults = 200,
-    regex = false
-  ): Promise<SearchMatch[]> {
+    regex = false,
+    opts: { signal?: AbortSignal; budgetMs?: number } = {}
+  ): Promise<SearchOutcome> {
     const matcher = regex
       ? new RegExp(query, "i")
       : new RegExp(escapeRegex(query), "i");
     const globRe = glob ? globToRegex(glob) : null;
     const matches: SearchMatch[] = [];
-    await this.searchDir(this.guard.toAbsolute("."), matcher, globRe, matches, maxResults);
-    return matches;
+    const budget: SearchBudget = {
+      deadline: Date.now() + (opts.budgetMs ?? SEARCH_BUDGET_MS),
+      files: 0,
+      truncated: false,
+      signal: opts.signal,
+    };
+    await this.searchDir(
+      this.guard.toAbsolute("."),
+      matcher,
+      globRe,
+      matches,
+      maxResults,
+      budget
+    );
+    return { matches, scanned: budget.files, truncated: budget.truncated };
   }
 
   private async searchDir(
@@ -744,52 +807,106 @@ export class FileService {
     matcher: RegExp,
     globRe: RegExp | null,
     matches: SearchMatch[],
-    maxResults: number
+    maxResults: number,
+    budget: SearchBudget
   ): Promise<void> {
-    if (matches.length >= maxResults) return;
+    if (matches.length >= maxResults || outOfBudget(budget)) return;
     let entries;
     try {
       entries = await fs.readdir(absDir, { withFileTypes: true });
     } catch {
       return;
     }
+    const dirs: string[] = [];
+    const candidates: string[] = [];
     for (const entry of entries) {
-      if (matches.length >= maxResults) return;
       const abs = path.join(absDir, entry.name);
       const isDir = entry.isDirectory();
       if (this.ig.ignoresAbsolute(abs, isDir)) continue;
       if (isDir) {
-        await this.searchDir(abs, matcher, globRe, matches, maxResults);
+        dirs.push(abs);
         continue;
       }
       if (!entry.isFile()) continue;
-      const rel = this.guard.toRelative(abs);
-      if (globRe && !globRe.test(rel)) continue;
-      let buffer: Buffer;
-      try {
-        const stat = await fs.stat(abs);
-        if (stat.size > MAX_SEARCH_FILE_BYTES) continue;
-        buffer = await fs.readFile(abs);
-      } catch {
-        continue;
+      if (globRe && !globRe.test(this.guard.toRelative(abs))) continue;
+      candidates.push(abs);
+    }
+
+    // Files first, in overlapping reads; then down into the subdirectories.
+    for (let i = 0; i < candidates.length; i += SEARCH_READ_CONCURRENCY) {
+      if (matches.length >= maxResults || outOfBudget(budget)) return;
+      const slice = candidates.slice(i, i + SEARCH_READ_CONCURRENCY);
+      budget.files += slice.length;
+      const loaded = await Promise.all(
+        slice.map((abs) => this.readForSearch(abs))
+      );
+      for (const file of loaded) {
+        if (!file) continue;
+        this.collectMatches(file, matcher, matches, maxResults);
+        if (matches.length >= maxResults) return;
       }
-      if (isBinary(buffer)) continue;
-      const lines = buffer.toString("utf8").split(/\r?\n/);
-      for (let row = 0; row < lines.length; row++) {
-        const line = lines[row]!;
-        const m = matcher.exec(line);
-        if (m) {
-          matches.push({
-            path: rel,
-            row: row + 1,
-            col: m.index + 1,
-            line: line.length > 300 ? line.slice(0, 300) : line,
-          });
-          if (matches.length >= maxResults) return;
-        }
+    }
+
+    for (const dir of dirs) {
+      if (matches.length >= maxResults || outOfBudget(budget)) return;
+      await this.searchDir(dir, matcher, globRe, matches, maxResults, budget);
+    }
+  }
+
+  /** One searchable file, or null when it is too big, binary, or unreadable. */
+  private async readForSearch(
+    abs: string
+  ): Promise<{ rel: string; text: string } | null> {
+    try {
+      const stat = await fs.stat(abs);
+      if (stat.size > MAX_SEARCH_FILE_BYTES) return null;
+      const buffer = await fs.readFile(abs);
+      if (isBinary(buffer)) return null;
+      return { rel: this.guard.toRelative(abs), text: buffer.toString("utf8") };
+    } catch {
+      return null;
+    }
+  }
+
+  private collectMatches(
+    file: { rel: string; text: string },
+    matcher: RegExp,
+    matches: SearchMatch[],
+    maxResults: number
+  ): void {
+    const lines = file.text.split(/\r?\n/);
+    for (let row = 0; row < lines.length; row++) {
+      const line = lines[row]!;
+      const m = matcher.exec(line);
+      if (m) {
+        matches.push({
+          path: file.rel,
+          row: row + 1,
+          col: m.index + 1,
+          line: line.length > 300 ? line.slice(0, 300) : line,
+        });
+        if (matches.length >= maxResults) return;
       }
     }
   }
+}
+
+/**
+ * Time, file count, or the task being cancelled — any of the three ends the
+ * walk, and the caller is told so rather than being handed a short list that
+ * looks exhaustive.
+ */
+function outOfBudget(budget: SearchBudget): boolean {
+  if (budget.truncated) return true;
+  if (
+    budget.signal?.aborted ||
+    budget.files >= SEARCH_MAX_FILES ||
+    Date.now() > budget.deadline
+  ) {
+    budget.truncated = true;
+    return true;
+  }
+  return false;
 }
 
 function imageMediaType(filePath: string): string | null {

@@ -13,10 +13,16 @@ import type { GitConflictFile, GitPullMode, GitRefs } from "@atelier/protocol";
  */
 
 /** Which sync command the output pane belongs to. */
-export type SyncKind = "fetch" | "pull" | "push" | "continue" | "checkout";
+export type SyncKind =
+  | "fetch"
+  | "pull"
+  | "push"
+  | "continue"
+  | "checkout"
+  | "rebase";
 
-/** The picker modals: where to pull from, or check out from. */
-export type SyncModalKind = "pull" | "checkout";
+/** The picker modals: where to pull from, check out from, or rebase onto. */
+export type SyncModalKind = "pull" | "checkout" | "rebase";
 
 /** Outcome of the last modal-driven run, for the modal's result screen. */
 export interface SyncRunResult {

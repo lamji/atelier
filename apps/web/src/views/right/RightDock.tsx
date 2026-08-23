@@ -9,20 +9,25 @@ import {
 } from "react";
 import Editor, { type Monaco } from "@monaco-editor/react";
 import { MonacoDiff } from "@/components/MonacoDiff";
-import { Activity, Eye, FileCode2, FileDiff, ImageIcon, Pencil, X } from "lucide-react";
+import {
+  Activity,
+  AlignLeft,
+  Eye,
+  FileCode2,
+  FileDiff,
+  ImageIcon,
+  Pencil,
+  X,
+} from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
 import { isImagePath } from "@/lib/image-file";
 import { Tooltip } from "@/components/ui/tooltip";
-// three.js + the force-graph runtime live in their own chunk; nothing
-// loads until the Graph tab is first opened.
-const GraphPane = lazy(() =>
-  import("@/views/knowledge/GraphPane").then((m) => ({ default: m.GraphPane }))
-);
-import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { TimelinePanel } from "@/views/timeline/TimelinePanel";
 import { ProcessConsolePanel } from "@/views/console/ProcessConsolePanel";
+import { GraphPane } from "@/views/knowledge/GraphPane";
+import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { languageForPath } from "@/lib/diff-view";
 import {
   clearMentionCache,
@@ -33,12 +38,12 @@ import { useGitMergeStore } from "@/state/git-merge.store";
 import { useMergeConflictViewModel } from "@/hooks/useMergeConflictViewModel";
 import { ConflictResolver } from "@/views/git/ConflictResolver";
 import { useWorkspaceStore } from "@/state/workspace.store";
+import { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
+import { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 import type { SlashCommand } from "@atelier/protocol";
 import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
 import type { TimelineEntryVm } from "@/types";
-import type { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
-import type { useRagInspectorViewModel } from "@/hooks/useRagInspectorViewModel";
 import type { ProcessConsoleVm } from "@/hooks/useProcessConsoleViewModel";
 
 export interface RightDockProps {
@@ -56,9 +61,6 @@ export interface RightDockProps {
   // git file diff (takes over the editor pane while open)
   gitDiff: GitDiffView | null;
   onCloseGitDiff: () => void;
-  // knowledge
-  knowledgeVm: ReturnType<typeof useKnowledgeViewModel>;
-  ragVm: ReturnType<typeof useRagInspectorViewModel>;
   appTheme: "dark" | "light";
   /** Execution timeline, shown as the Activity pane. */
   timelineEntries: TimelineEntryVm[];
@@ -86,8 +88,14 @@ const EDITABLE_FILE_OPTIONS = {
   readOnly: false,
   minimap: { enabled: false },
   fontSize: 13,
-  cursorStyle: "block",
-  cursorBlinking: "blink",
+  // The caret is Monaco's own: a content widget pinned "near" the position
+  // drifted away from the text cursor, and only tracked it while the editor
+  // held focus. A native line caret is the cursor, so it can never disagree
+  // with where typing lands. It is widened and tinted (see
+  // `.atelier-file-editor` in index.css) to stay easy to find.
+  cursorStyle: "line",
+  cursorWidth: 2,
+  cursorBlinking: "solid",
   scrollBeyondLastLine: false,
   wordWrap: "on",
   wordBasedSuggestions: "off",
@@ -135,14 +143,12 @@ const SEARCH_DECORATION_ACTIVE = {
  */
 export function RightDock(props: RightDockProps) {
   const { rightTab } = props;
+  const knowledgeVm = useKnowledgeViewModel();
+  const ragVm = useRagInspectorViewModel();
   // A conflicted file opened from the explorer takes over the editor pane
   // the same way a git diff does — and outranks it, since a merge conflict
   // is the more urgent thing to be looking at.
   const conflictOpen = useGitMergeStore((s) => s.openPath !== null);
-  // The graph chunk loads on first open, then the pane stays mounted so
-  // its WebGL scene survives tab switches (same rule as Monaco/xterm).
-  const graphOpened = useRef(false);
-  if (rightTab === "graph") graphOpened.current = true;
 
   return (
     <div className="flex h-full flex-col">
@@ -178,19 +184,11 @@ export function RightDock(props: RightDockProps) {
         </Pane>
 
         <Pane active={rightTab === "graph"}>
-          {graphOpened.current && (
-            <Suspense fallback={null}>
-              <GraphPane
-                vm={props.knowledgeVm}
-                theme={props.appTheme}
-                active={rightTab === "graph"}
-              />
-            </Suspense>
-          )}
+          <GraphPane vm={knowledgeVm} theme={props.appTheme} />
         </Pane>
 
-        <Pane active={rightTab === "rag"} mountWhenHidden={false}>
-          <RagInspectorPane vm={props.ragVm} />
+        <Pane active={rightTab === "rag"}>
+          <RagInspectorPane vm={ragVm} />
         </Pane>
 
         {/* The execution timeline. It was a tab in the bottom dock; as a
@@ -257,10 +255,54 @@ type SaveState = "clean" | "dirty" | "saving" | "saved" | "error";
 
 const AUTOSAVE_MS = 800;
 
-/** Only the app's own markdown cache is user-editable; source files stay
- *  read-only — the agent edits those, and its edits belong to the chat. */
+/**
+ * Languages a bundled Monaco worker can pretty-print. Monaco ships a
+ * formatter with the TypeScript, JSON, CSS and HTML workers and with
+ * nothing else — `markdown`, `yaml`, `python`, `go` … have no provider, so
+ * the Format action is hidden for them rather than being a button that
+ * does nothing.
+ */
+const FORMATTABLE_LANGUAGES = new Set([
+  "typescript",
+  "javascript",
+  "json",
+  "css",
+  "scss",
+  "less",
+  "html",
+]);
+
+/** Formatting a huge generated file (a lockfile, a bundled vendor blob)
+ *  costs seconds of worker time for a file nobody is editing by hand. */
+const FORMAT_MAX_BYTES = 400_000;
+
+/**
+ * Runs Monaco's own format-document action. The action is always
+ * registered, but it no-ops until the language's worker has registered its
+ * provider — which happens asynchronously the first time a language is
+ * used. On open we therefore retry a few times; an already-formatted file
+ * simply comes back unchanged each time, which is cheap.
+ */
+async function formatDocument(
+  editor: Parameters<NonNullable<React.ComponentProps<typeof Editor>["onMount"]>>[0],
+  attempts = 1
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const model = editor.getModel();
+    if (!model) return;
+    const before = model.getVersionId();
+    await editor.getAction("editor.action.formatDocument")?.run();
+    if (model.getVersionId() !== before) return;
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+  }
+}
+
+/** Every opened text file is user-editable — the explorer pane is a real
+ *  editor, not just a preview of what the agent produced. */
 function isEditablePath(path: string | null): boolean {
-  return path?.startsWith(".atelier/") ?? false;
+  return path !== null;
 }
 
 /** The file pane is just a Monaco view — except for markdown, where the
@@ -293,6 +335,29 @@ const FilePane = memo(function FilePane(props: {
   const html = isHtmlPath(props.selectedPath);
   const previewable = isPreviewablePath(props.selectedPath);
   const [saveState, setSaveState] = useState<SaveState>("clean");
+  /**
+   * The text Monaco actually holds. It is NOT `props.fileContent` directly:
+   * autosaving a note makes the workspace watcher echo the file back, and
+   * that echo lands a keystroke or two late. Feeding it straight into the
+   * editor replaced the whole model — dropping the characters typed since
+   * the save and throwing the caret to the end of the edit — which read as
+   * the editor "jumping" mid-sentence. External content is adopted only
+   * while this pane has no local edit in flight.
+   */
+  const [text, setText] = useState<string>(props.fileContent ?? "");
+  const dirtyRef = useRef(false);
+  /**
+   * True while a format-on-open rewrite is being applied. The resulting
+   * model change is not the user's edit, so it is queued as "Unsaved"
+   * without arming the autosave timer — browsing files in the explorer
+   * must not rewrite them on disk behind the user's back. Ctrl+S, or the
+   * first real keystroke, is what commits it.
+   */
+  const formattingRef = useRef(false);
+  /** Whether the queued write holds nothing but a format-on-open rewrite. */
+  const formatOnlyRef = useRef(false);
+  /** Monaco mounts asynchronously; format-on-open waits for this. */
+  const [editorReady, setEditorReady] = useState(false);
   /** "editor" keeps the source in Monaco; "preview" renders HTML or Markdown. */
   const [view, setView] = useState<"editor" | "preview">("editor");
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
@@ -309,15 +374,29 @@ const FilePane = memo(function FilePane(props: {
    *  lives in a different view tree) can highlight the same matches. */
   const searchQuery = useWorkspaceStore((s) => s.searchQuery);
 
-  const flush = useCallback(async () => {
+  const flush = useCallback(async (force = false) => {
     window.clearTimeout(timerRef.current);
     const pending = pendingRef.current;
     if (!pending) return;
+    // An unforced flush (leaving the file, unmounting) drops a queue that
+    // only holds a format-on-open rewrite: the user never asked for it, so
+    // it must not reach disk as a side effect of navigating away.
+    if (formatOnlyRef.current && !force) {
+      pendingRef.current = null;
+      formatOnlyRef.current = false;
+      dirtyRef.current = false;
+      setSaveState("clean");
+      return;
+    }
     pendingRef.current = null;
+    formatOnlyRef.current = false;
     setSaveState("saving");
     try {
       await bridge.rpc("fs.writeFile", pending);
       // Typing during the await re-queues; don't claim "Saved" over it.
+      // Only a fully-drained queue makes this pane clean again; until then
+      // the watcher echo must keep its hands off the model.
+      dirtyRef.current = pendingRef.current !== null;
       setSaveState(pendingRef.current ? "dirty" : "saved");
     } catch {
       // Keep the edit queued so Ctrl+S / the next change retries it.
@@ -334,6 +413,24 @@ const FilePane = memo(function FilePane(props: {
     return () => void flush();
   }, [props.selectedPath, flush]);
 
+  // A new file always wins: its content is a different document, not an
+  // echo of this one.
+  useEffect(() => {
+    dirtyRef.current = false;
+    setText(props.fileContent ?? "");
+    // Keyed on the path ALONE — adding fileContent here would re-arm on
+    // every watcher echo and undo the guard. Content changes are the next
+    // effect's job.
+  }, [props.selectedPath]);
+
+  // An agent (or another editor) changing the open file on disk is adopted
+  // — unless the user is mid-edit, in which case their buffer is the truth
+  // and the pending autosave will write it back.
+  useEffect(() => {
+    if (dirtyRef.current) return;
+    setText(props.fileContent ?? "");
+  }, [props.fileContent]);
+
   // Switching workspaces DROPS a queued edit instead of flushing it. The
   // bridge is already re-pointed at the new project's agent, and the queued
   // path is relative — retrying it there would write this project's content
@@ -342,6 +439,7 @@ const FilePane = memo(function FilePane(props: {
   useEffect(() => {
     window.clearTimeout(timerRef.current);
     pendingRef.current = null;
+    dirtyRef.current = false;
     setSaveState("clean");
     // Cached "@" listings belong to the project we just left.
     clearMentionCache();
@@ -349,9 +447,17 @@ const FilePane = memo(function FilePane(props: {
 
   const onChange = (value: string | undefined) => {
     if (!editable || value === undefined || !props.selectedPath) return;
+    setText(value);
+    dirtyRef.current = true;
     pendingRef.current = { path: props.selectedPath, content: value };
     setSaveState("dirty");
     window.clearTimeout(timerRef.current);
+    if (formattingRef.current) {
+      formatOnlyRef.current = true;
+      return;
+    }
+    // A real keystroke on top of a format adopts it: both go to disk.
+    formatOnlyRef.current = false;
     timerRef.current = window.setTimeout(() => void flush(), AUTOSAVE_MS);
   };
 
@@ -363,9 +469,57 @@ const FilePane = memo(function FilePane(props: {
     registerMarkdownMentions(monaco);
     editor.addCommand(
       monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
-      () => void flush()
+      () => void flush(true)
     );
+    setEditorReady(true);
   };
+
+  /** The header button and Shift+Alt+F run the same one-shot format. */
+  const runFormat = useCallback(() => {
+    const editor = editorRef.current;
+    if (editor) void formatDocument(editor);
+  }, []);
+
+  /*
+   * Format on open. Every file the explorer opens is pretty-printed as soon
+   * as its model is live, so what you read is the formatted shape rather
+   * than whatever the last writer left. The rewrite lands in the buffer
+   * only — the pane goes "Unsaved" and waits for Ctrl+S or a real edit, so
+   * simply browsing a file never rewrites it on disk.
+   */
+  useEffect(() => {
+    if (!editable || !editorReady) return;
+    // Never reformat a buffer the user is in the middle of typing into.
+    if (dirtyRef.current) return;
+    if (!FORMATTABLE_LANGUAGES.has(props.language)) return;
+    if ((props.fileContent?.length ?? 0) > FORMAT_MAX_BYTES) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    let cancelled = false;
+    void (async () => {
+      formattingRef.current = true;
+      try {
+        // The model is swapped by the `path` prop; only format the file
+        // this effect was fired for.
+        const uri = editor.getModel()?.uri.path ?? "";
+        if (uri.endsWith(props.selectedPath ?? "")) {
+          await formatDocument(editor, 3);
+        }
+      } finally {
+        if (!cancelled) formattingRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      formattingRef.current = false;
+    };
+  }, [
+    props.selectedPath,
+    props.language,
+    props.fileContent,
+    editable,
+    editorReady,
+  ]);
 
   // Unmount releases the editor ref and any decorations the search effect
   // put down — a fresh FilePane (workspace switch) starts with a clean view.
@@ -416,7 +570,7 @@ const FilePane = memo(function FilePane(props: {
     // hunt for the highlighted region after opening a file from search.
     const first = matches[0]?.range;
     if (first) editor.revealRangeInCenterIfOutsideViewport(first);
-  }, [searchQuery, props.fileContent, props.selectedPath]);
+  }, [searchQuery, text, props.selectedPath]);
 
   if (props.fileContent === null) {
     return <Empty icon={FileCode2} text="Select a file in the explorer." />;
@@ -462,6 +616,22 @@ const FilePane = memo(function FilePane(props: {
                   : "Unsaved"}
           </span>
         )}
+        {editable && FORMATTABLE_LANGUAGES.has(props.language) && (
+          <Tooltip content="Format document (Shift+Alt+F)">
+            <button
+              type="button"
+              onClick={runFormat}
+              aria-label="Format document"
+              className={cn(
+                "grid h-6 w-6 shrink-0 place-items-center rounded-md",
+                "text-muted-foreground/60 transition-colors",
+                "hover:bg-muted/60 hover:text-foreground"
+              )}
+            >
+              <AlignLeft className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+        )}
         {previewable && (
           <div
             role="tablist"
@@ -490,15 +660,13 @@ const FilePane = memo(function FilePane(props: {
           markdown ? (
             <div className="h-full overflow-y-auto px-6 py-5">
               <div className="chat-md mx-auto max-w-3xl">
-                <Markdown remarkPlugins={[remarkGfm]}>
-                  {props.fileContent ?? ""}
-                </Markdown>
+                <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
               </div>
             </div>
           ) : html ? (
             <iframe
               title={props.selectedPath ?? "HTML preview"}
-              srcDoc={props.fileContent ?? ""}
+              srcDoc={text}
               sandbox=""
               className="h-full w-full border-0 bg-background"
             />
@@ -506,12 +674,13 @@ const FilePane = memo(function FilePane(props: {
         ) : (
           <Editor
             path={props.selectedPath ?? undefined}
-            value={props.fileContent}
+            value={text}
             language={props.language}
             theme={props.monacoTheme}
             onChange={editable ? onChange : undefined}
             onMount={onMount}
             options={editable ? EDITABLE_FILE_OPTIONS : FILE_EDITOR_OPTIONS}
+            className={editable ? "atelier-file-editor" : undefined}
           />
         )}
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, Loader2 } from "lucide-react";
 import { addProject, openWorkspace } from "@/services/project-switch";
 import { BareTitleBar } from "@/views/shell/WindowControls";
 import { BrandMark } from "@/components/BrandMark";
@@ -131,7 +131,14 @@ export function WelcomeScreen() {
                 "disabled:opacity-60"
               )}
             >
-              <FolderOpen className="h-4 w-4" />
+              {/* The label alone read as a disabled button rather than a
+                  working one; opening a workspace forks an agent and scans a
+                  tree, which is seconds of nothing to look at. */}
+              {busy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <FolderOpen className="h-4 w-4" />
+              )}
               {busy ? "Opening…" : "Choose a folder…"}
             </button>
           </div>

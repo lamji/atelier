@@ -667,15 +667,41 @@ async function defaultBranch(root: string): Promise<string> {
 
 // ── Sync + merge-conflict resolution ─────────────────────────────────────
 
-/** Quiet `git fetch`, then the fresh ahead/behind of the current branch. */
+/**
+ * Quiet `git fetch`, then the fresh ahead/behind of the current branch.
+ *
+ * Every remote, not just the current branch's: a checkout with a fork
+ * plus an upstream had half its branches go stale because the panel only
+ * ever refreshed one of them. `--prune` drops remote-tracking refs whose
+ * branch is gone, and `--tags` brings tags a plain fetch would skip, so
+ * the pickers list what the server actually has and nothing it does not.
+ *
+ * Nothing is merged into the working tree — this only moves the
+ * remote-tracking refs, which is what makes it safe to run any time.
+ */
 export async function fetchRun(
   git: GitService
-): Promise<{ ahead: number; behind: number }> {
+): Promise<{ ahead: number; behind: number; updated: number }> {
   const root = git.root;
-  const fetched = await capture("git", ["fetch", "--prune"], root);
+  const fetched = await capture(
+    "git",
+    ["fetch", "--all", "--prune", "--tags"],
+    root
+  );
   if (fetched.code !== 0) throw new Error(fetched.out || "git fetch failed");
   const status = await git.status();
-  return { ahead: status.ahead, behind: status.behind };
+  return { ahead: status.ahead, behind: status.behind, updated: countRefUpdates(fetched.out) };
+}
+
+/**
+ * How many refs the fetch moved. git prints one line per updated ref, and
+ * every one of them names its destination with an arrow —
+ * "   abc1234..def5678  main -> origin/main", " * [new branch] x ->
+ * origin/x", " - [deleted] (none) -> origin/gone". The rest of the output
+ * ("Fetching origin", "From github.com:o/r") has no arrow.
+ */
+function countRefUpdates(output: string): number {
+  return output.split("\n").filter((line) => / -> /.test(line)).length;
 }
 
 const PULL_MODE_FLAG: Record<GitPullMode, string> = {
@@ -704,6 +730,52 @@ export async function pullRun(
     args.push(source.remote);
     if (source.branch) args.push(source.branch);
   }
+  const result = await runStreaming("git", args, root, io);
+  const conflicts = result.ok ? [] : await unmergedPaths(git);
+  return { result, conflicts };
+}
+
+/**
+ * Replays the current branch on top of `onto`.
+ *
+ * Two things make this different from running the command by hand:
+ *
+ * `--autostash` — an in-app rebase is started from a panel that shows
+ * uncommitted work, and git refuses to rebase a dirty tree. The stash is
+ * taken and popped by git itself, so the changes are still there when the
+ * replay finishes.
+ *
+ * `keep` — the automatic side, in the caller's terms rather than git's.
+ * During a rebase HEAD is the branch being replayed ONTO, so git's "ours"
+ * is the base and "theirs" is the work being replayed. Keeping the
+ * rebasing branch's own version is therefore `-X theirs`, which reads
+ * backwards to everyone; the mapping lives here so the UI never has to
+ * say it.
+ *
+ * A conflicted exit is an expected outcome — the caller reads `conflicts`
+ * and opens the resolver — so it resolves rather than throws.
+ */
+export async function rebaseRun(
+  git: GitService,
+  onto: string,
+  keep: "mine" | "base" | "none",
+  io: OpIo,
+  remote?: string
+): Promise<{ result: GitOpResult; conflicts: string[] }> {
+  const root = git.root;
+  if (remote) {
+    // Rebasing onto a remote-tracking ref is only meaningful against a
+    // fresh copy of it; a stale one silently replays onto old work.
+    const branch = onto.startsWith(`${remote}/`)
+      ? onto.slice(remote.length + 1)
+      : onto;
+    const fetched = await runStreaming("git", ["fetch", remote, branch], root, io);
+    if (!fetched.ok) return { result: fetched, conflicts: [] };
+  }
+  const args = ["rebase", "--autostash"];
+  if (keep === "mine") args.push("-X", "theirs");
+  else if (keep === "base") args.push("-X", "ours");
+  args.push(onto);
   const result = await runStreaming("git", args, root, io);
   const conflicts = result.ok ? [] : await unmergedPaths(git);
   return { result, conflicts };

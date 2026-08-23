@@ -28,6 +28,10 @@ import type { PendingImage } from "@/types";
 
 export type { EffortChoice, ModelChoice, PendingImage };
 
+/** Re-reads of a model roster that failed, and the first delay. */
+const MODELS_RETRIES = 4;
+const MODELS_RETRY_MS = 1_200;
+
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /** A prompt file is the main prompt, so the cap is generous — but a huge
@@ -106,6 +110,18 @@ function clipPromptFile(content: string): string {
 type ImageResult =
   | { ok: true; image: PendingImage }
   | { ok: false; reason: string };
+
+interface ComposerDraft {
+  input: string;
+  attachments: string[];
+  images: PendingImage[];
+}
+
+const EMPTY_COMPOSER_DRAFT: ComposerDraft = {
+  input: "",
+  attachments: [],
+  images: [],
+};
 
 /**
  * Reads an image File into base64 + a data URL. Rejections carry a reason
@@ -280,10 +296,45 @@ export function useComposerViewModel(): ComposerViewModel {
   const autoValidate = usePreferencesStore((s) => s.autoValidate);
   const changeAutoValidate = usePreferencesStore((s) => s.setAutoValidate);
 
-  const [input, setInput] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
+  const draft = selectedId
+    ? (drafts[selectedId] ?? EMPTY_COMPOSER_DRAFT)
+    : EMPTY_COMPOSER_DRAFT;
+  const { input, attachments, images } = draft;
+  const setInput = useCallback(
+    (value: string) => {
+      if (!selectedId) return;
+      setDrafts((prev) => {
+        const current = prev[selectedId] ?? EMPTY_COMPOSER_DRAFT;
+        return { ...prev, [selectedId]: { ...current, input: value } };
+      });
+    },
+    [selectedId]
+  );
+  const setAttachments = useCallback(
+    (update: string[] | ((current: string[]) => string[])) => {
+      if (!selectedId) return;
+      setDrafts((prev) => {
+        const current = prev[selectedId] ?? EMPTY_COMPOSER_DRAFT;
+        const attachments =
+          typeof update === "function" ? update(current.attachments) : update;
+        return { ...prev, [selectedId]: { ...current, attachments } };
+      });
+    },
+    [selectedId]
+  );
+  const setImages = useCallback(
+    (update: PendingImage[] | ((current: PendingImage[]) => PendingImage[])) => {
+      if (!selectedId) return;
+      setDrafts((prev) => {
+        const current = prev[selectedId] ?? EMPTY_COMPOSER_DRAFT;
+        const images = typeof update === "function" ? update(current.images) : update;
+        return { ...prev, [selectedId]: { ...current, images } };
+      });
+    },
+    [selectedId]
+  );
   const [error, setError] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<string[]>([]);
-  const [images, setImages] = useState<PendingImage[]>([]);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -341,31 +392,53 @@ export function useComposerViewModel(): ComposerViewModel {
   const providerRevision = useProvidersStore((s) => s.revision);
   useEffect(() => {
     if (!online) return;
-    void bridge
-      .rpc("models.list", {})
-      .then(({ models }) => {
-        setModels(models);
-        // Only a real answer proves the roster is empty; a failed probe
-        // must not be read as "you turned everything off".
-        setModelsLoaded(true);
-      })
-      .catch(() => undefined);
+    let cancelled = false;
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    /*
+     * Retried, because this call decides which providers exist for the whole
+     * session. It fires once when the bridge comes up — which is exactly
+     * when the agent is busiest — and it used to swallow any failure. One
+     * unlucky call and Codex and Ollama were missing from the picker until
+     * the app was restarted, with nothing to say why.
+     */
+    const load = (): void => {
+      void bridge
+        .rpc("models.list", {})
+        .then(({ models }) => {
+          if (cancelled) return;
+          setModels(models);
+          // Only a real answer proves the roster is empty; a failed probe
+          // must not be read as "you turned everything off".
+          setModelsLoaded(true);
+        })
+        .catch(() => {
+          if (cancelled || attempt >= MODELS_RETRIES) return;
+          attempt += 1;
+          timer = setTimeout(load, MODELS_RETRY_MS * attempt);
+        });
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [online, providerRevision]);
 
-  // Switching chats clears the draft's attachments, not the text: the text
-  // is the thought in progress, the attachments belonged to the old chat.
+  // Draft text, files, and images are keyed by conversation above. Switching
+  // chats only clears transient feedback; switching back restores that chat's
+  // complete in-progress message.
   useEffect(() => {
-    setAttachments([]);
     setError(null);
   }, [selectedId]);
 
-  // Switching WORKSPACES clears the draft outright. A thought in progress
-  // belongs to the project it was typed for — carrying the text (or staged
-  // images) into another workspace would send it to a different agent.
+  // Conversation ids are only meaningful inside their workspace. Drop the
+  // entire draft map when projects change so no draft can cross that boundary.
   const workspaceEpoch = useWorkspaceStore((s) => s.workspaceEpoch);
   useEffect(() => {
-    setInput("");
-    setImages([]);
+    setDrafts({});
   }, [workspaceEpoch]);
 
   const send = useCallback(() => {

@@ -47,9 +47,10 @@ export function RulesTab() {
     try {
       const file = await bridge.rpc("fs.readFile", { path });
       useGitStore.getState().setGitDiff(null);
-      useWorkspaceStore
-        .getState()
-        .setSelectedFile(file.path, file.content, file.mtime);
+      const workspace = useWorkspaceStore.getState();
+      workspace.setSelectedFile(file.path, file.content, file.mtime);
+      workspace.setWorkbenchVisible(true);
+      workspace.closeSettings();
     } catch (e) {
       setError(errText(e));
     }
@@ -117,9 +118,9 @@ export function RulesTab() {
       </div>
       <p className="px-0.5 text-[10px] leading-relaxed text-muted-foreground/60">
         Markdown files in{" "}
-        <span className="font-mono">.atelier/rules</span>, given to the agent
-        with every run. Restart Atelier after adding one so running agents
-        pick it up.
+        <span className="font-mono">.atelier/rules</span>. Every enabled file
+        is appended to each agent session. Changes apply on the next send —
+        no restart needed.
       </p>
 
       {error && (

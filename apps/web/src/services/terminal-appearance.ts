@@ -1,6 +1,6 @@
 import type { ITheme } from "@xterm/xterm";
 
-export type TerminalProfileId = "ubuntu" | "fedora" | "matrix";
+export type TerminalProfileId = "system" | "ubuntu" | "fedora" | "matrix";
 
 export interface TerminalProfile {
   id: TerminalProfileId;
@@ -13,6 +13,35 @@ export interface TerminalProfile {
 }
 
 export const TERMINAL_PROFILES: Record<TerminalProfileId, TerminalProfile> = {
+  /**
+   * Follows the app.
+   *
+   * The other profiles are fixed palettes — an aubergine Ubuntu shell stays
+   * aubergine in a light workspace, which is a striking thing to put next to
+   * a white editor. This one has no colours of its own: the surfaces are the
+   * shell's own tokens, so switching the app to light switches the terminal
+   * with it, and xterm's own theme is resolved per render from the dark flag
+   * (see TerminalRegistry.themeFor — a "system" profile takes the same
+   * branch as no profile at all).
+   *
+   * `theme` here is never read for that reason; it is the dark variant so
+   * the type stays honest about what a profile is.
+   */
+  system: {
+    id: "system",
+    name: "Match the app",
+    description: "Follows the light or dark theme",
+    surface: "var(--card)",
+    chrome: "var(--muted)",
+    tab: "var(--accent)",
+    theme: {
+      background: "#00000000",
+      foreground: "#e7eeee",
+      cursor: "#68aeb8",
+      cursorAccent: "#111a1c",
+      selectionBackground: "#35666e66",
+    },
+  },
   ubuntu: {
     id: "ubuntu",
     name: "Ubuntu",
@@ -109,9 +138,19 @@ export const TERMINAL_PROFILES: Record<TerminalProfileId, TerminalProfile> = {
 };
 
 export function terminalProfile(id: TerminalProfileId): TerminalProfile {
-  return TERMINAL_PROFILES[id] ?? TERMINAL_PROFILES.ubuntu;
+  return TERMINAL_PROFILES[id] ?? TERMINAL_PROFILES.system;
+}
+
+/** True for the profile that has no palette of its own. */
+export function followsAppTheme(id: TerminalProfileId): boolean {
+  return id === "system";
 }
 
 export function isTerminalProfileId(value: string | null): value is TerminalProfileId {
-  return value === "ubuntu" || value === "fedora" || value === "matrix";
+  return (
+    value === "system" ||
+    value === "ubuntu" ||
+    value === "fedora" ||
+    value === "matrix"
+  );
 }

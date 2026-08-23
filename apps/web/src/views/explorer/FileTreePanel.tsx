@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
+  FilePlus2,
+  FolderPlus,
   ChevronRight,
   FileText,
   Folder,
@@ -623,13 +625,27 @@ export function FileTreePanel({ vm }: FileTreePanelProps) {
   if (!vm.tree) {
     return (
       <div className="flex h-full flex-col">
-        <ExplorerHeader vm={vm} query={query} onQueryChange={onQueryChange} totalFiles={0} />
+        <ExplorerHeader vm={vm} query={query} onQueryChange={onQueryChange} />
         <WorkspacePageBody
           className={cn(
             "flex min-h-0 flex-1 items-center justify-center px-3 pb-3"
           )}
         >
-          <p className="text-sm text-muted-foreground">Waiting for workspace…</p>
+          {vm.treeError ? (
+            <div className="flex max-w-[260px] flex-col items-center gap-2 text-center">
+              <p className="text-sm text-foreground/70">
+                Could not read this workspace
+              </p>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {vm.treeError}
+              </p>
+              <Button size="sm" variant="outline" onClick={vm.refresh}>
+                Try again
+              </Button>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Waiting for workspace…</p>
+          )}
         </WorkspacePageBody>
       </div>
     );
@@ -639,7 +655,7 @@ export function FileTreePanel({ vm }: FileTreePanelProps) {
 
   return (
     <div className="flex h-full flex-col">
-      <ExplorerHeader vm={vm} query={query} onQueryChange={onQueryChange} totalFiles={allFiles.length} />
+      <ExplorerHeader vm={vm} query={query} onQueryChange={onQueryChange} />
       <WorkspacePageBody
         className={cn(
           "flex min-h-0 flex-1 flex-col px-3 pb-3 pt-3"
@@ -840,12 +856,10 @@ function ExplorerHeader({
   vm,
   query,
   onQueryChange,
-  totalFiles,
 }: {
   vm: FileExplorerViewModel;
   query: string;
   onQueryChange: (value: string) => void;
-  totalFiles: number;
 }) {
   const stats = useChangeStats();
 
@@ -856,6 +870,25 @@ function ExplorerHeader({
         title="Files"
         actions={
           <>
+            {/*
+              * New file / new folder, at the ROOT — the same place VS Code
+              * puts them and the same thing they do there. Creating inside a
+              * folder is the right-click menu's job; this is for the case
+              * the explorer had no answer to at all, which is a project
+              * whose root file you want and no existing file to aim at.
+              */}
+            <HeaderButton
+              title="New File (in project root)"
+              onClick={() => vm.startCreate("", "file")}
+            >
+              <FilePlus2 className="h-3.5 w-3.5" />
+            </HeaderButton>
+            <HeaderButton
+              title="New Folder (in project root)"
+              onClick={() => vm.startCreate("", "dir")}
+            >
+              <FolderPlus className="h-3.5 w-3.5" />
+            </HeaderButton>
             <HeaderButton title="Refresh Explorer" onClick={vm.refresh}>
               <RefreshCw className="h-3.5 w-3.5" />
             </HeaderButton>
@@ -867,11 +900,22 @@ function ExplorerHeader({
       />
       <div className="px-6 pb-3">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 font-medium text-foreground/70">
-              <span className="font-bold">{totalFiles}</span> files
-            </span>
-            {stats.conflicts > 0 && (
+          {/*
+            * Only the conflicts alert survives here.
+            *
+            * This row used to carry a file count, a stacked change bar and a
+            * pill per change kind. In a sidebar it is a two-line wrap on
+            * first launch — the panel opens at its default width, the row
+            * breaks across lines, and the panel reads as broken until it is
+            * dragged wider. None of it was worth that: the count is trivia,
+            * and the change breakdown is the Changes view's actual job,
+            * where there is room for it.
+            *
+            * Conflicts are different in kind: they block a merge, they are
+            * rare, and the chip is a button that goes somewhere.
+            */}
+          {stats.conflicts > 0 && (
+            <div className="flex items-center text-[11px]">
               <button
                 onClick={() => useWorkspaceStore.getState().setActivityView("git")}
                 title="Open the merge conflicts in Changes"
@@ -881,51 +925,8 @@ function ExplorerHeader({
                 {stats.conflicts === 1 ? "conflict" : "conflicts"}
                 <span className="opacity-70">· resolve →</span>
               </button>
-            )}
-            {stats.total > 0 && (
-              <>
-                <div
-                  className="flex h-1.5 w-24 overflow-hidden rounded-full bg-muted/40"
-                  title={`${stats.added} added, ${stats.modified} modified, ${stats.deleted} deleted, ${stats.conflicts} conflicted`}
-                >
-                  {stats.conflicts > 0 && (
-                    <span
-                      className="h-full bg-destructive"
-                      style={{ width: `${(stats.conflicts / stats.total) * 100}%` }}
-                    />
-                  )}
-                  {stats.added > 0 && (
-                    <span
-                      className="h-full bg-success"
-                      style={{ width: `${(stats.added / stats.total) * 100}%` }}
-                    />
-                  )}
-                  {stats.modified > 0 && (
-                    <span
-                      className="h-full bg-warning"
-                      style={{ width: `${(stats.modified / stats.total) * 100}%` }}
-                    />
-                  )}
-                  {stats.deleted > 0 && (
-                    <span
-                      className="h-full bg-destructive"
-                      style={{ width: `${(stats.deleted / stats.total) * 100}%` }}
-                    />
-                  )}
-                </div>
-                <StatPill label="changed" value={stats.total} color="text-foreground/70 border-border/60 bg-muted/40" />
-                {stats.added > 0 && (
-                  <StatPill label="added" value={stats.added} color="text-success border-success/40 bg-success/10" />
-                )}
-                {stats.modified > 0 && (
-                  <StatPill label="modified" value={stats.modified} color="text-warning border-warning/40 bg-warning/10" />
-                )}
-                {stats.deleted > 0 && (
-                  <StatPill label="deleted" value={stats.deleted} color="text-destructive border-destructive/40 bg-destructive/10" />
-                )}
-              </>
-            )}
-          </div>
+            </div>
+          )}
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <input
@@ -955,19 +956,6 @@ function ExplorerHeader({
   );
 }
 
-function StatPill({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium",
-        color
-      )}
-    >
-      <span className="font-bold">{value}</span>
-      {label}
-    </span>
-  );
-}
 
 /** Flat, VS Code-like results list shown while `query` is non-empty, with
  * the matched substring highlighted in each file's name. */

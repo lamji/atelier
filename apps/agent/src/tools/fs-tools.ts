@@ -178,15 +178,25 @@ export function registerFsTools(
         glob?: string;
         maxResults?: number;
         regex?: boolean;
-      }
-    ) => ({
-      matches: await files.search(
+      },
+      ctx
+    ) => {
+      const outcome = await files.search(
         input.query,
         input.glob,
         Math.min(Math.max(input.maxResults ?? 100, 1), 500),
-        input.regex ?? false
-      ),
-    })
+        input.regex ?? false,
+        { signal: ctx.signal }
+      );
+      // Said out loud, because a truncated search that looks complete is how
+      // "it is not in the codebase" gets reported about a file that is.
+      const note = outcome.truncated
+        ? `Search stopped early after scanning ${outcome.scanned} files ` +
+          "(time/size limit). These matches are partial — narrow it with a " +
+          "glob (e.g. src/**/*.ts) or a more specific query."
+        : undefined;
+      return { matches: outcome.matches, scanned: outcome.scanned, note };
+    }
   );
 }
 

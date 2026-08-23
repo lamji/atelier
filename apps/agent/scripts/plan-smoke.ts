@@ -113,7 +113,60 @@ function main(): void {
     zeroEditTracker.transitionStep(zeroEditTask, "fix-header", "done").ok
   );
 
+  // The reported Ollama escape, second form: gemma3 shipped a plan whose
+  // drafts carried NO files and checked four steps done over an untouched
+  // workspace. The old guard needed a file list to fire, and the model
+  // supplies the file list — so it never ran.
+  const filelessTask = "task-fileless";
+  const filelessTracker = new PlanTracker(new EventBus());
+  filelessTracker.setPlan({
+    id: "plan-fileless",
+    taskId: filelessTask,
+    goal: "build a themed Expo dashboard",
+    createdAt: 0,
+    steps: [
+      { id: "f1", title: "Define Theme and Colors", files: [], status: "pending" },
+      { id: "f2", title: "Implement Base Components", files: [], status: "pending" },
+      { id: "f3", title: "Typecheck both projects", files: [], status: "pending" },
+    ],
+  });
+  filelessTracker.transitionStep(filelessTask, "f1", "in-progress");
+  const filelessDone = filelessTracker.transitionStep(filelessTask, "f1", "done");
+  check(
+    "a step with no declared files still cannot go green over 0 edits",
+    !filelessDone.ok && (filelessDone.error ?? "").includes("0 applied edits"),
+    filelessDone.error
+  );
+  filelessTracker.noteFileEdited(filelessTask, "theme/colors.ts");
+  check(
+    "the same step closes once a real edit lands",
+    filelessTracker.transitionStep(filelessTask, "f1", "done").ok
+  );
+  filelessTracker.transitionStep(filelessTask, "f2", "in-progress");
+  check(
+    "a change-labelled step still owes an edit of its OWN",
+    !filelessTracker.transitionStep(filelessTask, "f2", "done").ok
+  );
+  filelessTracker.noteFileEdited(filelessTask, "components/Card.tsx");
+  check(
+    "and closes on its own edit",
+    filelessTracker.transitionStep(filelessTask, "f2", "done").ok
+  );
+  filelessTracker.transitionStep(filelessTask, "f3", "in-progress");
+  check(
+    "a verify step never owes an edit — running the check is its work",
+    filelessTracker.transitionStep(filelessTask, "f3", "done").ok
+  );
+
   check("s1 explicitly starts", tracker.transitionStep(TASK, "s1", "in-progress").ok);
+  // s1 now needs the same evidence every other step needs: this task has
+  // changed nothing yet, and a checkmark over an untouched workspace is
+  // exactly what the guard exists to refuse.
+  check(
+    "s1 cannot check done before its edit lands",
+    !tracker.transitionStep(TASK, "s1", "done").ok
+  );
+  tracker.noteFileEdited(TASK, "a/types.ts");
   check("s1 explicitly checks done", tracker.transitionStep(TASK, "s1", "done").ok);
 
   // A matching real edit may start only the current step; done is explicit.
@@ -375,9 +428,12 @@ function main(): void {
     sameFileEditProgress.changedFiles === progressBefore.changedFiles &&
       completionGateMadeProgress(progressBefore, sameFileEditProgress)
   );
+  // Reversed deliberately. A checkmark is the model's own assertion, and a
+  // model that checked one more step off an untouched workspace every round
+  // reset this counter every round — which left the gate loop unbounded.
   check(
-    "a completed plan step resets the gate stall count",
-    completionGateMadeProgress(progressBefore, stepProgress)
+    "a completed plan step alone is NOT progress",
+    !completionGateMadeProgress(progressBefore, stepProgress)
   );
   check(
     "successful verification resets the gate stall count",

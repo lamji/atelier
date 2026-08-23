@@ -8,6 +8,7 @@ import { execa } from "execa";
 import type { ImageAttachment, ReasoningEffort } from "@atelier/protocol";
 import type { EventBus } from "../../events/event-bus.js";
 import type { CodexToolBridgeSession } from "./tool-bridge.js";
+import { codexBinary } from "./binary.js";
 
 export interface CodexExecOptions {
   cwd: string;
@@ -256,7 +257,7 @@ async function runAttempt(
       .writeFile(process.env.ATELIER_DUMP_CODEX_PROMPT, input, "utf8")
       .catch(() => undefined);
   }
-  const child = execa("codex", args, {
+  const child = execa(codexBinary(), args, {
       cwd: opts.cwd,
       input,
       // `codex` is a .cmd on Windows, so it launches through cmd.exe —

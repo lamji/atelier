@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from "react";
 import { OpeningScreen } from "@/screens/OpeningScreen";
+import { LoginScreen } from "@/screens/LoginScreen";
 import { WelcomeScreen } from "@/screens/WelcomeScreen";
 import { WorkspaceSkeleton } from "@/screens/WorkspaceSkeleton";
 import { ErrorBoundary } from "@/views/shell/ErrorBoundary";
@@ -9,6 +10,7 @@ import {
   startProjectSync,
 } from "@/services/project-switch";
 import { useProjectsStore } from "@/state/projects.store";
+import { useAuthStore } from "@/state/auth.store";
 
 /**
  * The workspace carries Monaco, xterm and the graph stack — lazy so the
@@ -41,20 +43,21 @@ function warmWorkspaceChunk(): void {
  * adding both live in the workspace's own selector.
  */
 export function App() {
+  const user = useAuthStore((s) => s.user);
+  const authLoading = useAuthStore((s) => s.loading);
+  const initializeAuth = useAuthStore((s) => s.initialize);
   const projects = useProjectsStore((s) => s.projects);
   const activeId = useProjectsStore((s) => s.activeId);
   const loaded = useProjectsStore((s) => s.loaded);
 
+  useEffect(() => initializeAuth(), [initializeAuth]);
+
   useEffect(() => {
+    if (!user) return;
     startEventDispatcher();
     startProjectSync();
-  }, []);
-
-  // A workspace is almost certainly next; fetch its chunk now so it is parsed
-  // and ready by the time the agent's port lands.
-  useEffect(() => {
     warmWorkspaceChunk();
-  }, []);
+  }, [user]);
 
   // Reopen the most recent workspace once, as soon as we know there is one.
   // Guarded by a ref rather than state: leaving a workspace on purpose
@@ -65,13 +68,16 @@ export function App() {
   // and running before paint is what keeps the picker from flashing for one
   // frame on the way into the resumed workspace.
   useLayoutEffect(() => {
-    if (!canResume || resumed.current || projects.length === 0) return;
+    if (!user || !canResume || resumed.current || projects.length === 0) return;
     resumed.current = true;
     const recent = [...projects].sort(
       (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0)
     )[0];
     if (recent) void openWorkspace(recent.id).catch(() => undefined);
-  }, [canResume, projects]);
+  }, [canResume, projects, user]);
+
+  if (authLoading) return <Shell />;
+  if (!user) return <LoginScreen />;
 
   // Hold the frame until the registry answers — a sub-second IPC round trip
   // that does not deserve a loading screen of its own.

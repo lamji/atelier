@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
+import { pnpmArgs } from "./package-manager.mjs";
 
 const desktopRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -44,7 +45,8 @@ function copyDir(src, dest) {
 
 // 1. Web UI — token never baked (ATELIER_PACKAGE=1 blanks vite defines).
 console.log("[build-backend] building web UI (vite)");
-run("pnpm", ["--filter", "@atelier/web", "build"], {
+const webBuild = pnpmArgs(["--filter", "@atelier/web", "build"]);
+run(webBuild.cmd, webBuild.args, {
   cwd: repoRoot,
   env: { ...process.env, ATELIER_PACKAGE: "1" },
 });

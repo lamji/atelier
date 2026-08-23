@@ -85,6 +85,17 @@ export function useKnowledgeViewModel() {
     await bridge.rpc("knowledge.indexWorkspace", { force }).catch(() => undefined);
   }, []);
 
+  /**
+   * Re-reads the wiki from disk. The list is otherwise only pulled on
+   * connect and on knowledge.updated, so a page edited by hand — or a
+   * source file moved under a page — keeps its old status until something
+   * else triggers a reload. This is that trigger.
+   */
+  const refreshWiki = useCallback(async () => {
+    const { pages, lint } = await bridge.rpc("knowledge.wiki.list", {});
+    useKnowledgeStore.getState().setWiki(pages, lint);
+  }, []);
+
   /** Kick the route→feature scan (Haiku summarizes each page/endpoint). */
   /** Opens a wiki page in the editor tab, like a click in the explorer. */
   const openWikiPage = useCallback(async (path: string) => {
@@ -162,6 +173,7 @@ export function useKnowledgeViewModel() {
     wikiPages,
     wikiLint,
     openWikiPage,
+    refreshWiki,
     graph,
     graphScope,
     graphTarget,

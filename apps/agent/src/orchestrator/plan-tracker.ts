@@ -26,6 +26,13 @@ const MAX_STEPS = 12;
 export class PlanTracker {
   private plans = new Map<string, Plan>();
   private planRequired = new Set<string>();
+  /**
+   * Tasks the user asked as a QUESTION. Kept here beside planRequired
+   * because both answer the same shape of question — what is this turn
+   * allowed to do — and both are read by preTool guards that get nothing
+   * but a task id.
+   */
+  private answerOnly = new Set<string>();
   /** Step ids that received a real edit.applied event in this task. */
   private editedSteps = new Map<string, Set<string>>();
 
@@ -59,6 +66,19 @@ export class PlanTracker {
 
   requiresPlan(taskId: string): boolean {
     return this.planRequired.has(taskId);
+  }
+
+  /**
+   * Marks a turn that owes the user an ANSWER, not a change. The
+   * answer-only guard refuses this task's edit tools; see
+   * hooks/answer-only-guard.ts for why a prompt rule was not enough.
+   */
+  markAnswerOnly(taskId: string): void {
+    this.answerOnly.add(taskId);
+  }
+
+  isAnswerOnly(taskId: string): boolean {
+    return this.answerOnly.has(taskId);
   }
 
   /**
@@ -176,15 +196,19 @@ export class PlanTracker {
         error: "Start this step with in-progress before checking it done",
       };
     }
+    const edited = this.editedSteps.get(taskId);
     if (
       status === "done" &&
-      implementationStepNeedsEdit(step) &&
-      !this.editedSteps.get(taskId)?.has(step.id)
+      !edited?.has(step.id) &&
+      stepNeedsEdit(step, (edited?.size ?? 0) > 0)
     ) {
       return {
         ok: false,
         error:
-          "This implementation step has 0 applied edits. Change one of its files before checking it done.",
+          "This step has 0 applied edits, and nothing in this task has been " +
+          "changed yet. Apply the edit this step describes before checking " +
+          "it done — a checkmark over an unchanged workspace is the one " +
+          "thing the timeline must never show.",
       };
     }
     if (
@@ -245,6 +269,7 @@ export class PlanTracker {
   clear(taskId: string): void {
     this.plans.delete(taskId);
     this.planRequired.delete(taskId);
+    this.answerOnly.delete(taskId);
     this.editedSteps.delete(taskId);
     this.checkpoints?.release(taskId);
   }
@@ -274,11 +299,38 @@ function stepKey(step: PlanStep): string {
 }
 
 const IMPLEMENTATION_STEP =
-  /\b(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|redesign|rebuild|make|put|set|use|replace|adjust|convert|wire)\b/i;
+  /\b(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|redesign|rebuild|make|put|set|use|replace|adjust|convert|wire|initialize|init|scaffold|setup|configure|define|declare|generate|write|extract|migrate|integrate|apply|enable|support|hook|connect)\b/i;
 
-/** File-bearing change steps cannot manufacture a green checkmark from reads. */
-function implementationStepNeedsEdit(step: PlanStep): boolean {
-  return step.files.length > 0 && IMPLEMENTATION_STEP.test(step.title);
+/**
+ * Steps whose completion is evidenced by looking or running, not by
+ * changing a file. Everything else is treated as work.
+ */
+const NON_EDIT_STEP =
+  /\b(?:read|review|inspect|investigate|analyse|analyze|audit|check|verify|validate|test|typecheck|lint|run|search|find|locate|explore|confirm|measure|profile|compare|plan|decide|plan)\b/i;
+
+/**
+ * Why a green checkmark may be refused on a step with no applied edit.
+ *
+ * The old rule needed BOTH a change verb in the title and a non-empty
+ * `files` array — and the model supplies both. Ollama shipped a plan whose
+ * drafts carried no files at all and checked four steps done having changed
+ * nothing; the guard never even ran. Anything the model can opt out of by
+ * how it words a draft is not a guard.
+ *
+ * So the file list is no longer part of it, and there are two rules:
+ *
+ * - A step that names a change ("Implement base components") always owes an
+ *   edit of its own. Nothing else evidences it.
+ * - Any other step owes one only while the WHOLE TASK has landed zero
+ *   edits. That is the state this exists for — a timeline going green over
+ *   an untouched workspace — and it leaves a genuine "decide the theme"
+ *   step free to close on a turn that is otherwise really working.
+ *
+ * Read/verify steps are exempt from both: running the check IS their work.
+ */
+function stepNeedsEdit(step: PlanStep, taskHasEdits: boolean): boolean {
+  if (NON_EDIT_STEP.test(step.title)) return false;
+  return IMPLEMENTATION_STEP.test(step.title) || !taskHasEdits;
 }
 
 function normPath(p: string): string {

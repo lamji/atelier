@@ -87,7 +87,16 @@ const source = fs.readFileSync(
 );
 check(
   "a question turn is not given the timeline contract",
-  source.includes("if (!answerOnly) this.deps.planTracker.requirePlan(ctx.taskId);")
+  source.includes("if (answerOnly) this.deps.planTracker.markAnswerOnly(ctx.taskId);") &&
+    source.includes("else this.deps.planTracker.requirePlan(ctx.taskId);")
+);
+
+// The other half of the same rule: a turn that owes no edit must not be
+// held by the completion gate either, or it ends on "the gate is still
+// open" after spending the whole stall budget on work that never existed.
+check(
+  "an informational turn is not held by the completion gate",
+  source.includes("!looksInformational(ctx.prompt)")
 );
 
 console.log(failed === 0 ? "\nall cases pass" : `\n${failed} mismatch(es)`);

@@ -42,6 +42,7 @@ import { ScopeGuard, fileNamedUnder } from "./tools/scope-guard.js";
 import { FileService } from "./workspace/file-service.js";
 import { AttachmentStore } from "./context/attachments/attachment-store.js";
 import { NoteJournal } from "./notes/note-journal.js";
+import { NoteAccessRegistry } from "./notes/note-access.js";
 import { registerFsHandlers } from "./workspace/register-fs-handlers.js";
 import { WorkspaceWatcher } from "./workspace/watcher.js";
 import { HooksEngine } from "./hooks/hooks-engine.js";
@@ -58,15 +59,20 @@ import {
   FLEX_LAYOUT_HOOK_NAME,
 } from "./hooks/flex-layout-guard.js";
 import {
-  ImpactFirstGuard,
-  IMPACT_HOOK_ID,
-  IMPACT_HOOK_NAME,
-} from "./hooks/impact-guard.js";
+  AnswerOnlyGuard,
+  ANSWER_ONLY_HOOK_ID,
+  ANSWER_ONLY_HOOK_NAME,
+} from "./hooks/answer-only-guard.js";
 import {
   PlanEditGuard,
   PLAN_EDIT_HOOK_ID,
   PLAN_EDIT_HOOK_NAME,
 } from "./hooks/plan-edit-guard.js";
+import {
+  NoteWriteGuard,
+  NOTE_WRITE_HOOK_ID,
+  NOTE_WRITE_HOOK_NAME,
+} from "./hooks/note-write-guard.js";
 import {
   TargetedEditGuard,
   REWRITE_HOOK_ID,
@@ -105,6 +111,11 @@ import { registerKnowledgeTools } from "./tools/knowledge-tools.js";
 import { GlobalSessionStore } from "./context/global-session/index.js";
 import { registerPlanTools } from "./tools/plan-tools.js";
 import { PlanTracker } from "./orchestrator/plan-tracker.js";
+import {
+  SearchGroundingGuard,
+  SEARCH_GROUNDING_HOOK_ID,
+  SEARCH_GROUNDING_HOOK_NAME,
+} from "./hooks/search-grounding-guard.js";
 import { ValidationRunners } from "./validation/runners.js";
 import { Retriever } from "./rag/retriever.js";
 import { TokenLedger } from "./context/ledger/index.js";
@@ -133,6 +144,10 @@ export interface AgentRuntime {
  * transport-agnostic pieces (router + bus) for whichever server hosts it.
  * Extracted verbatim from the old WS main() — behavior unchanged.
  */
+/** The removed impact-first hook, kept only so its stored row can be
+ *  dropped from installs that already have it. */
+const LEGACY_IMPACT_HOOK_ID = "builtin-impact-first";
+
 export function createAgentRuntime(
   config: AgentConfig,
   log: pino.Logger
@@ -332,34 +347,20 @@ export function createAgentRuntime(
   });
   const devServerGuard = new DevServerGuard(bus, config.workspaceRoot);
   hooks.registerGuard(DEV_SERVER_HOOK_ID, (ctx) => devServerGuard.check(ctx));
-  // Built-in impact hook: the blast radius must be checked at the edit site.
-  // The pipeline's radius is computed from plan targets, before the model
-  // knows the line it will touch; this refuses the first write to an
-  // existing source file until impact_of_edit has been called for it.
-  hooks.ensureBuiltin({
-    id: IMPACT_HOOK_ID,
-    name: IMPACT_HOOK_NAME,
-    enabled: true,
-    event: "preTool",
-    matcher: "write_file|replace_code|replace_many|impact_of_edit|analyze_impact",
-    action: "block",
-    argument: "Check who uses this code before editing it",
-  });
-  const impactGuard = new ImpactFirstGuard(
-    (relPath) =>
-      files
-        .stat(relPath)
-        .then(() => true)
-        .catch(() => false),
-    bus
-  );
-  // Direct tasks are not offered impact_of_edit at all, so gating their
-  // edits on it would be a wall with no door.
-  hooks.registerGuard(IMPACT_HOOK_ID, (ctx) =>
-    directTasks.has(ctx.taskId)
-      ? Promise.resolve(undefined)
-      : impactGuard.check(ctx)
-  );
+  // The impact hook is GONE, and the row it left behind has to go with it.
+  //
+  // It refused the first write to every existing source file until the model
+  // had called impact_of_edit for that exact path — one blocked call plus a
+  // round-trip per file, to fetch a local graph query the pipeline can run
+  // itself in milliseconds. It now does (see PipelineExecutor.editRadius),
+  // and the callers/flows/tests ride into the prompt before the model picks
+  // a target, so the gate was buying nothing and charging per file.
+  //
+  // `delete`, not `enabled: false`: the stored config says action "block",
+  // and a hook whose guard is not registered falls through to its stored
+  // action — leaving the row would refuse EVERY write on an existing
+  // install instead of none.
+  hooks.delete(LEGACY_IMPACT_HOOK_ID);
   // Built-in targeted-edit hook: write_file may not restate a file that
   // was mostly already correct. Refused once per file per task, so a
   // genuine full rewrite costs one extra tool call and never the task.
@@ -423,7 +424,7 @@ export function createAgentRuntime(
   const symbolImpact = new SymbolImpactAnalyzer(db, async (identifier) => {
     const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const matches = await files.search(`\\b${escaped}\\b`, undefined, 200, true);
-    return matches.map((m) => ({ path: m.path, row: m.row }));
+    return matches.matches.map((m) => ({ path: m.path, row: m.row }));
   });
   registerKnowledgeTools(
     tools,
@@ -452,10 +453,71 @@ export function createAgentRuntime(
   });
   const planEditGuard = new PlanEditGuard(planTracker, bus);
   hooks.registerGuard(PLAN_EDIT_HOOK_ID, (ctx) => planEditGuard.check(ctx));
+  // A question is answered, never implemented. The pipeline says so in the
+  // prompt; this is what makes it true when the model decides otherwise —
+  // and it is the same task's only edit gate, since an answer-only turn
+  // publishes no plan for the hook above to hold it to.
+  hooks.ensureBuiltin({
+    id: ANSWER_ONLY_HOOK_ID,
+    name: ANSWER_ONLY_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file|replace_code|replace_many",
+    action: "block",
+    argument: "A question is answered, not implemented",
+  });
+  const answerOnlyGuard = new AnswerOnlyGuard(planTracker, bus);
+  hooks.registerGuard(ANSWER_ONLY_HOOK_ID, (ctx) => answerOnlyGuard.check(ctx));
+  // A markdown note belongs to the user. Only the turn that pointed at one
+  // may change it, and then only by patching: write_file on an existing
+  // note replaces everything the user wrote with whatever the run produced.
+  hooks.ensureBuiltin({
+    id: NOTE_WRITE_HOOK_ID,
+    name: NOTE_WRITE_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "write_file|replace_code|replace_many",
+    action: "block",
+    argument: "Update the referenced note; never replace a note",
+  });
+  const noteAccess = new NoteAccessRegistry();
+  const noteWriteGuard = new NoteWriteGuard(
+    noteAccess,
+    (relPath) =>
+      files
+        .stat(relPath)
+        .then(() => true)
+        .catch(() => false),
+    bus
+  );
+  hooks.registerGuard(NOTE_WRITE_HOOK_ID, (ctx) => noteWriteGuard.check(ctx));
+  // Built-in grounding hook: a search term has to come from the request,
+  // the context, or something already read — not from the model's idea of
+  // what an identifier in this codebase probably looks like.
+  hooks.ensureBuiltin({
+    id: SEARCH_GROUNDING_HOOK_ID,
+    name: SEARCH_GROUNDING_HOOK_NAME,
+    enabled: true,
+    event: "preTool",
+    matcher: "search_text|search_workspace",
+    action: "block",
+    argument: "Search for words from the turn, not invented ones",
+  });
+  const searchGrounding = new SearchGroundingGuard(bus);
+  hooks.registerGuard(SEARCH_GROUNDING_HOOK_ID, (ctx) =>
+    directTasks.has(ctx.taskId)
+      ? Promise.resolve(undefined)
+      : searchGrounding.check(ctx)
+  );
   const validators = new ValidationRunners(config.workspaceRoot);
   // Every tool call — model- or UI-invoked — is gated by user hooks.
   tools.setGate(hooks);
   const watcher = new WorkspaceWatcher(bus, guard, ig, config.workspaceRoot);
+  // Best-effort: a path the watcher cannot read costs live file events for
+  // this workspace, never the workspace itself.
+  watcher.onWatchError((error) =>
+    log.warn({ err: error }, "workspace watcher error")
+  );
   files.onAgentWrite((relPath) => watcher.markAgentWrite(relPath));
   watcher.onChange(() => git.scheduleRefresh());
   // Every file change — user or agent — flows into the knowledge engine.
@@ -561,6 +623,9 @@ export function createAgentRuntime(
     graph,
     clones,
     impact: impactAnalyzer,
+    // Seeded with each turn's prompt and context, and topped up with every
+    // tool result, so the guard knows what this turn has actually seen.
+    searchGrounding,
     indexer,
     hooks,
     directTasks,
@@ -578,6 +643,7 @@ export function createAgentRuntime(
     skillLoader,
     conversations,
     notes,
+    noteAccess,
     attachments,
     log,
   });

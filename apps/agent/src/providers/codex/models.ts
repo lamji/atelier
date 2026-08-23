@@ -1,6 +1,7 @@
 import type { ModelOption } from "@atelier/protocol";
 import { execa } from "execa";
 import { CODEX_PREFIX } from "../model-routing.js";
+import { codexBinary } from "./binary.js";
 
 interface CodexCatalog {
   models?: CodexCatalogModel[];
@@ -25,7 +26,7 @@ export interface CodexAuthStatus {
 /** Honest account check for Settings; model fallbacks are not auth proof. */
 export async function probeCodexAuth(): Promise<CodexAuthStatus> {
   try {
-    const result = await execa("codex", ["login", "status"], {
+    const result = await execa(codexBinary(), ["login", "status"], {
       // Runs at session start; without this it flashes a console window.
       windowsHide: true,
       reject: false,
@@ -55,7 +56,7 @@ export async function probeCodexAuth(): Promise<CodexAuthStatus> {
 export async function probeCodexModels(): Promise<ModelOption[]> {
   try {
     if (!(await probeCodexAuth()).ok) return [];
-    const result = await execa("codex", ["debug", "models"], {
+    const result = await execa(codexBinary(), ["debug", "models"], {
       windowsHide: true,
       reject: false,
       timeout: 30_000,

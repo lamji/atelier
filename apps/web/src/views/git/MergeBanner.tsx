@@ -1,26 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Check,
-  ChevronDown,
-  ChevronRight,
   CircleAlert,
   GitMerge,
   Loader2,
+  Maximize2,
   Sparkles,
   Square,
   Undo2,
   X,
 } from "lucide-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/cn";
 import { errorText } from "@/lib/error-text";
 import { STAGE_LABELS } from "@/lib/stage-labels";
-import { useElapsed } from "@/hooks/useElapsed";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { MergeConflictViewModel } from "@/hooks/useMergeConflictViewModel";
+import { AiResolveModal } from "./AiResolveModal";
+import { AiResolverModal } from "./AiResolverModal";
 import type { SessionVm } from "@/state/sessions.store";
 import type { GitMergeKind } from "@atelier/protocol";
 
@@ -37,6 +35,24 @@ const KIND_FINISH: Record<GitMergeKind, string> = {
   "cherry-pick": "Continue cherry-pick",
   revert: "Continue revert",
 };
+
+/**
+ * One line of "what is it doing", for the row that opens the transcript:
+ * the running step while it works, the last thing it said afterwards.
+ */
+function aiHeadline(session: SessionVm, working: boolean): string {
+  if (working) {
+    const running = [...session.actions]
+      .reverse()
+      .find((action) => action.status === "running");
+    if (running) return running.label;
+    return session.stage ? STAGE_LABELS[session.stage] : "starting…";
+  }
+  const last = [...session.items]
+    .reverse()
+    .find((item) => item.role === "assistant");
+  return last ? last.text.replace(/\s+/g, " ").slice(0, 80) : "transcript";
+}
 
 /** MERGE_MSG minus git's commented "# Conflicts:" trailer. */
 function cleanMergeMessage(message: string | undefined): string {
@@ -55,8 +71,8 @@ function cleanMergeMessage(message: string | undefined): string {
  */
 export function MergeBanner({ vm }: { vm: MergeConflictViewModel }) {
   const { mergeState, merge, conflicts, aiSession, aiWorking } = vm;
-  const [aiPrompt, setAiPrompt] = useState("");
-  const [aiOpen, setAiOpen] = useState(true);
+  const [askAi, setAskAi] = useState(false);
+  const [transcript, setTranscript] = useState(false);
   const [confirmAbort, setConfirmAbort] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -82,10 +98,8 @@ export function MergeBanner({ vm }: { vm: MergeConflictViewModel }) {
       .finally(() => setBusy(false));
   };
 
-  const doAi = () => {
-    void vm.aiResolve(conflicts, aiPrompt);
-    setAiPrompt("");
-    setAiOpen(true);
+  const doAi = (guidance: string, model: string) => {
+    void vm.aiResolve(conflicts, guidance, model);
   };
 
   if (!mergeState) return null;
@@ -219,8 +233,8 @@ export function MergeBanner({ vm }: { vm: MergeConflictViewModel }) {
             </Button>
           </Tooltip>
         ) : (
-          <Tooltip content="Sonnet reads both sides of every conflicted file and rewrites them; you review before completing">
-            <Button size="sm" disabled={busy || running} onClick={doAi}>
+          <Tooltip content="The model you pick reads both sides of every conflicted file and rewrites them; you review before completing">
+            <Button size="sm" disabled={busy || running} onClick={() => setAskAi(true)}>
               <Sparkles className="mr-1.5 h-3.5 w-3.5" />
               Resolve all with AI
             </Button>
@@ -263,121 +277,49 @@ export function MergeBanner({ vm }: { vm: MergeConflictViewModel }) {
         )}
       </div>
 
-      {/* AI activity: transcript of the resolver task + extra instructions */}
-      {(aiSession || !allResolved) && (
+      {/* The resolver's own output is a wall of prose in a panel this
+          narrow, so the banner keeps the status line and hands the reading
+          to a modal with room for it. */}
+      {aiSession && (aiWorking || aiSession.items.length > 0) && (
         <div className="mt-2.5 border-t border-white/5 pt-2">
-          <button
-            onClick={() => setAiOpen((v) => !v)}
-            className="flex w-full items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-          >
-            {aiOpen ? (
-              <ChevronDown className="h-3 w-3" />
-            ) : (
-              <ChevronRight className="h-3 w-3" />
-            )}
-            <Sparkles className="h-3 w-3 text-primary/70" />
-            AI resolver
-            {aiWorking && <Loader2 className="ml-1 h-3 w-3 animate-spin text-primary" />}
-          </button>
-          {aiOpen && (
-            <div className="mt-1.5 space-y-1.5">
-              {aiSession && aiSession.items.length > 0 && (
-                <AiTranscript session={aiSession} />
+          <Tooltip content="Open the resolver's transcript">
+            <button
+              onClick={() => setTranscript(true)}
+              className={cn(
+                "flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1",
+                "text-[11px] text-muted-foreground hover:bg-accent/60",
+                "hover:text-foreground"
               )}
-              {aiWorking && aiSession && <AiProgress session={aiSession} />}
-              {!aiWorking && !allResolved && (
-                <Textarea
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  placeholder="Optional guidance, e.g. “prefer the incoming schema, keep our logging”"
-                  rows={2}
-                  className="min-h-0 resize-none text-[11px]"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) doAi();
-                  }}
-                />
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Live trace of the resolver task: current stage, last tool calls, timer. */
-function AiProgress({ session }: { session: SessionVm }) {
-  const elapsed = useElapsed(session.taskStartedAt);
-  const recent = session.actions.slice(-3);
-  const running = recent.find((a) => a.status === "running");
-  const headline =
-    running?.label ?? (session.stage ? STAGE_LABELS[session.stage] : "starting…");
-  return (
-    <div className="rounded-lg bg-black/15 px-2 py-1.5">
-      <div className="flex items-center gap-1.5">
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
-        <span className="min-w-0 flex-1 truncate text-[11px]">{headline}</span>
-        {session.taskStartedAt !== null && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
-            {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
-          </span>
-        )}
-      </div>
-      {recent.length > 0 && (
-        <div className="mt-1 space-y-0.5">
-          {recent.map((action) => (
-            <p
-              key={action.id}
-              className="flex items-center gap-1.5 truncate font-mono text-[10px] text-muted-foreground"
             >
-              {action.status === "running" ? (
-                <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-primary/70" />
-              ) : action.status === "done" ? (
-                <Check className="h-2.5 w-2.5 shrink-0 text-success" />
+              {aiWorking ? (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
               ) : (
-                <CircleAlert className="h-2.5 w-2.5 shrink-0 text-destructive" />
+                <Sparkles className="h-3 w-3 shrink-0 text-primary/70" />
               )}
-              <span className="truncate">{action.label}</span>
-            </p>
-          ))}
+              <span className="shrink-0">AI resolver</span>
+              <span className="min-w-0 flex-1 truncate text-left opacity-70">
+                {aiHeadline(aiSession, aiWorking)}
+              </span>
+              <Maximize2 className="h-3 w-3 shrink-0 opacity-70" />
+            </button>
+          </Tooltip>
         </div>
       )}
-    </div>
-  );
-}
 
-/** The resolver conversation, newest at the bottom; edits shown as log lines. */
-function AiTranscript({ session }: { session: SessionVm }) {
-  const items = useMemo(() => session.items.slice(-12), [session.items]);
-  return (
-    <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-lg bg-black/15 p-2">
-      {items.map((item) => {
-        if (item.role === "log" || item.role === "diff") {
-          return (
-            <p key={item.id} className="truncate font-mono text-[10px] text-muted-foreground">
-              {item.role === "diff" ? `Edited ${item.text}` : item.text}
-            </p>
-          );
-        }
-        return (
-          <div
-            key={item.id}
-            className={cn(
-              "text-[11px]",
-              item.role === "user" ? "italic text-muted-foreground" : "chat-md"
-            )}
-          >
-            {item.role === "user" ? (
-              <p>» {item.text}</p>
-            ) : (
-              <Markdown remarkPlugins={[remarkGfm]}>{item.text}</Markdown>
-            )}
-            {item.streaming && (
-              <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-primary/60" />
-            )}
-          </div>
-        );
-      })}
+      <AiResolverModal
+        open={transcript}
+        session={aiSession ?? null}
+        working={aiWorking}
+        onClose={() => setTranscript(false)}
+        onCancel={vm.cancelAi}
+      />
+
+      <AiResolveModal
+        open={askAi}
+        paths={conflicts}
+        onClose={() => setAskAi(false)}
+        onSubmit={doAi}
+      />
     </div>
   );
 }

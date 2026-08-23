@@ -12,6 +12,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pnpmArgs } from "./package-manager.mjs";
 
 const desktopRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -164,7 +165,11 @@ async function waitFor(child, name, port, timeoutMs) {
 }
 
 function prefixed(name, args, cwd) {
-  const child = spawn("pnpm", args, {
+  // Resolved, not assumed: a bare "pnpm" is only on PATH when a global shim
+  // happens to exist, and without it Vite never started while the rest of
+  // dev carried on watching — which reads as "the repo is broken".
+  const pnpm = pnpmArgs(args);
+  const child = spawn(pnpm.cmd, pnpm.args, {
     cwd,
     shell: true,
     stdio: ["ignore", "inherit", "inherit"],

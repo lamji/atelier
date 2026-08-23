@@ -11,6 +11,7 @@ import { useSessionsStore } from "@/state/sessions.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 
 /** Same model the commit/push repair loop uses — the user's product call. */
+/** Used when nothing is picked in the resolver's model selector. */
 const AI_MODEL = "claude-sonnet-5";
 /** Only the tail of the streamed pull output travels into the AI prompt. */
 const OUTPUT_TAIL_CHARS = 6_000;
@@ -45,17 +46,19 @@ export function useMergeConflictViewModel() {
   const fetch = useCallback(async () => {
     store().startRun("fetch");
     try {
-      store().appendOutput("$ git fetch --prune\n");
+      store().appendOutput("$ git fetch --all --prune --tags\n");
       const counts = await bridge.rpc("git.fetch", {});
+      const moved = counts.updated ?? 0;
+      const refs = `${moved} ref${moved === 1 ? "" : "s"} updated`;
       store().appendOutput(
-        `Fetched. ${counts.behind} behind · ${counts.ahead} ahead\n`
+        `Fetched. ${refs} · ${counts.behind} behind · ${counts.ahead} ahead\n`
       );
       store().set({ syncRunning: false });
       alert.success(
-        "Fetched origin",
-        counts.behind === 0 && counts.ahead === 0
-          ? "up to date"
-          : `${counts.behind} behind · ${counts.ahead} ahead`
+        "Fetched every remote",
+        moved === 0
+          ? "already up to date"
+          : `${refs} · ${counts.behind} behind · ${counts.ahead} ahead`
       );
       // The pickers list refs from the local store; a fetch just moved them.
       if (store().syncModal) void loadRefsQuiet();
@@ -135,6 +138,81 @@ export function useMergeConflictViewModel() {
       alert.danger("Pull failed", errText(e));
     } finally {
       bump();
+    }
+  }, []);
+
+  /**
+   * Streamed `git rebase` from the picker. Shaped like `pull`: a
+   * conflicted exit is the merge flow's normal entry (the banner takes
+   * over and says "Rebase in progress"), not an error.
+   */
+  const rebaseRun = useCallback(async (opts: RebaseOptions) => {
+    const branch = useGitStore.getState().status?.branch ?? "this branch";
+    store().startRun("rebase");
+    try {
+      const outcome = await bridge.rpc(
+        "git.rebaseRun",
+        { onto: opts.onto, keep: opts.keep, remote: opts.remote },
+        (p) => {
+          if (p.chunk) store().appendOutput(p.chunk);
+        }
+      );
+      store().appendOutput(`
+[exit ${outcome.result.exitCode}]
+`);
+      const n = outcome.conflicts.length;
+      const conflicted = n > 0;
+      if (outcome.result.ok) {
+        alert.success(
+          `Rebased ${branch} onto ${opts.onto}`,
+          /is up to date/i.test(outcome.result.output)
+            ? "already up to date"
+            : KEEP_NOTE[opts.keep]
+        );
+      } else if (conflicted) {
+        alert.warning(
+          `Rebase stopped: ${n} conflict${n === 1 ? "" : "s"}`,
+          "resolve them below, then continue the rebase",
+          {
+            action: {
+              label: "Resolve",
+              run: () => useWorkspaceStore.getState().setActivityView("git"),
+            },
+          }
+        );
+      } else {
+        alert.danger(
+          `Rebase failed (exit ${outcome.result.exitCode})`,
+          lastLine(outcome.result.output)
+        );
+      }
+      store().set({
+        syncRunning: false,
+        syncError:
+          outcome.result.ok || conflicted
+            ? null
+            : `Rebase failed (exit ${outcome.result.exitCode})`,
+        outputOpen: !conflicted,
+        aiResolved: [],
+        aiSummary: null,
+        lastRun: {
+          kind: "rebase",
+          ok: outcome.result.ok,
+          exitCode: outcome.result.exitCode,
+          conflicts: n,
+          summary: outcome.result.ok
+            ? `replayed onto ${opts.onto}`
+            : conflicted
+              ? `${n} conflict${n === 1 ? "" : "s"} to resolve`
+              : lastLine(outcome.result.output),
+        },
+      });
+    } catch (e) {
+      store().set({ syncRunning: false, syncError: errText(e) });
+      alert.danger("Rebase failed", errText(e));
+    } finally {
+      bump();
+      void loadRefsQuiet();
     }
   }, []);
 
@@ -363,13 +441,14 @@ export function useMergeConflictViewModel() {
   }, []);
 
   /**
-   * Starts (or continues) the Sonnet repair task for `paths`. Runs in a
-   * dedicated conversation, confined to the checkout, and edits files
-   * only — staging and completing stay with the user (and with the
-   * post-run scan below, which stages the files it left marker-free).
+   * Starts (or continues) the repair task for `paths` on `model` (blank
+   * takes AI_MODEL). Runs in a dedicated conversation, confined to the
+   * checkout, and edits files only — staging and completing stay with the
+   * user (and with the post-run scan below, which stages the files it
+   * left marker-free).
    */
   const aiResolve = useCallback(
-    async (paths: string[], extraPrompt = "") => {
+    async (paths: string[], extraPrompt = "", model = "") => {
       if (paths.length === 0) return;
       const s = store();
       const info = useGitStore.getState().status;
@@ -406,7 +485,7 @@ export function useMergeConflictViewModel() {
             extra: extraPrompt,
             repo,
           }),
-          model: AI_MODEL,
+          model: model || AI_MODEL,
           effort: "high",
           scopeRoots: repo && repo !== "." ? [repo] : undefined,
         });
@@ -455,6 +534,7 @@ export function useMergeConflictViewModel() {
     aiWorking,
     fetch,
     pull,
+    rebaseRun,
     checkoutRun,
     openSync,
     closeSync,
@@ -485,6 +565,19 @@ export interface PullOptions {
   branch?: string;
 }
 
+export interface RebaseOptions {
+  /** Ref the current branch is replayed onto ("main", "origin/main"). */
+  onto: string;
+  /**
+   * Which side wins a conflicting hunk automatically. "mine" keeps this
+   * branch's own work, "base" keeps `onto`, "none" stops at the conflict
+   * and hands it to the resolver.
+   */
+  keep: "mine" | "base" | "none";
+  /** Set when `onto` is a remote ref, so it is fetched first. */
+  remote?: string;
+}
+
 export interface CheckoutOptions {
   ref: string;
   create?: boolean;
@@ -493,6 +586,12 @@ export interface CheckoutOptions {
   /** Start point a created branch branches out of; HEAD when omitted. */
   from?: string;
 }
+
+const KEEP_NOTE: Record<RebaseOptions["keep"], string> = {
+  mine: "conflicts kept this branch's changes",
+  base: "conflicts kept the base branch's changes",
+  none: "no conflicts",
+};
 
 async function loadRefsQuiet(): Promise<void> {
   try {

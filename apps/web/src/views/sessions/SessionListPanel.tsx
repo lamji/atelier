@@ -1,8 +1,29 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Bot, Check, Pencil, Plus, Trash2, X } from "lucide-react";
+import { ListSearch, ListSearchEmpty } from "@/components/ui/list-search";
 import { cn } from "@/lib/cn";
 import type { SessionVm } from "@/state/sessions.store";
+
+/**
+ * A session matches when every whitespace-separated term appears in its
+ * title, its last-message preview or its status. Terms are ANDed, so a
+ * second word narrows the list rather than widening it.
+ */
+function matches(session: SessionVm, query: string): boolean {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const last = session.items[session.items.length - 1];
+  const hay = [
+    session.conversation.title,
+    last?.text ?? "",
+    session.previewText ?? "",
+    session.status,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return terms.every((term) => hay.includes(term));
+}
 
 export interface SessionListPanelProps {
   sessions: SessionVm[];
@@ -15,6 +36,14 @@ export interface SessionListPanelProps {
 
 /** Agent-session switcher: one row per parallel agent run. */
 export function SessionListPanel(props: SessionListPanelProps) {
+  const [query, setQuery] = useState("");
+  const total = props.sessions.length;
+  const shown = useMemo(
+    () => props.sessions.filter((session) => matches(session, query)),
+    [props.sessions, query]
+  );
+  const filtering = query.trim().length > 0;
+
   return (
     <div className="flex h-full flex-col">
       <div className="island-header justify-between">
@@ -32,9 +61,27 @@ export function SessionListPanel(props: SessionListPanelProps) {
           <Plus className="h-4 w-4" />
         </button>
       </div>
+      {total > 0 && (
+        <div className="px-2 pb-2">
+          <ListSearch
+            value={query}
+            onChange={setQuery}
+            total={total}
+            shown={shown.length}
+            placeholder={`Search ${total} session${total === 1 ? "" : "s"}…`}
+          />
+        </div>
+      )}
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
+        {filtering && shown.length === 0 && (
+          <ListSearchEmpty
+            query={query}
+            label="session"
+            onClear={() => setQuery("")}
+          />
+        )}
         <AnimatePresence initial={false}>
-          {props.sessions.map((session) => (
+          {shown.map((session) => (
             <SessionRow
               key={session.conversation.id}
               session={session}

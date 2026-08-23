@@ -143,6 +143,24 @@ export function useGitFlowViewModel() {
     }
   }, [streamRun, validatePr]);
 
+  /**
+   * Entry point for commits made outside the wizard (e.g. from a
+   * terminal) that are ahead of the remote with nothing left to commit —
+   * there is otherwise no way to push them. Opens straight on the push
+   * stage instead of running `startFlow`'s commit step.
+   */
+  const startPush = useCallback(async () => {
+    useGitFlowStore.getState().openFlow("", false);
+    patch({ stage: "push" });
+    try {
+      const { info } = await bridge.rpc("git.flowInfo", {});
+      patch({ info });
+    } catch (e) {
+      patch({ stage: "done", error: errText(e) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** Entry point: called by the git panel's Commit button. */
   const startFlow = useCallback(
     async (commitMessage: string, stageAllFirst: boolean) => {
@@ -374,6 +392,7 @@ export function useGitFlowViewModel() {
     flow,
     fixSession,
     startFlow,
+    startPush,
     confirmRequest,
     confirmBranch,
     runPush,

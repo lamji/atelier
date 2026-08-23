@@ -4,6 +4,13 @@
  */
 import crypto from "node:crypto";
 import { BrowserWindow, ipcMain } from "electron";
+import {
+  acknowledgeChangelog,
+  checkForUpdate,
+  downloadAndInstall,
+  openDownload,
+  pendingChangelog,
+} from "./updates";
 import { IPC_CHANNELS } from "../shared/ipc-contract";
 import type { ProjectManager } from "./project-manager";
 
@@ -15,6 +22,26 @@ function broadcast(channel: string, ...args: unknown[]): void {
 
 export function registerAppIpc(projects: ProjectManager): void {
   // ---- projects ----
+  // Updates: a check the renderer can ask for, a download it can start, and
+  // the one-shot changelog for the first launch after an upgrade.
+  ipcMain.handle(IPC_CHANNELS.updatesCheck, (_e, force: unknown) =>
+    checkForUpdate(force === true)
+  );
+  ipcMain.handle(IPC_CHANNELS.updatesDownload, () => openDownload());
+  ipcMain.handle(IPC_CHANNELS.updatesInstall, (event) =>
+    downloadAndInstall((progress) => {
+      // Straight back to the window that asked, so a closed window cannot
+      // keep a download reporting into nothing.
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(IPC_CHANNELS.updatesProgress, progress);
+      }
+    })
+  );
+  ipcMain.handle(IPC_CHANNELS.updatesChangelog, () => pendingChangelog());
+  ipcMain.handle(IPC_CHANNELS.updatesAcknowledge, (_e, version: unknown) => {
+    if (typeof version === "string") acknowledgeChangelog(version);
+  });
+
   ipcMain.handle(IPC_CHANNELS.projectsList, () => projects.list());
 
   ipcMain.handle(IPC_CHANNELS.projectsAdd, (_e, path: unknown) => {

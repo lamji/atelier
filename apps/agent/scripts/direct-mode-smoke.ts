@@ -19,10 +19,10 @@ import { EventBus } from "../src/events/event-bus.js";
 import { HooksEngine } from "../src/hooks/hooks-engine.js";
 import { DirectTaskRegistry } from "../src/hooks/direct-tasks.js";
 import {
-  ImpactFirstGuard,
-  IMPACT_HOOK_ID,
-  IMPACT_HOOK_NAME,
-} from "../src/hooks/impact-guard.js";
+  TargetedEditGuard,
+  REWRITE_HOOK_ID,
+  REWRITE_HOOK_NAME,
+} from "../src/hooks/rewrite-guard.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import {
   DIRECT_RULES,
@@ -117,7 +117,10 @@ function checkPipelineArmsGuards(): void {
     marks.length === 1,
     `${marks.length} mark() call(s)`
   );
-  check("pipeline rules state the impact hook", FAST_RULES.includes("impact_of_edit"));
+  check(
+    "pipeline rules state the impact radius block",
+    FAST_RULES.includes("IMPACT RADIUS")
+  );
   check(
     "pipeline rules state the targeted-edit hook",
     FAST_RULES.includes("replace_code")
@@ -138,24 +141,34 @@ function checkTranscript(): void {
   check("only the last four ride", !rendered.includes("one"));
 }
 
-/** The impact guard, wired the way main.ts wires it. */
+/**
+ * The targeted-edit guard, wired the way the runtime wires it.
+ *
+ * It used to be the impact guard here — that hook is gone (the radius is
+ * computed in the pipeline and shipped as context), so the bypass is
+ * demonstrated on the remaining per-task guard. The property under test is
+ * the bypass itself, not which guard implements it.
+ */
 async function checkGuardBypass(): Promise<void> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-directsmoke-"));
   const db = openDb(dataDir);
   const bus = new EventBus();
   const hooks = new HooksEngine(db, bus, process.cwd());
   hooks.ensureBuiltin({
-    id: IMPACT_HOOK_ID,
-    name: IMPACT_HOOK_NAME,
+    id: REWRITE_HOOK_ID,
+    name: REWRITE_HOOK_NAME,
     enabled: true,
     event: "preTool",
-    matcher: "write_file|replace_code|impact_of_edit|analyze_impact",
+    matcher: "write_file",
     action: "block",
-    argument: "Check who uses this code before editing it",
+    argument: "Patch with replace_code instead of rewriting the whole file",
   });
   const directTasks = new DirectTaskRegistry();
-  const guard = new ImpactFirstGuard(async () => true, bus);
-  hooks.registerGuard(IMPACT_HOOK_ID, (ctx) =>
+  // A long file whose "rewrite" keeps every line — a patch in disguise,
+  // which is exactly what the guard refuses.
+  const existing = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+  const guard = new TargetedEditGuard(async () => existing, bus);
+  hooks.registerGuard(REWRITE_HOOK_ID, (ctx) =>
     directTasks.has(ctx.taskId)
       ? Promise.resolve(undefined)
       : guard.check(ctx)
@@ -163,14 +176,14 @@ async function checkGuardBypass(): Promise<void> {
 
   const registry = new ToolRegistry(bus);
   registry.setGate(hooks);
-  registry.register("replace_code", async (input: unknown) => input);
+  registry.register("write_file", async (input: unknown) => input);
   const abort = new AbortController();
 
   const edit = async (taskId: string): Promise<boolean> => {
     try {
       await registry.run(
-        "replace_code",
-        { path: "src/pricing.ts", oldString: "a", newString: "b" },
+        "write_file",
+        { path: `src/pricing-${taskId}.ts`, content: `${existing}\nline 60` },
         taskId,
         abort.signal
       );
@@ -180,9 +193,9 @@ async function checkGuardBypass(): Promise<void> {
     }
   };
 
-  check("pipeline task still needs a radius first", await edit("t-pipeline"));
+  check("pipeline task is held to targeted edits", await edit("t-pipeline"));
   directTasks.mark("t-direct");
-  check("direct task edits without one", !(await edit("t-direct")));
+  check("direct task rewrites without a refusal", !(await edit("t-direct")));
   directTasks.release("t-direct");
   check("the bypass ends with the task", await edit("t-direct"));
 

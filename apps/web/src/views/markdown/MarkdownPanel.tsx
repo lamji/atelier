@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   BookOpen,
   FileDown,
@@ -11,6 +11,7 @@ import type { MarkdownStatus } from "@atelier/protocol";
 import { bridge } from "@/services/bridge-client";
 import { exportMarkdownToPdf } from "@/lib/markdown-pdf";
 import { Button } from "@/components/ui/button";
+import { ListSearch, ListSearchEmpty } from "@/components/ui/list-search";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { WorkspacePageBody } from "@/components/ui/workspace-page";
@@ -57,6 +58,23 @@ function displayName(path: string): string {
   return path.replace(/^\.atelier\/?/, "") || path;
 }
 
+/**
+ * A note matches when every whitespace-separated term appears somewhere in
+ * its title, blurb, path or status. Terms are ANDed so "sprint todo"
+ * narrows rather than widens, which is what typing a second word means.
+ */
+function matches(
+  file: { title: string; description?: string; path: string; status: string },
+  query: string
+): boolean {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const hay = [file.title, file.description ?? "", file.path, file.status]
+    .join(" ")
+    .toLowerCase();
+  return terms.every((term) => hay.includes(term));
+}
+
 /** Coarse "edited 3h ago" — the catalog is browsed, not audited. */
 function editedLabel(mtime: number): string {
   const mins = Math.floor((Date.now() - mtime) / 60_000);
@@ -91,6 +109,7 @@ export function MarkdownPanel({
 }: MarkdownPanelProps) {
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const submit = async () => {
     const created = await vm.create();
@@ -111,6 +130,11 @@ export function MarkdownPanel({
   };
 
   const count = vm.files.length;
+  const shown = useMemo(
+    () => vm.files.filter((file) => matches(file, query)),
+    [vm.files, query]
+  );
+  const filtering = query.trim().length > 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -138,6 +162,17 @@ export function MarkdownPanel({
           >
             <Plus className="h-3.5 w-3.5" />
           </Button>
+        </div>
+      )}
+      {compact && count > 0 && (
+        <div className="border-b border-border/60 px-3 py-2">
+          <ListSearch
+            value={query}
+            onChange={setQuery}
+            total={count}
+            shown={shown.length}
+            placeholder={`Search ${count} note${count === 1 ? "" : "s"}…`}
+          />
         </div>
       )}
 
@@ -171,6 +206,17 @@ export function MarkdownPanel({
             >
               <Plus className="h-3.5 w-3.5" />
             </Button>
+          </div>
+        )}
+        {!compact && count > 0 && (
+          <div className="mb-4">
+            <ListSearch
+              value={query}
+              onChange={setQuery}
+              total={count}
+              shown={shown.length}
+              placeholder={`Search ${count} note${count === 1 ? "" : "s"}…`}
+            />
           </div>
         )}
 
@@ -229,7 +275,9 @@ export function MarkdownPanel({
               .atelier/
             </span>
             <span className="shrink-0 rounded-full border border-border/50 bg-muted/30 px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-              {count} note{count === 1 ? "" : "s"}
+              {filtering
+                ? `${shown.length} of ${count}`
+                : `${count} note${count === 1 ? "" : "s"}`}
             </span>
             {count > 0 && (
               <>
@@ -266,7 +314,14 @@ export function MarkdownPanel({
           ) : (
             /* ── Note card stack ── */
             <div className="flex min-h-0 flex-col gap-2 py-2 px-1.5">
-              {vm.files.map((file) => (
+              {shown.length === 0 && (
+                <ListSearchEmpty
+                  query={query}
+                  label="note"
+                  onClear={() => setQuery("")}
+                />
+              )}
+              {shown.map((file) => (
                 <NoteCard
                   key={file.path}
                   file={file}

@@ -68,11 +68,13 @@ export function registerFsHandlers(router: Router, files: FileService): void {
   }));
 
   router.register("fs.search", async (params) => ({
-    matches: await files.search(
-      params.query,
-      params.glob,
-      params.maxResults,
-      params.regex
-    ),
+    matches: (
+      await files.search(
+        params.query,
+        params.glob,
+        params.maxResults,
+        params.regex
+      )
+    ).matches,
   }));
 }

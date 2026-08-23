@@ -14,6 +14,7 @@ import {
 import type { EventBus, PublishedEvent } from "../events/event-bus.js";
 import type { AttachmentStore } from "../context/attachments/attachment-store.js";
 import type { NoteJournal } from "../notes/note-journal.js";
+import type { NoteAccessRegistry } from "../notes/note-access.js";
 import type { ConversationRepo } from "../storage/repositories/conversations.js";
 import { isAuthError } from "./auth-status.js";
 import {
@@ -105,6 +106,7 @@ export interface OrchestratorDeps extends PipelineDeps {
   conversations: ConversationRepo;
   planTracker: PlanTracker;
   notes: NoteJournal;
+  noteAccess: NoteAccessRegistry;
   log: Logger;
 }
 
@@ -122,6 +124,7 @@ export class Orchestrator {
   private conversations: ConversationRepo;
   private planTracker: PlanTracker;
   private notes: NoteJournal;
+  private noteAccess: NoteAccessRegistry;
   private attachments: AttachmentStore;
   private log: Logger;
 
@@ -131,6 +134,7 @@ export class Orchestrator {
     this.conversations = deps.conversations;
     this.planTracker = deps.planTracker;
     this.notes = deps.notes;
+    this.noteAccess = deps.noteAccess;
     this.attachments = deps.attachments;
     this.log = deps.log;
     // Pins diffs and knowledge/impact logs into chat history so they
@@ -273,6 +277,9 @@ export class Orchestrator {
     prompt: string,
     opts: TaskOptions
   ): void {
+    // Which notes this turn may edit is a property of what was SENT, so it
+    // is recorded here — before any tool runs — and dropped in release().
+    this.noteAccess.grant(taskId, prompt, opts.promptFile);
     const abort = new AbortController();
     this.running.set(taskId, {
       taskId,
@@ -413,6 +420,7 @@ export class Orchestrator {
     const task = this.running.get(taskId);
     if (task?.forceTimer) clearTimeout(task.forceTimer);
     this.running.delete(taskId);
+    this.noteAccess.release(taskId);
   }
 
   listRunningTaskIds(): string[] {

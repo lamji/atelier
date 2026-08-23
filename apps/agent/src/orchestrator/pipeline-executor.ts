@@ -29,6 +29,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { SymbolGraph } from "../knowledge/graph/symbol-graph.js";
 import type { CloneHit, CloneScanner } from "../knowledge/impact/clone-scan.js";
 import type { ImpactAnalyzer } from "../knowledge/impact/impact-analyzer.js";
+import type { SearchGroundingGuard } from "../hooks/search-grounding-guard.js";
 import { companionFilesFor } from "../knowledge/impact/companion-files.js";
 import type { IncrementalIndexer } from "../knowledge/indexer/incremental-indexer.js";
 import type { HooksEngine } from "../hooks/hooks-engine.js";
@@ -75,6 +76,8 @@ import {
   harnessPrompt,
   loopHarnessLimits,
   reportsHardBlocker,
+  reportsNoChangeNeeded,
+  streamStallLimits,
 } from "./loop-harness.js";
 import {
   buildLlmRequest,
@@ -116,6 +119,8 @@ import { rankCandidates } from "../context/rank/index.js";
 import {
   detectWorkspaceProfile,
   renderProjectTree,
+  UNSCOPED_MAX_CHARS,
+  UNSCOPED_MAX_DEPTH,
   renderWorkspaceProfile,
 } from "../workspace/profile/index.js";
 import type { WorkspaceProfile } from "../workspace/profile/index.js";
@@ -199,6 +204,13 @@ const STAGE_MODEL = "claude-haiku-4-5";
 const RANK_ANCHOR_TARGETS = 4;
 
 /**
+ * How many files the blast radius is computed for. The analyzer caps its
+ * own output at 60 affected nodes; this caps the input, so a turn with a
+ * forty-file working set reports the reach of the handful it is about.
+ */
+const IMPACT_TARGETS = 6;
+
+/**
  * Body of the plan-mode system reminder for the plan pass the user asks for
  * with the Plan checkbox. The CLI wraps this with its own read-only preamble
  * and ExitPlanMode protocol footer, so it only has to say what a good
@@ -270,7 +282,7 @@ export function completionGatePrompt(
   }
   if (nothingImplemented) {
     lines.push(
-      "- Not one file was changed, on a turn that asked for a change, and the tool budget is spent. Make the edits now from what you have already read. If the request truly needs no code change, say why in one line."
+      "- Not one file was changed, on a turn that asked for a change, and the tool budget is spent. Make the edits now from what you have already read. If the turn genuinely calls for no workspace change — the user stated a fact, pasted output, corrected you, or the code already is what was asked for — end with a line starting `NO CHANGE NEEDED:` and the reason; that closes this gate, and nothing else does."
     );
   }
   lines.push(
@@ -313,12 +325,30 @@ export function completionGateRequired(opts: {
 
 export function completionStopHookDecision(
   outstanding: string,
-  _stopHookActive: boolean
+  _stopHookActive: boolean,
+  report = ""
 ):
   | { decision: "block"; reason: string }
   | { decision?: undefined; reason?: undefined } {
   if (!outstanding) return {};
+  if (declaresHonestExit(report)) return {};
   return { decision: "block", reason: outstanding };
+}
+
+/**
+ * The two reports the harness itself tells the model will end the turn:
+ * a named hard blocker, and "this turn needs no change".
+ *
+ * The hook has to read them, because a blocked Stop ERASES the report it
+ * blocked (`text = ""`). So the model would write the exact sentence the
+ * loop below looks for, the hook would delete it, the loop would see an
+ * empty round and spend another one — and both declared exits were
+ * unreachable in practice. The turn could then only end by running the
+ * stall budget dry, which is what put "the completion gate is still open"
+ * under turns that had nothing left to do.
+ */
+export function declaresHonestExit(report: string): boolean {
+  return reportsHardBlocker(report) || reportsNoChangeNeeded(report);
 }
 
 /**
@@ -335,13 +365,21 @@ interface CompletionGateProgress {
   verificationObserved: boolean;
 }
 
-/** A bounded retry budget resets only when live completion evidence advances. */
+/**
+ * A bounded retry budget resets only when live completion evidence advances.
+ *
+ * A completed STEP is not that evidence, and used to be. A checkmark is the
+ * model's own assertion — so a model that spent each round checking one more
+ * step off an untouched workspace reset the stall counter every round, and
+ * the loop had no bound left at all. That is the turn that runs twenty-three
+ * rounds and finishes nothing. An applied edit and an observed verification
+ * are the two things Atelier watched happen, so they are the two that count.
+ */
 export function completionGateMadeProgress(
   before: CompletionGateProgress,
   after: CompletionGateProgress
 ): boolean {
   return (
-    after.completedSteps > before.completedSteps ||
     after.appliedEdits > before.appliedEdits ||
     (!before.verificationObserved && after.verificationObserved)
   );
@@ -454,6 +492,94 @@ const DIRECT_TOOL_NAMES = DIRECT_TOOLS.map(
   (name) => `mcp__${MCP_SERVER_NAME}__${name}`
 );
 
+/**
+ * Watches a provider stream for going silent, and ends the turn if it stays
+ * that way.
+ *
+ * A turn that hangs here used to hang forever: the UI kept saying "Working",
+ * no event was published, no timeout existed anywhere on this path, and the
+ * only way out was killing the app. That is indistinguishable, to the user,
+ * from a turn that is merely slow — so a real hang could never be reported,
+ * reproduced, or told apart from a long build.
+ *
+ * `beat()` on every message; the timer is re-armed from the last beat, so a
+ * chatty stream never trips it. Warning first, abort second: the warning is
+ * what makes a stall visible while a legitimately quiet tool run finishes.
+ */
+export class StreamStallWatch {
+  private timer: NodeJS.Timeout | undefined;
+  private quietSince = Date.now();
+  private warned = false;
+  /** True once the stream was cut for silence rather than ending itself. */
+  abandoned = false;
+
+  constructor(
+    private report: (detail: string) => void,
+    private abort: () => void,
+    private limits = streamStallLimits()
+  ) {
+    this.arm();
+  }
+
+  beat(): void {
+    this.quietSince = Date.now();
+    if (this.warned) {
+      this.warned = false;
+      this.report("working");
+    }
+    this.arm();
+  }
+
+  stop(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  /** What the turn says when its stream was abandoned mid-flight. */
+  note(): string {
+    return (
+      "_The provider stream stopped responding for " +
+      `${minutes(this.limits.abortMs)} and Atelier ended the turn. Anything ` +
+      "above this line is partial. Send the next message to carry on._"
+    );
+  }
+
+  private arm(): void {
+    this.stop();
+    const next = this.warned ? this.limits.abortMs : this.limits.warnMs;
+    if (!Number.isFinite(next)) return;
+    const due = this.quietSince + next - Date.now();
+    this.timer = setTimeout(() => this.fire(), Math.max(due, 0));
+    // A watchdog must never be the reason a finished process stays alive.
+    this.timer.unref?.();
+  }
+
+  private fire(): void {
+    if (!this.warned) {
+      this.warned = true;
+      this.report(
+        `no provider output for ${minutes(this.limits.warnMs)} — still waiting`
+      );
+      this.arm();
+      return;
+    }
+    this.abandoned = true;
+    this.stop();
+    // Said before the abort, because aborting may end the turn down the
+    // cancel path — where this detail is the only thing that separates
+    // "the user stopped it" from "it stopped answering".
+    this.report(
+      `stream abandoned after ${minutes(this.limits.abortMs)} of silence`
+    );
+    this.abort();
+  }
+}
+
+function minutes(ms: number): string {
+  const mins = Math.round(ms / 60_000);
+  return mins >= 1 ? `${mins}m` : `${Math.round(ms / 1000)}s`;
+}
+
 export class HookBlockedError extends Error {
   constructor(reason: string) {
     super(reason);
@@ -484,6 +610,12 @@ export interface PipelineDeps {
   graph: SymbolGraph;
   clones: CloneScanner;
   impact: ImpactAnalyzer;
+  /**
+   * Holds what each turn has seen, so a search for an invented identifier
+   * can be told apart from a search for a real one. Optional: the smokes
+   * build a bare deps object, and an unseeded guard stands down.
+   */
+  searchGrounding?: SearchGroundingGuard;
   indexer: IncrementalIndexer;
   hooks: HooksEngine;
   /** Tasks running with system knowledge off, for the code guards to skip. */
@@ -654,8 +786,8 @@ export interface PipelineOutcome {
  * `understand` and `plan` are regex and bookkeeping (the two classifier
  * round-trips and the planning round-trip are gone); `retrieve` is local;
  * `validate` and `review` are both opt-in and skipped by default. `impact`
- * is not in the list at all — the blast radius is computed at the edit site
- * by the pre-write hook instead.
+ * is not a stage either: the blast radius is one local graph walk over the
+ * turn's targets, run inside `retrieve` and shipped as context.
  */
 export class PipelineExecutor {
   /**
@@ -699,7 +831,13 @@ export class PipelineExecutor {
    */
   private async scopeContext(ctx: TaskContext): Promise<string> {
     const scope = ctx.scope;
-    if (scope.roots.length === 0 && scope.anchors.length === 0) return "";
+    // An unlocked turn used to get NO map at all — the one case where the
+    // model has least idea where anything is. It gets the workspace root
+    // instead, on a smaller budget: breadth over depth until a lock says
+    // which project matters.
+    if (scope.roots.length === 0 && scope.anchors.length === 0) {
+      return this.projectTree("", UNSCOPED_MAX_CHARS, UNSCOPED_MAX_DEPTH);
+    }
 
     const trees = await Promise.all(
       scope.roots.map((root) => this.projectTree(root))
@@ -878,13 +1016,50 @@ export class PipelineExecutor {
     ];
   }
 
-  private projectTree(root: string): Promise<string> {
+  /**
+   * The pre-edit blast radius for this turn's targets.
+   *
+   * Targets are the paths the user NAMED, and only if they named none, the
+   * working set retrieval re-earned. Both are file-granular and concrete;
+   * running the walk over every retrieved chunk instead would compute reach
+   * from context files (generic hubs, session memory) and report the blast
+   * radius of the codebase rather than of the change.
+   *
+   * A question turn skips it: nothing is about to be edited, and the block
+   * is written as an instruction to keep callers aligned.
+   */
+  private editRadius(ctx: TaskContext, intent: Intent): ImpactRadius {
+    if (isReadOnly(intent)) return emptyRadius([]);
+    const named = ctx.scope.named.filter(isFilePath);
+    const targets = (named.length > 0 ? named : ctx.workingSet).slice(
+      0,
+      IMPACT_TARGETS
+    );
+    if (targets.length === 0) return emptyRadius([]);
+    try {
+      const radius = this.deps.impact.analyze(targets);
+      this.deps.bus.publish("impact.radius", radius, ctx.taskId);
+      return radius;
+    } catch (error) {
+      // A radius we cannot compute is missing context, never a failed turn.
+      this.deps.log.warn({ error, targets }, "impact radius failed");
+      return emptyRadius(targets);
+    }
+  }
+
+  private projectTree(
+    root: string,
+    maxChars?: number,
+    maxDepth?: number
+  ): Promise<string> {
     let block = this.treeBlocks.get(root);
     if (!block) {
       block = renderProjectTree(
         this.deps.config.workspaceRoot,
         root,
-        this.deps.ignore
+        this.deps.ignore,
+        maxChars,
+        maxDepth
       ).catch((error) => {
         this.deps.log.warn({ error, root }, "project tree render failed");
         return "";
@@ -1050,6 +1225,14 @@ export class PipelineExecutor {
           : undefined;
         if (payload.toolCallId) toolInputs.delete(payload.toolCallId);
         if (started && payload.name) {
+          // Everything a tool returns is now something this turn has read,
+          // so the next search may be grounded in it.
+          this.deps.searchGrounding?.note(
+            ctx.taskId,
+            typeof payload.result === "string"
+              ? payload.result
+              : JSON.stringify(payload.result ?? "")
+          );
           try {
             this.deps.workingMemory?.noteTool({
               conversationId: ctx.conversationId,
@@ -1066,11 +1249,11 @@ export class PipelineExecutor {
     });
 
     // NOT marked as a direct task. That mark exists for one thing: a turn
-    // running with system knowledge OFF is not offered impact_of_edit at
-    // all, so gating its edits on it would be a wall with no door. A
-    // pipeline turn HAS that tool on every provider, so the impact hook is
-    // armed here and the rule it enforces rides in FAST_RULES — stated and
-    // enforced, which is the only pairing that works.
+    // running with system knowledge OFF has no knowledge engine behind it,
+    // so the code guards that enforce one would block edits the run has no
+    // way to unblock. A pipeline turn keeps them armed, and every rule they
+    // enforce is stated in FAST_RULES — stated and enforced, which is the
+    // only pairing that works.
 
     try {
       await this.applyScope(ctx);
@@ -1107,7 +1290,8 @@ export class PipelineExecutor {
       // execution contract, so no plan-before-edit gate and no checklist:
       // the model reads what it needs and replies.
       const answerOnly = isReadOnly(intent);
-      if (!answerOnly) this.deps.planTracker.requirePlan(ctx.taskId);
+      if (answerOnly) this.deps.planTracker.markAnswerOnly(ctx.taskId);
+      else this.deps.planTracker.requirePlan(ctx.taskId);
 
       const retrieval = await this.stage(ctx, "retrieve", async () => {
         // Small talk is the one turn with nothing to look up, and the test
@@ -1196,17 +1380,22 @@ export class PipelineExecutor {
         );
       }
 
-      // Impact is a PRE-EDIT check and it now happens where the edit does:
-      // the built-in impact hook computes the blast radius at the edit site,
-      // against the files actually being changed. Doing it here as well meant
-      // a graph walk over whatever retrieval happened to return, on every
-      // turn, to inform a plan the model no longer needs.
-      const impact = {
-        paths: [] as string[],
-        deps: emptyDeps(),
-        riskNotes: [] as string[],
-      };
-      const radius = emptyRadius([]);
+      // The blast radius, computed HERE and handed over as context.
+      //
+      // It used to be a hook that refused the first write to every existing
+      // source file until the model called impact_of_edit for that exact
+      // path. That bought one graph query — a local SQLite walk, single-digit
+      // milliseconds — at the price of a blocked tool call and a round-trip
+      // PER FILE, and the model spent that budget discovering a fact the
+      // server already knew. Worse, the block below was fed an empty radius
+      // in the meantime, so the prompt said nothing about callers at all: the
+      // turn paid the tax and got none of the information.
+      //
+      // Now the walk runs once over what this turn is actually about, and its
+      // callers, flows, tests and past lessons ride into the prompt before
+      // the model picks a target. impact_of_edit stays available for a
+      // symbol- or line-precise question the map does not answer.
+      const radius = this.editRadius(ctx, intent);
 
       // No planning model call, and — deliberately — no published plan yet.
       //
@@ -1275,6 +1464,10 @@ export class PipelineExecutor {
           { name: "previously gathered", text: gathered.text },
           { name: "attachments", text: attachmentBlock(ctx) },
           { name: "go-ahead", text: goAheadBlock(ctx) },
+          {
+            name: "asked-about",
+            text: followUpBlock(ctx.prompt, ctx.priorTurns, intent),
+          },
           { name: "recovery plan", text: ctx.recoveryPlan },
           { name: "skills", text: skills.context },
           { name: "knowledge context", text: context },
@@ -1288,9 +1481,14 @@ export class PipelineExecutor {
         // `work` (it is imperative in form), and a reply that happens to
         // end "what would you like to do?" reads as an offer — so without
         // this guard, saying hello could cost a second full model turn.
+        //
+        // A turn that only TELLS Atelier something is excluded for the same
+        // reason: it owes no edit, so requiring one only bought a gate that
+        // could never close.
         const actionable =
           !isReadOnly(intent) &&
-          !isTrivialChat(ctx.prompt, ctx.images.length > 0);
+          !isTrivialChat(ctx.prompt, ctx.images.length > 0) &&
+          !looksInformational(ctx.prompt);
         ctx.mustEdit = actionable;
         const guardCompletion = completionGateRequired({
           actionable,
@@ -1366,7 +1564,13 @@ export class PipelineExecutor {
             appliedEdits,
             verificationObserved,
           });
-          let outstanding = gateOutstanding();
+          // A first pass that already declared "nothing to change here" is
+          // finished. Re-opening the gate on it is what turned a one-line
+          // answer into eight model calls and a warning that the work may
+          // be undone.
+          let outstanding = reportsNoChangeNeeded(result.text)
+            ? ""
+            : gateOutstanding();
           let rounds = 0;
           while (outstanding) {
             const progressBefore = gateProgress();
@@ -1403,6 +1607,13 @@ export class PipelineExecutor {
             // blocker only the user can clear. Looping past it would spend
             // rounds re-hitting the same wall.
             if (reportsHardBlocker(round)) break;
+            // The other honest exit, and the only one that closes the gate
+            // rather than reporting it open: the model looked and there is
+            // nothing to change.
+            if (reportsNoChangeNeeded(round)) {
+              outstanding = "";
+              break;
+            }
             outstanding = gateOutstanding();
           }
           gateStillOpen = outstanding !== "";
@@ -1664,6 +1875,7 @@ export class PipelineExecutor {
     } finally {
       unsubscribe();
       this.deps.directTasks.release(ctx.taskId);
+      this.deps.searchGrounding?.release(ctx.taskId);
     }
   }
 
@@ -2395,16 +2607,14 @@ export class PipelineExecutor {
     // survives direct mode — knowing the real folder names is not knowledge
     // retrieval, and without it the model invents paths.
     const layout = await this.workspaceLayout();
-    // Direct mode swaps the whole rule block: SYSTEM_RULES describes a
-    // knowledge engine this turn does not have, down to tools it cannot
+    // Direct mode swaps the whole rule block: the pipeline's rules describe
+    // a knowledge engine this turn does not have, down to tools it cannot
     // call and hooks that will not fire.
     const direct = isDirectMode(ctx.opts);
-    // FAST_RULES, not SYSTEM_RULES. The old block was ~110 lines describing
-    // guards this turn no longer arms, and prose the model paid to read on
-    // every cache miss. What survived is only what changes what the model
-    // DOES: reach for the index first, finish the turn, stay in the
-    // workspace, and the two hooks that will stop it and ask the user.
-    // The modularity clause went with the guard that enforced it.
+    // The rules are deliberately short: the same tasks came out better with
+    // system knowledge OFF, carrying a fifth of the text, which is what a
+    // paragraph of good advice costs when it competes with the task for
+    // attention. What survived is what changes what the model DOES.
     // The user's own rules stay LAST — they are instructions for this
     // workspace, and they are declared to win.
     const rules =
@@ -2425,6 +2635,10 @@ export class PipelineExecutor {
       (ctx.opts.vibe ? VIBE_RULES : "") +
       scoped +
       contextText(appendContext);
+    // The turn's vocabulary: what the user asked, and every block the model
+    // is about to be given. A search term outside this and outside anything
+    // the tools return is one the model made up.
+    this.deps.searchGrounding?.seed(ctx.taskId, [prompt, providerContext]);
     // What is about to be sent, block by block, published BEFORE the call:
     // this is the row the timeline shows as "sent to model", and it has to
     // exist even for a call that never comes back.
@@ -2745,7 +2959,8 @@ export class PipelineExecutor {
                             .stop_hook_active === true;
                         const decision = completionStopHookDecision(
                           opts.completionGate!(),
-                          stopHookActive
+                          stopHookActive,
+                          text
                         );
                         completionAccepted = decision.decision !== "block";
                         if (decision.decision === "block") {
@@ -2818,145 +3033,168 @@ export class PipelineExecutor {
     // Iterating the wrapper instead of the query is what keeps the throw
     // from unwinding the whole task; everything else about the loop, the
     // abort break included, behaves exactly as before.
-    for await (const message of tolerateTurnLimit(stream, () => {
-      turnLimitHit = true;
-    })) {
-      // A cancel aborts the SDK's own controller, but the teardown it
-      // triggers is not instant. Leaving the loop on the signal stops this
-      // turn streaming text into a chat the user has already stopped, and
-      // closes the iterator (which is what actually ends the subprocess).
-      if (ctx.abort.signal.aborted) break;
-      const m = message as Record<string, unknown>;
-      if (m.type === "system" && m.subtype === "init") {
-        // A non-resuming turn (the independent review) runs in a throwaway
-        // session: never let its id replace the implementer's, or the fix
-        // round after a `fail` would resume the reviewer instead of the
-        // agent that actually wrote the code.
-        const sid = m.session_id as string | undefined;
-        if (resume && sid && sid !== ctx.sdkSessionId) {
-          ctx.sdkSessionId = sid;
-          ctx.onSdkSessionId(sid);
+    // Silence is the one failure nothing else here can see: every other
+    // bound needs a message to arrive. Watched from outside the loop,
+    // because a stream that says nothing never runs the loop body.
+    const stall = new StreamStallWatch(
+      (detail) =>
+        this.deps.bus.publish(
+          "agent.status",
+          { status: "working", detail },
+          ctx.taskId
+        ),
+      () => ctx.abort.abort()
+    );
+    try {
+      for await (const message of tolerateTurnLimit(stream, () => {
+        turnLimitHit = true;
+      })) {
+        stall.beat();
+        // A cancel aborts the SDK's own controller, but the teardown it
+        // triggers is not instant. Leaving the loop on the signal stops this
+        // turn streaming text into a chat the user has already stopped, and
+        // closes the iterator (which is what actually ends the subprocess).
+        if (ctx.abort.signal.aborted) break;
+        const m = message as Record<string, unknown>;
+        if (m.type === "system" && m.subtype === "init") {
+          // A non-resuming turn (the independent review) runs in a throwaway
+          // session: never let its id replace the implementer's, or the fix
+          // round after a `fail` would resume the reviewer instead of the
+          // agent that actually wrote the code.
+          const sid = m.session_id as string | undefined;
+          if (resume && sid && sid !== ctx.sdkSessionId) {
+            ctx.sdkSessionId = sid;
+            ctx.onSdkSessionId(sid);
+          }
         }
-      }
-      // Plan usage moves as the task spends; the status bar follows live.
-      if (m.type === "rate_limit_event") {
-        this.deps.usage.recordEvent(m.rate_limit_info);
-      }
-      // The SDK's OWN tools — Grep and Glob (CLAUDE_FAST_BUILTINS) — never
-      // touch ToolRegistry, so nothing was publishing tool.* for them. They
-      // are also most of what a turn does: it spends its calls looking for
-      // things. The rail therefore sat on whichever MCP label happened to be
-      // last while the model searched, and a Task fan-out was wholly
-      // invisible. These three branches close that hole; the registry stays
-      // the source of truth for its own tools, so MCP names are skipped here
-      // rather than reported twice.
-      if (m.type === "assistant") {
-        const toolUses = assistantToolUses(m);
-        if (opts.completionGate && toolUses.length > 0) {
-          // Text beside a tool call is process narration, not the accepted
-          // report. Keep only the final no-tool candidate in the buffer.
-          text = "";
+        // Plan usage moves as the task spends; the status bar follows live.
+        if (m.type === "rate_limit_event") {
+          this.deps.usage.recordEvent(m.rate_limit_info);
         }
-        for (const block of toolUses) {
-          builtinToolCalls.set(block.id, { name: block.name, at: Date.now() });
-          this.deps.bus.publish(
-            "tool.started",
-            { toolCallId: block.id, name: block.name, input: block.input },
-            ctx.taskId
-          );
-        }
-      }
-      if (m.type === "user") {
-        for (const block of userToolResults(m)) {
-          const started = builtinToolCalls.get(block.toolUseId);
-          if (!started) continue;
-          builtinToolCalls.delete(block.toolUseId);
-          const durationMs = Date.now() - started.at;
-          if (block.isError) {
+        // The SDK's OWN tools — Grep and Glob (CLAUDE_FAST_BUILTINS) — never
+        // touch ToolRegistry, so nothing was publishing tool.* for them. They
+        // are also most of what a turn does: it spends its calls looking for
+        // things. The rail therefore sat on whichever MCP label happened to be
+        // last while the model searched, and a Task fan-out was wholly
+        // invisible. These three branches close that hole; the registry stays
+        // the source of truth for its own tools, so MCP names are skipped here
+        // rather than reported twice.
+        if (m.type === "assistant") {
+          const toolUses = assistantToolUses(m);
+          if (opts.completionGate && toolUses.length > 0) {
+            // Text beside a tool call is process narration, not the accepted
+            // report. Keep only the final no-tool candidate in the buffer.
+            text = "";
+          }
+          for (const block of toolUses) {
+            builtinToolCalls.set(block.id, { name: block.name, at: Date.now() });
             this.deps.bus.publish(
-              "tool.failed",
-              {
-                toolCallId: block.toolUseId,
-                name: started.name,
-                error: clip(block.text || "tool reported an error", 300),
-                durationMs,
-              },
-              ctx.taskId
-            );
-          } else {
-            this.deps.bus.publish(
-              "tool.completed",
-              {
-                toolCallId: block.toolUseId,
-                name: started.name,
-                result: { summary: clip(block.text, 200) },
-                durationMs,
-              },
+              "tool.started",
+              { toolCallId: block.id, name: block.name, input: block.input },
               ctx.taskId
             );
           }
         }
-      }
-      if (m.type === "stream_event") {
-        const event = m.event as {
-          type?: string;
-          delta?: { type?: string; text?: string; thinking?: string };
-        };
-        if (event?.type === "content_block_delta" && event.delta) {
-          if (event.delta.type === "text_delta" && event.delta.text) {
-            if (!firstToken) {
-              firstToken = true;
-              trace({
-                kind: "first_token",
-                taskId: ctx.taskId,
-                ms: Date.now() - spawnedAt,
-                detail: purpose,
-              });
-            }
-            text += event.delta.text;
-            if (!opts.completionGate) {
-              ctx.collectedText += event.delta.text;
+        if (m.type === "user") {
+          for (const block of userToolResults(m)) {
+            const started = builtinToolCalls.get(block.toolUseId);
+            if (!started) continue;
+            builtinToolCalls.delete(block.toolUseId);
+            const durationMs = Date.now() - started.at;
+            if (block.isError) {
               this.deps.bus.publish(
-                "chat.message.delta",
+                "tool.failed",
                 {
-                  conversationId: ctx.conversationId,
-                  messageId: ctx.messageId,
-                  delta: event.delta.text,
+                  toolCallId: block.toolUseId,
+                  name: started.name,
+                  error: clip(block.text || "tool reported an error", 300),
+                  durationMs,
+                },
+                ctx.taskId
+              );
+            } else {
+              this.deps.bus.publish(
+                "tool.completed",
+                {
+                  toolCallId: block.toolUseId,
+                  name: started.name,
+                  result: { summary: clip(block.text, 200) },
+                  durationMs,
                 },
                 ctx.taskId
               );
             }
-          } else if (
-            event.delta.type === "thinking_delta" &&
-            event.delta.thinking
-          ) {
-            this.deps.bus.publish(
-              "agent.thinking.delta",
-              {
-                conversationId: ctx.conversationId,
-                delta: event.delta.thinking,
-              },
-              ctx.taskId
+          }
+        }
+        if (m.type === "stream_event") {
+          const event = m.event as {
+            type?: string;
+            delta?: { type?: string; text?: string; thinking?: string };
+          };
+          if (event?.type === "content_block_delta" && event.delta) {
+            if (event.delta.type === "text_delta" && event.delta.text) {
+              if (!firstToken) {
+                firstToken = true;
+                trace({
+                  kind: "first_token",
+                  taskId: ctx.taskId,
+                  ms: Date.now() - spawnedAt,
+                  detail: purpose,
+                });
+              }
+              text += event.delta.text;
+              if (!opts.completionGate) {
+                ctx.collectedText += event.delta.text;
+                this.deps.bus.publish(
+                  "chat.message.delta",
+                  {
+                    conversationId: ctx.conversationId,
+                    messageId: ctx.messageId,
+                    delta: event.delta.text,
+                  },
+                  ctx.taskId
+                );
+              }
+            } else if (
+              event.delta.type === "thinking_delta" &&
+              event.delta.thinking
+            ) {
+              this.deps.bus.publish(
+                "agent.thinking.delta",
+                {
+                  conversationId: ctx.conversationId,
+                  delta: event.delta.thinking,
+                },
+                ctx.taskId
+              );
+            }
+          }
+        }
+        if (m.type === "result") {
+          if (m.subtype === "error_max_turns") turnLimitHit = true;
+          const resultText = m.result as string | undefined;
+          if (!text && resultText) text = resultText;
+          // Real token accounting: reconcile the assembled-context estimate
+          // with what the request actually cost (cache reads broken out).
+          const usage = m.usage as SdkUsage | undefined;
+          if (usage) {
+            this.deps.ledger.attachSdkUsage(
+              ctx.taskId,
+              ctx.conversationId,
+              purpose,
+              usage
             );
           }
         }
       }
-      if (m.type === "result") {
-        if (m.subtype === "error_max_turns") turnLimitHit = true;
-        const resultText = m.result as string | undefined;
-        if (!text && resultText) text = resultText;
-        // Real token accounting: reconcile the assembled-context estimate
-        // with what the request actually cost (cache reads broken out).
-        const usage = m.usage as SdkUsage | undefined;
-        if (usage) {
-          this.deps.ledger.attachSdkUsage(
-            ctx.taskId,
-            ctx.conversationId,
-            purpose,
-            usage
-          );
-        }
-      }
+    } finally {
+      stall.stop();
+    }
+    if (stall.abandoned) {
+      // The stream was cut, not finished. Say so where the report goes,
+      // rather than returning whatever partial text had accumulated as if
+      // the model had chosen to stop there.
+      text = `${text}\n\n${stall.note()}`.trim();
     }
     const acceptedText = completionReportText(text, completionAccepted);
     if (opts.completionGate && acceptedText) {
@@ -3270,27 +3508,33 @@ function chunkLabel(preview: string): string {
 /**
  * What a chat turn actually carries.
  *
- * This replaced SYSTEM_RULES on the interactive path. The test each clause
- * had to pass was "does the turn come out different without it?" — a rule
- * that only describes good taste is prose the model pays for on every cache
- * miss and then averages away. The clauses below survive because each one
- * changes execution behavior or prevents an observed failure mode:
+ * The test every clause has to pass is "does the turn come out different
+ * without it?" — a rule that only describes good taste is prose the model
+ * pays for on every cache miss and then averages away. This block was 5.4 KB
+ * of it, and the turns it produced were measurably worse than the same task
+ * run with system knowledge OFF, which carries a fifth of the text and none
+ * of the ceremony. What survives is the enforced half plus the four
+ * behaviours that stop a turn ending wrong:
  *
  * - KNOWLEDGE FIRST, because the index is the thing Atelier has and a stock
  *   CLI does not, and the model will not reach for it unprompted.
- * - IMPACT BEFORE EDITING, because the impact hook DOES block the first
- *   write to an existing source file, and a model that was not told spends
- *   a round-trip discovering that.
- * - TARGETED EDITS, same reason: the rewrite hook refuses a write_file that
- *   is a patch wearing a rewrite's clothes.
+ * - PLAN, because a blocking completion hook reads the plan's steps.
+ * - TARGETED EDITS / LAYOUT / MODULARITY, because those hooks DO block, and
+ *   a model that was not told loops against them.
  * - AUTONOMOUS EXECUTION, because without it turns end by offering to work.
  * - WORKSPACE CONFINEMENT, because it is the one boundary with no hook.
- * - GIT FLOW and DATABASE, because those hooks DO block, and a model that
- *   was not told loops against them.
+ * - GIT FLOW and DATABASE, because those hooks stop and ask the user.
  * - REPORTING, because narration is most of the text on a slow turn.
  *
+ * What went, and why it was not free: SIMPLEST FIX, GROUND BEFORE EDITING,
+ * VERIFY BEFORE CLAIMING and the timeline contract's paragraph of procedure
+ * were advice about how to think, competing for attention with the task and
+ * with each other. The impact clause went with the hook it described — the
+ * radius is computed server-side now and arrives as context, so there is
+ * nothing for the model to do about it.
+ *
  * A rule stated but not enforced, or enforced but not stated, is worse than
- * neither — so every clause here names the hook standing behind it.
+ * neither — so every clause naming a hook still has one standing behind it.
  *
  * Byte-stable — it rides in the static half of the prompt for caching.
  */
@@ -3300,61 +3544,35 @@ export const FAST_RULES =
   "files — the index is live and current. Once you know the exact string " +
   "or filename you want, use your fastest text-search tool (Grep/Glob " +
   "where available, else search_text) and run several searches in ONE " +
-  "message rather than one per turn.\n" +
-  "TIMELINE EXECUTION CONTRACT (enforced by a blocking completion hook): " +
-  "for every change task, call set_plan after you know the shape of the " +
-  "work and before editing. Name the files each step touches, execute the " +
-  "steps in order, mark the current step in-progress when it starts, and " +
-  "mark it done only after its work is complete. Do not render a progress " +
-  "or final report until every step is explicitly done; failed, cancelled, " +
-  "or skipped steps remain blockers. The timeline is not frozen: if you " +
-  "discover additional necessary work, call set_plan again with ONLY the " +
-  "new steps and they will be appended. A later set_plan call cannot erase, " +
-  "replace, reorder, or complete an existing step.\n" +
-  "SIMPLEST FIX WINS: match the solution to the problem. Reuse the " +
-  "existing component and layout structure, and prefer the smallest local " +
-  "value, CSS, or utility-class change that fully solves the request. Do " +
-  "not introduce a new abstraction, service, dependency, or broad refactor " +
-  "for a small UI or behavior fix. Scope creep is a defect.\n" +
-  "FLEX-FIRST UI LAYOUT (enforced by a blocking hook): when creating or " +
-  "changing UI layout, use flexbox by default. Center content with a flex " +
-  "container and both-axis alignment (display: flex + align-items: center + " +
-  "justify-content: center, or equivalent framework utility classes). Do " +
-  "not substitute grid, absolute positioning/transforms, spacer margins, " +
-  "or fixed coordinates for basic centering. Preserve a non-flex layout " +
-  "only when an explicit requirement or the owning component makes flex " +
-  "objectively unsuitable.\n" +
-  "GROUND BEFORE EDITING: retrieved chunks and session summaries are leads, " +
-  "not proof of the current UI or code path. For a UI bug, locate the exact " +
-  "visible trigger, read its owning component, then trace its event handler " +
-  "and the state/data passed into the rendered surface. For any code-flow " +
-  "bug, trace caller to callee through the divergence point. Do not edit " +
-  "until you have searched for the live owner and read every file you will " +
-  "change in this turn. If the user's report disputes an earlier patch, " +
-  "re-read the live code and re-simulate the full path; never stack another " +
-  "conditional or style patch on the prior assumption. Files inlined under " +
-  "PREVIOUSLY GATHERED CONTEXT are current content re-read for this turn: " +
-  "they count as read, so build on them instead of reading them again. A " +
-  "FEATURE WIKI page is compiled knowledge of a feature's entry points, " +
-  "flow and owner files: navigate by it, verify only the steps citing a " +
-  "source marked moved, and do not rebuild what it already states.\n" +
-  "IMPACT BEFORE EDITING (enforced by a blocking hook): the first write to " +
-  "an existing source file is refused until you have called impact_of_edit " +
-  "for that exact path (analyze_impact covers several at once). It returns " +
-  "who calls, imports and references the site, and whether it is isolated, " +
-  "local or shared. Use the verdict: if it comes back isolated and nothing " +
-  "renders or imports it, you are about to edit the wrong file — find the " +
-  "live owner first. If it is shared and you change a signature or " +
-  "behaviour, update the callers it lists.\n" +
+  "message rather than one per turn. The DIRECTORY MAP above lists real " +
+  "paths and file names: read from it instead of guessing a path or " +
+  "listing folders one by one.\n" +
+  "PLAN (a blocking completion hook reads it): for a change task, call " +
+  "set_plan once you know the shape of the work and before editing, naming " +
+  "the files each step touches. Mark each step done as its work completes, " +
+  "and do not write the final report until every step is done. Call " +
+  "set_plan again with ONLY new steps to append; it cannot erase, reorder " +
+  "or complete existing ones.\n" +
+  "GROUNDED SEARCH (enforced by a blocking hook): search for words the user " +
+  "used, a name from the DIRECTORY MAP, or a string you have actually read. " +
+  "Do not invent an identifier you expect this codebase to contain and then " +
+  "grep for it — on a large repo that is a full scan that finds nothing. The " +
+  "first such search is refused. Start from the thing the user named.\n" +
+  "IMPACT RADIUS: when the prompt carries one, it already lists who calls " +
+  "and imports your targets, which flows ride on them, and which tests " +
+  "cover them — keep those aligned with your change instead of " +
+  "rediscovering them. impact_of_edit answers a symbol- or line-precise " +
+  "question the block does not.\n" +
   "TARGETED EDITS (enforced by a blocking hook): use replace_code / " +
   "replace_many for the lines that change. write_file is refused when most " +
   "of the file it sends back is the file that was already there — that is a " +
   "patch, and restating the rest is how untouched lines get silently " +
   "dropped. A genuine full rewrite is allowed on the repeat call.\n" +
-  "VERIFY BEFORE CLAIMING: never say a file, element, flow, or fix was " +
-  "confirmed unless a tool result from this turn proves it. A successful " +
-  "edit proves only that text changed; verify the connected caller/render " +
-  "path and run the narrowest relevant check before reporting fixed.\n" +
+  "FLEX-FIRST UI LAYOUT (enforced by a blocking hook): center and align UI " +
+  "with a flex container (display: flex + align-items + justify-content, or " +
+  "the framework's utility classes), not grid, absolute positioning, " +
+  "transforms, or spacer margins. Keep a non-flex layout only where the " +
+  "owning component makes flex unsuitable.\n" +
   "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
   "answer you mid-turn. Never end a turn by asking whether to proceed or " +
   "by offering to implement. Where something is genuinely ambiguous, " +
@@ -3409,123 +3627,6 @@ export const ANSWER_ONLY_RULES =
   "describing what you remember writing.\n";
 
 /**
- * The former interactive rule block, kept for Settings to display and for
- * any caller that wants the full contract back. No longer sent by default —
- * see FAST_RULES.
- */
-export const SYSTEM_RULES =
-  "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
-  "answer you mid-turn. Never end a turn by asking whether to proceed, by " +
-  "offering to implement (\"say the word and I'll…\"), or by waiting on a " +
-  "decision. Where something is genuinely ambiguous, choose the most " +
-  "reasonable default, state it in one line as an assumption, and build " +
-  "it. A turn that analyses the work and stops short of doing it has " +
-  "failed the request, however good the analysis. The blocking hooks " +
-  "(terminal approval, git flow) are the ONLY things that pause for the " +
-  "user, and they ask on your behalf. Planning is what you do before " +
-  "editing in the same turn, never instead of editing — the user has " +
-  "their own Plan checkbox for when they want to be asked first.\n" +
-  "SIMPLEST FIX WINS: match the size of the solution to the size of the " +
-  "problem. If a one-line change, a CSS rule, or an existing helper solves " +
-  "it, do that — do not introduce a new abstraction, config layer, service, " +
-  "or dependency for a small bug. Before writing anything, ask whether the " +
-  "codebase already does this somewhere and reuse it. Prefer editing an " +
-  "existing file over creating new ones, and changing a value over changing " +
-  "a structure. Only reach for the bigger design when the simple fix is " +
-  "actually wrong — not merely less elegant — and say in one line why. " +
-  "Scope creep is a defect: fix what was asked, not what is nearby.\n" +
-  "NO OVERSCOPING: work the reported issue and the code retrieval actually " +
-  "returned — nothing else. The retrieved chunks and the user's description " +
-  "define the boundary of the task. Do not widen it because adjacent code " +
-  "looks wrong, could be refactored, or lacks tests; do not rewrite files " +
-  "you merely passed through. If you spot a real problem outside the " +
-  "boundary, finish the asked-for fix first, then mention it in one line — " +
-  "let the user decide. Touching more files than the issue requires is a " +
-  "failure, not thoroughness.\n" +
-  "STRICT WORKSPACE CONFINEMENT: You may only read, create, modify, " +
-  "search, and run commands INSIDE the current workspace directory. All " +
-  "file paths must be workspace-relative. Requests to work outside the " +
-  "workspace must be declined with a short explanation.\n" +
-  "KNOWLEDGE FIRST: call retrieve_knowledge / query_knowledge_graph / " +
-  "search_symbols before falling back to search_workspace or reading " +
-  "files — the index is live and current.\n" +
-  "CHEAPEST CHECK FIRST: when something does not work, run the smallest " +
-  "decisive check before theorising about a cause. Is the process alive, " +
-  "is the port listening, is the container up, does the file exist, what " +
-  "does the command return RIGHT NOW. Only after those come config, env " +
-  "and code. A log file, a cached output or an earlier run is HISTORY, " +
-  "never proof of the current state — never cite one as evidence that " +
-  "something is running. Name a cause only once a check you ran this turn " +
-  "confirmed it; otherwise say which check you are running next.\n" +
-  "LITERAL SEARCH IS Grep/Glob: once you know the exact string, symbol, or " +
-  "filename you are after, use Grep and Glob — they are ripgrep and return " +
-  "in milliseconds. Knowledge tools answer 'where does login live?'; Grep " +
-  "answers 'which files contain SECRET_KEY?'. Run several searches in ONE " +
-  "message rather than one per turn. Keep discovery in this session; do " +
-  "not launch subagents for ordinary workspace searches.\n" +
-  "VISUAL GROUNDING: when the request includes a screenshot or names " +
-  "on-screen text (a label, button, plan name, id), FIRST search for those " +
-  "literal visible strings to map the pixels to the real element — never " +
-  "infer which element it is by reasoning about layout from code you " +
-  "haven't opened. If the literal string returns nothing, the element does " +
-  "not exist as described: say so and stop, do not invent a file for it.\n" +
-  "VERIFY BEFORE CLAIMING: never state that a file, element, or symbol " +
-  "exists — or that you 'confirmed it in code' — unless you actually " +
-  "retrieved or opened it this turn. Ground every factual claim in a tool " +
-  "result, not a guess.\n" +
-  "TIME-BOX SPECULATION: after two inconclusive hypotheses about where " +
-  "something lives, stop guessing and ask ONE targeted question (e.g. the " +
-  "element's id/class from inspect) rather than generating more theories.\n" +
-  "LEARN FROM MISTAKES: when the user confirms a fix that took real " +
-  "effort, or you hit a non-obvious gotcha, call save_lesson with a tiny " +
-  "distilled insight anchored to the symbols/files involved. Retrieved " +
-  "chunks of kind 'lesson' are hard-won knowledge — respect them.\n" +
-  "TARGETED EDITS (enforced by a blocking hook): edit existing files with " +
-  "replace_code / replace_many, not write_file. Change the lines that are " +
-  "wrong and leave the rest alone — restating a file that was mostly " +
-  "already correct hides the real change in the diff and risks dropping " +
-  "code you never meant to touch. write_file is for new files and for a " +
-  "file whose content is genuinely being thrown away. If replace_code " +
-  "fails, fix the oldString (check exact whitespace and indentation, or " +
-  "add surrounding lines for uniqueness) rather than falling back to a " +
-  "whole-file rewrite.\n" +
-  "GIT FLOW RULE (enforced by a blocking hook): never commit, push, or " +
-  "open a pull request yourself — not with the git tool, not through " +
-  "run_terminal. Staging, status, log and diff are fine. When the work " +
-  "is ready, say so and let the user run the commit → push → PR wizard.\n" +
-  "DATABASE RULE (enforced by an approval hook): when the task needs a " +
-  "migration or DB command RUN, actually run it — do NOT skip it and " +
-  "leave the user a manual 'run this later' step. The run_terminal call " +
-  "pauses in an approval modal where the user approves or cancels; that " +
-  "prompt IS how you ask permission, and they can cancel any time. Only " +
-  "after the user cancels do you stop and explain. Writing a migration " +
-  "file is not finishing the task — apply it (and smoke-test) unless the " +
-  "user cancels. Never route around a cancellation with another client, " +
-  "script, or ORM call.\n" +
-  "CHANGE COMPLETENESS: a fix is not done until it is applied everywhere " +
-  "the same pattern occurs. Parallel implementations rarely import each " +
-  "other, so use search_symbols / retrieve_knowledge to find the twins of " +
-  "any code you change, and check every new branch or message can " +
-  "actually be reached by the code that feeds it.\n" +
-  "EDIT IMPACT (ENFORCED): the first edit to an existing source file is " +
-  "REFUSED until you have called impact_of_edit for that exact path, with " +
-  "the line (or symbol) you're about to change — a hook blocks the write, " +
-  "so call it as you settle on each target rather than editing twice. It " +
-  "tells you who calls/imports it and whether the site is isolated, local, " +
-  "or shared. If shared and you change its signature or behavior, update " +
-  "every caller it lists; if you can keep the contract stable, isolate the " +
-  "change instead. New files and non-source files are not gated.\n" +
-  "PLAN PROGRESS: as you complete plan steps, call update_plan_step with " +
-  "the step id and its new status.\n" +
-  "REPORTING: the process rail already shows every read/search/edit as it " +
-  "happens, so do NOT narrate each step in prose as you go — keep any " +
-  "interim text to a single short line at most. Save your explanation for " +
-  "ONE final report written LAST, after the edits are done — never as a " +
-  "preamble before the work. Format that report as markdown bullet points: " +
-  "one '- ' bullet per change or finding, each a short standalone line. " +
-  "Never chain several sentences into one run-on paragraph.\n";
-
-/**
  * The one-per-file rule, carried ONLY when the guard is actually going to
  * enforce it — see ModularityGuard.inForce.
  *
@@ -3565,6 +3666,21 @@ const GO_AHEAD =
 
 /** How much of the approved message to quote back. */
 const GO_AHEAD_CHARS = 2_000;
+
+/**
+ * A question that points AT the previous answer rather than opening a new
+ * subject: "what do you mean by this?", "explain that", "why did you say
+ * the residual is harmless?", "sample scenario?".
+ *
+ * Demonstratives alone are the test, deliberately loose, because the
+ * block they gate is only ever added to a turn already classified as a
+ * question — a change request never reaches it.
+ */
+const BACK_REFERENCE =
+  /\b(this|that|these|those|it|its|it'?s|above|there|your\s+(?:last|previous|earlier)\s+\w+|you\s+(?:said|mean|meant|wrote|claimed|mentioned|reported|found|did))\b/i;
+
+/** How much of the referenced answer to quote back. */
+const ASKED_ABOUT_CHARS = 4_000;
 
 /**
  * Puts the proposal back in front of a turn that only approved it.
@@ -3820,6 +3936,11 @@ function buildSummary(
 /** Dependents with nothing in them — for turns that skip the graph walk. */
 function emptyDeps(): ReturnType<SymbolGraph["dependentsOf"]> {
   return { files: [], symbols: [], lessons: [] };
+}
+
+/** A working-set entry that is a file, not a folder anchor. */
+function isFilePath(value: string): boolean {
+  return /\.[a-z0-9]{1,6}$/i.test(value);
 }
 
 /** A radius with nothing in it — for light tasks or unknown targets. */
@@ -4134,7 +4255,7 @@ function endsWithAnOffer(text: string): boolean {
  * a turn that answers one of them with prose really has stopped short.
  */
 const EXPLAIN_OPENERS =
-  /^(?:please\s+)?(?:explain|describe|summari[sz]e|compare|analy[sz]e|review|audit|investigate|explore|walk\s+me\s+through|tell\s+me|show\s+me|help\s+me\s+understand|look\s+(?:at|into)|find|locate|list|trace|check|inspect|what'?s|where'?s|which)\b/i;
+  /^(?:please\s+)?(?:explain|describe|summari[sz]e|compare|analy[sz]e|review|audit|investigate|explore|walk\s+me\s+through|tell\s+me|show\s+me|help\s+me\s+understand|look\s+(?:at|into)|find|locate|list|trace|check|inspect|answer|confirm|clarify|what'?s|where'?s|which)\b/i;
 
 const CHANGE_REQUEST_OPENERS =
   /^(?:please\s+)?(?:(?:can|could|would|will)\s+(?:you|we)\s+)?(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|make|put|set|use|replace|adjust|convert)\b/i;
@@ -4170,8 +4291,60 @@ function featureTerms(text: string): string[] {
   );
 }
 
+/**
+ * Conversational filler a follow-up opens with: "so its the same?",
+ * "ok and this one?". It carries no intent, but it does hide the word the
+ * openers below are anchored on, so it comes off before they are tested.
+ */
+const LEADING_FILLER = /^(?:so|ok(?:ay)?|and|but|well|hmm+|wait|also)\b[\s,]*/i;
+
+/**
+ * A change verb ANYWHERE, not just at the front — the guard on the short
+ * trailing-"?" rule below. "the login is broken, can you center it?" opens
+ * with none of the change openers, and only this keeps it work.
+ */
+const CHANGE_VERB_ANYWHERE =
+  /\b(fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|replace|adjust|convert)\b/i;
+
+/** Longest trailing-"?" prompt still read as a bare question. */
+const SHORT_QUESTION_WORDS = 12;
+
+/**
+ * Opens by REPORTING something — a fact, a result, a correction — rather
+ * than asking for anything: "i will prove you wrong …", "that was the dev",
+ * "here's what the API returns", "fyi the token already expired".
+ */
+const STATEMENT_OPENERS =
+  /^(?:i(?:'m| am|'ll)\s|i\s(?:will|just|already|think|thought|tried|ran|did|was|have|see|saw|found|got|meant)\b|that(?:'s|s|\swas|\sis|\swere)\b|this\s(?:was|is)\b|it\s(?:was|is|works|worked|returns|returned|failed)\b|here(?:'s|\sis|\sare)\b|fyi\b|note:|see\s(?:this|the|below)\b|look\sat\s(?:this|the)\b)/i;
+
+/**
+ * A turn that hands Atelier information and asks for nothing to move.
+ *
+ * Such a turn is neither a question (no question mark, no interrogative
+ * opener) nor trivial chat, so it used to classify as `work` — which made
+ * it owe an edit it was never going to produce, and the completion gate
+ * then held it open for the whole stall budget. It stays fully tool-capable
+ * on purpose: unlike a question it is not marked answer-only, so if the
+ * information genuinely does imply an obvious change the model may still
+ * make one. What it no longer does is REQUIRE one.
+ *
+ * Any change verb anywhere in the prompt disqualifies it — "i just tried it
+ * and the login is broken, fix the redirect" is work, whatever it opens on.
+ */
+export function looksInformational(prompt: string): boolean {
+  const trimmed = prompt.trim().replace(LEADING_FILLER, "");
+  if (
+    CHANGE_REQUEST_OPENERS.test(trimmed) ||
+    PASSIVE_CHANGE_REQUEST.test(trimmed) ||
+    CHANGE_VERB_ANYWHERE.test(trimmed)
+  ) {
+    return false;
+  }
+  return STATEMENT_OPENERS.test(trimmed);
+}
+
 function looksLikeQuestion(prompt: string): boolean {
-  const trimmed = prompt.trim();
+  const trimmed = prompt.trim().replace(LEADING_FILLER, "");
   // A question mark is punctuation, not intent. Polite requests such as
   // "can you center the login?" still owe the user a workspace change.
   if (
@@ -4180,13 +4353,85 @@ function looksLikeQuestion(prompt: string): boolean {
   ) {
     return false;
   }
-  return (
+  if (
     /^(what|where|when|why|how|who|is|are|can|could|should|does|do|did|was|were)\b/i.test(
       trimmed
-    ) || EXPLAIN_OPENERS.test(trimmed)
+    ) ||
+    EXPLAIN_OPENERS.test(trimmed)
+  ) {
+    return true;
+  }
+  // The tail the openers miss: a SHORT prompt that ends in a question mark
+  // and asks for nothing to move. "so its the same?" opens on none of the
+  // words above, and classifying it as work made a two-word confirmation
+  // owe an edit — the completion gate then held the turn open until the
+  // continuation budget was spent.
+  const words = trimmed.match(/\S+/g)?.length ?? 0;
+  return (
+    trimmed.endsWith("?") &&
+    words <= SHORT_QUESTION_WORDS &&
+    !CHANGE_VERB_ANYWHERE.test(trimmed)
   );
 }
 
 function clip(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + "…" : text;
+}
+
+/**
+ * Puts the previous answer back in front of a question ABOUT it.
+ *
+ * Every Atelier turn runs in a fresh provider session by design, so the
+ * only trace of the last answer is the recall block — which budgets all
+ * prior turns into a few hundred tokens and clips each from the middle.
+ * Ask "what do you mean by this?" about a long report and the model
+ * receives a fifth of its own words with the substance cut out; it then
+ * does the responsible thing and re-derives the answer by searching the
+ * repo again. The user sees the app forget what it said a minute ago and
+ * ends up pasting the report back in by hand.
+ *
+ * So this quotes the referenced message whole (or its two ends), and ONLY
+ * here: a question, carrying a back-reference, with a previous answer to
+ * carry. Anything else — new work, a fresh subject, a go-ahead — keeps
+ * the ordinary flow and pays nothing.
+ */
+export function followUpBlock(
+  prompt: string,
+  priorTurns: TaskContext["priorTurns"],
+  intent: Intent
+): string {
+  if (intent.kind !== "question") return "";
+  const asked = prompt.trim();
+  // A go-ahead already gets its own, differently-worded block.
+  if (GO_AHEAD.test(asked) || !BACK_REFERENCE.test(asked)) return "";
+  const previous = [...priorTurns]
+    .reverse()
+    .find((turn) => turn.role === "assistant" && turn.text.trim());
+  if (!previous) return "";
+
+  return (
+    "THE USER IS ASKING ABOUT YOUR PREVIOUS ANSWER\n" +
+    "This turn is a follow-up question about what you said last, quoted " +
+    "below in full. It is your own message: treat its claims as yours to " +
+    "explain, not as something to re-verify from scratch. Answer from it " +
+    "first — expand it, give the example asked for, say plainly if it was " +
+    "wrong — and read or search only for what the quote genuinely does " +
+    "not settle.\n" +
+    "--- your previous message ---\n" +
+    `${quoteEnds(previous.text.trim(), ASKED_ABOUT_CHARS)}\n` +
+    "--- end ---\n"
+  );
+}
+
+/**
+ * The whole text when it fits, otherwise its head and tail. The head
+ * carries what the report was about and the tail the caveats and open
+ * questions — which is what a follow-up almost always points at.
+ */
+function quoteEnds(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const marker = "\n… [middle omitted] …\n";
+  const room = max - marker.length;
+  const head = Math.floor(room * 0.35);
+  return `${text.slice(0, head)}${marker}${text.slice(-(room - head))}`;
 }

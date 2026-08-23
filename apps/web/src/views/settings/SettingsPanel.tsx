@@ -17,6 +17,7 @@ import {
   Terminal,
   Trash2,
   Wand2,
+  UserRound,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -26,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { WorkspacePageHeader } from "@/components/ui/workspace-page";
 import { RulesTab } from "./RulesTab";
+import { AccountTab } from "./AccountTab";
 import { McpTab } from "./McpTab";
 import { SkillsTab } from "./SkillsTab";
 import { ProviderHelpModal } from "./ProviderHelpModal";
@@ -100,6 +102,7 @@ export function SettingsPanel({ modal = false }: { modal?: boolean }) {
               </p>
             </div>
 
+            {tab === "account" && <AccountTab />}
             {tab === "general" && (
               <div className="space-y-5">
                 <SettingsGroup title="Agent experience">
@@ -125,7 +128,7 @@ type ProviderTab =
   | "grok"
   | "codex"
   | "claude";
-type Tab = "general" | "providers" | "mcp" | "skills" | "rules";
+type Tab = "account" | "general" | "providers" | "mcp" | "skills" | "rules";
 
 const SETTINGS_TABS: Array<{
   id: Tab;
@@ -133,6 +136,7 @@ const SETTINGS_TABS: Array<{
   description: string;
   icon: typeof SettingsIcon;
 }> = [
+  { id: "account", label: "Account", description: "Manage your Atelier profile and session.", icon: UserRound },
   { id: "general", label: "General", description: "Choose how Atelier sessions and knowledge behave.", icon: SettingsIcon },
   { id: "providers", label: "Providers", description: "Connect model providers and manage the models available in chat.", icon: Cloud },
   { id: "mcp", label: "MCP Servers", description: "Configure external tools and context servers available to agents.", icon: Plug },

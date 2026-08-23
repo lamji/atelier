@@ -12,6 +12,7 @@
   "dependencies": {
     "@atelier/protocol": "workspace:*",
     "@atelier/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.58.0",
     "@monaco-editor/react": "^4.6.0",
     "@tanstack/react-query": "^5.60.0",
     "@tanstack/react-virtual": "^3.10.0",

@@ -44,6 +44,40 @@ export function loopHarnessLimits(env = process.env): LoopHarnessLimits {
   };
 }
 
+export interface StreamStallLimits {
+  /** Silence after which the turn SAYS it has stalled. */
+  warnMs: number;
+  /** Silence after which the turn is aborted rather than left hanging. */
+  abortMs: number;
+}
+
+const DEFAULT_STALL_WARN_MS = 180_000;
+const DEFAULT_STALL_ABORT_MS = 900_000;
+
+/**
+ * How long a provider stream may say nothing at all.
+ *
+ * Nothing else bounds it. `maxTurns` bounds ROUNDS and the stall limits
+ * above bound rounds that make no progress, but both need messages to
+ * arrive: a stream that simply stops — a wedged subprocess, a dropped
+ * connection, a tool that never returns — leaves the `for await` parked
+ * forever with the UI still showing "Working". No timeout fires, no error
+ * is published, and the turn can only be killed by hand.
+ *
+ * So silence is measured. At `warnMs` the status stops claiming progress
+ * and names how long it has been quiet; at `abortMs` the session is
+ * aborted so the turn ends as a reported failure. Generous by default,
+ * because a long build or test run is legitimately quiet — and settable
+ * per machine via `ATELIER_STREAM_WARN_MS` / `ATELIER_STREAM_ABORT_MS`,
+ * where 0 means "never".
+ */
+export function streamStallLimits(env = process.env): StreamStallLimits {
+  return {
+    warnMs: limitFrom(env.ATELIER_STREAM_WARN_MS, DEFAULT_STALL_WARN_MS),
+    abortMs: limitFrom(env.ATELIER_STREAM_ABORT_MS, DEFAULT_STALL_ABORT_MS),
+  };
+}
+
 function limitFrom(raw: string | undefined, fallback: number): number {
   const value = Number(raw?.trim());
   if (!Number.isFinite(value) || value < 0) return fallback;
@@ -103,18 +137,38 @@ export function harnessPrompt(state: HarnessState): string {
     );
   }
   lines.push(
-    "This session continues until the gate closes. If a blocker is genuinely " +
+    "This session continues until the gate closes. Two reports — and only " +
+      "these two — end it while items remain open. If a blocker is genuinely " +
       "outside your control (a guard refusal with no alternative path, an " +
       "approval the user cancelled), do everything else, then end with a line " +
-      "starting `BLOCKED:` naming exactly what the user must resolve — that " +
-      "is the only report the gate accepts while items remain open."
+      "starting `BLOCKED:` naming exactly what the user must resolve. If the " +
+      "turn objectively needs no workspace change at all — the user stated a " +
+      "fact, pasted output, corrected you, or the code already is what was " +
+      "asked for — end with a line starting `NO CHANGE NEEDED:` giving the " +
+      "reason in one sentence. Never use it to defer work you could do."
   );
   return lines.join("\n");
 }
 
-/** Recognises the one honest exit the harness offers a stuck model. */
+/** Recognises the honest exit for work only the user can unblock. */
 export function reportsHardBlocker(text: string): boolean {
   return /(^|\n)\s*(\*\*)?BLOCKED:/m.test(text);
+}
+
+/**
+ * Recognises the honest exit for a turn that owes no edit at all.
+ *
+ * Every other way the gate closes is evidence: a step marked done, a file
+ * changed, a check that passed. A turn whose correct outcome is "nothing to
+ * change here" — the user pasted output, stated a fact, corrected an earlier
+ * claim, or the code already reads as asked — can produce none of that, so
+ * without a declared exit it could only end by exhausting the stall budget,
+ * and the user was then told the report "may describe work that is not
+ * done". This is the sentence that ends such a turn cleanly. Like BLOCKED:
+ * it must be a line of its own, so a passing mention cannot trip it.
+ */
+export function reportsNoChangeNeeded(text: string): boolean {
+  return /(^|\n)\s*(\*\*)?NO CHANGE NEEDED:/m.test(text);
 }
 
 /**

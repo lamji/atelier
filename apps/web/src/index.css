@@ -171,9 +171,6 @@
    */
   --topnav-h: 60px;
   --titlebar-h: var(--topnav-h);
-  /* The bottom strip fits the dock itself; magnified tiles can grow past it
-     through the status-bar wrapper's visible overflow. */
-  --statusbar-h: 56px;
   --tabbar-h: 44px;
   --panel-header-h: 48px;
   /* The gutter between the canvas and the cards floating on it, and between
@@ -506,16 +503,42 @@ input:disabled,
 }
 
 /*
- * The dock — one floating bar at the bottom of the canvas holding every icon
+ * The dock — the rail down the left edge of the window holding every icon
  * control in the app.
  *
  * Its own surface, translucent over the canvas rather than opaque like a
- * card: the dock floats above the work instead of being another region of it,
- * and the blur is what says so. Elevation, not a border, does the separating
- * — the hairline is only there to keep the edge legible on a light canvas.
+ * card, so it reads as chrome the workspace runs behind rather than as
+ * another region of it; the blur is what says so. The hairline on its inner
+ * edge is only there to keep it legible on a light canvas.
  */
+/*
+ * Every sidebar in the shell floors at the same width.
+ *
+ * The panel library sizes in PERCENT, so on a smaller window a sidebar that
+ * looks right at 1920px opens cramped: the header actions wrap, the search
+ * field squeezes, and the panel reads as broken until it is dragged wider —
+ * which is not a thing a first launch should ask anyone to do. A pixel floor
+ * is the half that percentages cannot express.
+ */
+.sidebar-panel {
+  min-width: 240px;
+}
+
+/*
+ * The dock rail: the left edge of the window, top to bottom, Ubuntu-style.
+ * `overflow-visible` because a magnified tile grows out of the rail over the
+ * workspace by design, and the rail is only as wide as a resting tile.
+ */
+.dock-rail {
+  @apply flex w-[52px] shrink-0 flex-col overflow-visible;
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(14px) saturate(125%);
+  -webkit-backdrop-filter: blur(14px) saturate(125%);
+  border-right: 1px solid var(--atelier-border);
+}
 .dock {
-  @apply pointer-events-auto flex shrink-0 items-end gap-0.5;
+  @apply pointer-events-auto flex min-h-0 w-full flex-1 flex-col items-center;
+  @apply gap-px overflow-visible py-1.5;
 }
 
 /*
@@ -523,16 +546,14 @@ input:disabled,
  * own: the tile fills with the brand wash and takes the accent colour, the
  * same treatment .icon-tile uses everywhere else.
  *
- * It scales from its bottom edge, so magnification grows the glyph up out of
- * the dock and never pushes its neighbours sideways — the row's layout boxes
- * do not move at all.
+ * Nothing moves on hover: the tile takes a colour, and that is the whole
+ * feedback. A rail that is always on screen must not animate every time the
+ * pointer crosses it on its way somewhere else.
  */
 .dock-tile {
   @apply relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg;
   color: var(--atelier-text-muted);
-  transform-origin: bottom center;
-  transition: transform var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out),
+  transition: color var(--motion-fast) var(--ease-out),
     background-color var(--motion-fast) var(--ease-out);
 }
 
@@ -547,19 +568,22 @@ input:disabled,
   color: var(--atelier-text-primary);
 }
 .dock-tile[aria-current="page"],
-.dock-tile[aria-pressed="true"] {
+.dock-tile[aria-pressed="true"],
+.dock-tile-on {
   background: var(--atelier-brand-soft);
   color: var(--primary);
 }
 
-/* Running indicator, in the dock's own idiom: a dot under the destination you
-   are in. Transparent rather than absent when idle, so the row keeps its
-   height whichever tile is active. */
+/* Running indicator, in a left-hand dock's idiom: a short pill against the
+   window edge, beside the destination you are in. Transparent rather than
+   absent when idle, so the rail keeps its width whichever tile is active. */
 .dock-dot {
-  @apply mt-[3px] h-1 w-1 shrink-0 rounded-full bg-transparent;
-  transition: background-color var(--motion-fast) var(--ease-out);
+  @apply h-1.5 w-[3px] shrink-0 rounded-full bg-transparent;
+  transition: background-color var(--motion-fast) var(--ease-out),
+    height var(--motion-fast) var(--ease-out);
 }
 .dock-dot-on {
+  @apply h-4;
   background: var(--primary);
 }
 /* Threshold tones — the dot is how a tile says "look in here" without the
@@ -574,7 +598,7 @@ input:disabled,
 /* Divides the dock's three jobs: where you are, what the workspace shows,
    how the app is configured. */
 .dock-sep {
-  @apply mx-1 h-6 w-px shrink-0 self-center;
+  @apply my-1 h-px w-6 shrink-0 self-center;
   background: var(--atelier-border);
 }
 
@@ -637,6 +661,20 @@ textarea:focus-visible,
 select:focus-visible {
   outline: none;
   border-color: var(--atelier-focus);
+}
+
+/*
+ * The file/notes editor (RightDock's FilePane) keeps Monaco's own caret —
+ * a widget pinned next to the cursor drifts, the caret cannot. It is
+ * widened and tinted with the focus colour so it stays findable on an
+ * empty line or at end-of-line, which is what made "where do I click to
+ * start typing" hard to answer before.
+ */
+.atelier-file-editor .cursors-layer .cursor {
+  background: var(--atelier-focus) !important;
+  border-color: var(--atelier-focus) !important;
+  box-shadow: 0 0 3px color-mix(in srgb, var(--atelier-focus) 70%, transparent);
+  border-radius: 1px;
 }
 
 /*
@@ -901,6 +939,25 @@ select:focus-visible {
 .conflict-line-theirs-tail {
   box-shadow: inset 3px 0 0 0 var(--primary);
 }
+/*
+ * Branch names injected at the end of the marker lines. Git writes
+ * "<<<<<<< HEAD", which never says which branch HEAD is; these carry the
+ * merge's real branch names in the colour of the side they open, so the
+ * block reads as "this half is fix_fe, that half is origin/dev".
+ */
+.conflict-tag {
+  font-size: 0.85em;
+  font-style: normal;
+  opacity: 0.85;
+  color: var(--muted-foreground);
+}
+.conflict-tag-ours {
+  color: var(--cyan);
+}
+.conflict-tag-theirs {
+  color: var(--primary);
+}
+
 .conflict-glyph-ours::before,
 .conflict-glyph-theirs::before {
   content: "";

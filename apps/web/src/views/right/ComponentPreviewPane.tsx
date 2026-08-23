@@ -19,6 +19,11 @@ import {
   Undo2,
   X,
 } from "lucide-react";
+import {
+  pendingTerminalPrompt,
+  terminalAnswer,
+  type TerminalPrompt,
+} from "@atelier/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -180,6 +185,16 @@ export function ComponentPreviewPane({
   const [frameKey, setFrameKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [launching, setLaunching] = useState(false);
+  /**
+   * The question the preview command is blocked on, if any. A dev server
+   * that asks "port 3000 is in use, use 3001?" prints no URL and never
+   * will, so the launch used to spin for its full 30s and then blame the
+   * server for being unreachable — with the answer one keystroke away in a
+   * terminal tab the user had no reason to open.
+   */
+  const [terminalPrompt, setTerminalPrompt] = useState<TerminalPrompt | null>(
+    null
+  );
   const [message, setMessage] = useState<string | null>(null);
   const previewCanvasRef = useRef<HTMLDivElement>(null);
   const previewScreenRef = useRef<HTMLDivElement>(null);
@@ -287,6 +302,9 @@ export function ComponentPreviewPane({
 
     const controller = new AbortController();
     let cancelled = false;
+    // Set while the countdown is suspended for a question, so an answer
+    // typed straight into the terminal tab resumes it too.
+    let pausedForPrompt = false;
     void (async () => {
       while (!cancelled) {
         let candidate = requested;
@@ -296,6 +314,26 @@ export function ComponentPreviewPane({
           });
           const detectedUrl = extractLocalPreviewUrl(data);
           if (detectedUrl) candidate = new URL(detectedUrl);
+          // A blocked command answers nothing on its own. Surface the
+          // question here and stop the countdown: the launch has not failed,
+          // it is waiting on the user.
+          const asked = pendingTerminalPrompt(data);
+          setTerminalPrompt(asked);
+          if (asked && launchTimerRef.current !== null) {
+            window.clearTimeout(launchTimerRef.current);
+            launchTimerRef.current = null;
+            pausedForPrompt = true;
+          }
+          if (!asked && pausedForPrompt) {
+            pausedForPrompt = false;
+            launchTimerRef.current = window.setTimeout(() => {
+              launchTimerRef.current = null;
+              setLaunching(false);
+              setMessage(
+                "The preview server did not become reachable. Check its integrated terminal output, then try again."
+              );
+            }, 30_000);
+          }
         } catch {
           // Live output observation still handles terminals without history.
         }
@@ -335,6 +373,7 @@ export function ComponentPreviewPane({
       setPreviewUrl(null);
       setLoading(false);
       setLaunching(false);
+      setTerminalPrompt(null);
       setMessage("Page preview stopped. Start it again when you need it.");
     }
     previousManagedTermId.current = managedTermId;
@@ -354,6 +393,10 @@ export function ComponentPreviewPane({
       .then(async (next) => {
         if (cancelled) return;
         setRuntime(next);
+        // A workspace with no web target has nothing for this pane to set
+        // up. The tab that opens it is hidden in that case, so this is the
+        // race where the tree arrives after the pane mounted.
+        if (!next) return;
         let savedAddress = "";
         let savedCommand = "";
         try {
@@ -467,19 +510,34 @@ export function ComponentPreviewPane({
       return;
     }
 
+    /*
+     * Some targets need their web dependencies before they can serve one.
+     *
+     * An Expo app that has only ever run on a device has no react-dom or
+     * react-native-web, and `expo start --web` fails on exactly that. The
+     * install runs first, chained so the server only starts if it succeeded,
+     * and both are visible in the same terminal — this is a step of the
+     * launch, not something happening quietly elsewhere.
+     */
+    const windows = workspaceRoot?.includes("\\") ?? false;
+    const chained = runtime.prepareCommand
+      ? `${runtime.prepareCommand} && ${command}`
+      : command;
+
     // The desktop dev process exposes its own renderer port through this
     // environment variable. It belongs to Atelier, not to apps launched from
     // the preview terminal; leaking it makes Vite reuse Atelier's occupied
     // port with strictPort enabled and the preview command exits immediately.
-    const isolatedCommand = workspaceRoot?.includes("\\")
-      ? `Remove-Item Env:ATELIER_WEB_PORT -ErrorAction SilentlyContinue; ${command}`
-      : `env -u ATELIER_WEB_PORT ${command}`;
+    const isolatedCommand = windows
+      ? `Remove-Item Env:ATELIER_WEB_PORT -ErrorAction SilentlyContinue; ${chained}`
+      : `env -u ATELIER_WEB_PORT ${chained}`;
 
     previewUrlRef.current = null;
     setPreviewUrl(null);
     setLoading(false);
     setLaunching(true);
     setMessage(null);
+    setTerminalPrompt(null);
     try {
       if (!runtime.command) {
         try {
@@ -519,28 +577,73 @@ export function ComponentPreviewPane({
         data: `${isolatedCommand}\r`,
       });
       setMessage(
-        existing
-          ? "Restarting the preview server in its integrated terminal…"
-          : runtime.command
-            ? `Starting ${runtime.storybook ? "Storybook" : runtime.framework} in the integrated terminal…`
-            : "Starting the custom preview command in the integrated terminal…"
+        runtime.prepareCommand
+          ? `${runtime.prepareReason ?? "Preparing the web build"}, then starting it…`
+          : existing
+            ? "Restarting the preview server in its integrated terminal…"
+            : runtime.command
+              ? `Starting ${runtime.storybook ? "Storybook" : runtime.framework} in the integrated terminal…`
+              : "Starting the custom preview command in the integrated terminal…"
       );
       if (launchTimerRef.current !== null) {
         window.clearTimeout(launchTimerRef.current);
       }
-      launchTimerRef.current = window.setTimeout(() => {
-        launchTimerRef.current = null;
-        setLaunching(false);
-        setMessage(
-          "The preview server did not become reachable. Check its integrated terminal output, then try again."
-        );
-      }, 30_000);
+      launchTimerRef.current = window.setTimeout(
+        () => {
+          launchTimerRef.current = null;
+          setLaunching(false);
+          setMessage(
+            "The preview server did not become reachable. Check its integrated terminal output, then try again."
+          );
+        },
+        // Installing web dependencies is a package-manager download, which
+        // is minutes on a cold cache. Calling that a failed launch after 30
+        // seconds would be wrong about a launch that is going fine.
+        runtime.prepareCommand ? 180_000 : 30_000
+      );
     } catch (error) {
       setLaunching(false);
       setMessage(
         error instanceof Error ? error.message : "The app preview server could not be started."
       );
     }
+  };
+
+  /**
+   * Answers the terminal's question from the preview card.
+   *
+   * The countdown restarts from the answer rather than from the launch: the
+   * time the command spent waiting on a person is not evidence that the
+   * server is slow to come up.
+   */
+  const answerTerminalPrompt = async (
+    answer: "yes" | "no" | "default"
+  ): Promise<void> => {
+    if (!managedTermId) return;
+    setTerminalPrompt(null);
+    try {
+      await bridge.rpc("terminal.write", {
+        termId: managedTermId,
+        data: terminalAnswer(answer),
+      });
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The answer could not be sent to the preview terminal."
+      );
+      return;
+    }
+    if (launchTimerRef.current !== null) {
+      window.clearTimeout(launchTimerRef.current);
+    }
+    launchTimerRef.current = window.setTimeout(() => {
+      launchTimerRef.current = null;
+      setLaunching(false);
+      setMessage(
+        "The preview server did not become reachable. Check its integrated terminal output, then try again."
+      );
+    }, 30_000);
   };
 
   const resetScreenshotDraft = useCallback(() => {
@@ -1284,6 +1387,53 @@ export function ComponentPreviewPane({
                     spellCheck={false}
                     autoComplete="off"
                   />
+                </div>
+              )}
+
+              {terminalPrompt && (
+                <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                  <div className="flex items-start gap-2">
+                    <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-medium text-foreground">
+                        The preview command is waiting for an answer
+                      </p>
+                      <p className="mt-1 break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+                        {terminalPrompt.question}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void answerTerminalPrompt("yes")}
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      Yes
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void answerTerminalPrompt("no")}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      No
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void answerTerminalPrompt("default")}
+                    >
+                      Enter (default)
+                    </Button>
+                  </div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+                    The answer is typed into this preview&apos;s integrated
+                    terminal, where the full output is available.
+                  </p>
                 </div>
               )}
 

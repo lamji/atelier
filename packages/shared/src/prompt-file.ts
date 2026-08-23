@@ -45,7 +45,9 @@ export function composePromptFilePrompt(
       '"this file"/"this note"/"this md", it means exactly that path, no ' +
       "other file. Edit the note itself ONLY if its instructions " +
       "explicitly ask for changes to that file; a run report is appended " +
-      "to it automatically after the task, so do not write one yourself.)\n\n"
+      "to it automatically after the task, so do not write one yourself. " +
+      "When it does ask, UPDATE the note with replace_code — write_file " +
+      "on a note replaces everything the user wrote and is refused.)\n\n"
     : "";
   const body = typed ? `${noteBody}${INSTRUCTIONS_MARKER}${typed}` : noteBody;
   return `${header}${body}`;
@@ -88,4 +90,20 @@ function stripSourceHeader(prompt: string): string {
   if (!prompt.startsWith(SOURCE_PREFIX)) return prompt;
   const at = prompt.indexOf("\n\n");
   return at === -1 ? "" : prompt.slice(at + 2);
+}
+
+/**
+ * The half of a prompt-file prompt the user actually TYPED — "" when the
+ * note was sent as-is, and the whole prompt when it never came from a note.
+ *
+ * Unlike `typedInstructionsOf` this needs no copy of the note, so a caller
+ * that only has the prompt (the task launcher, the note guard) can still
+ * tell the user's words apart from the note's body. That distinction is
+ * what keeps a path quoted INSIDE a note from reading as a request to
+ * edit that file.
+ */
+export function typedTailOf(prompt: string): string {
+  if (!prompt.startsWith(SOURCE_PREFIX)) return prompt;
+  const at = prompt.lastIndexOf(INSTRUCTIONS_MARKER);
+  return at === -1 ? "" : prompt.slice(at + INSTRUCTIONS_MARKER.length).trim();
 }

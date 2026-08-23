@@ -31,6 +31,7 @@ import { RepoSwitcher } from "./RepoSwitcher";
 import { SyncBar } from "./SyncBar";
 import { MergeBanner } from "./MergeBanner";
 import { ConflictResolver } from "./ConflictResolver";
+import { AiResolveModal } from "./AiResolveModal";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import type { GitFileStatus } from "@atelier/protocol";
 
@@ -50,12 +51,18 @@ export function GitPanel({ vm }: GitPanelProps) {
   const multi = vm.repos.length > 1;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <WorkspacePageBody className="flex min-h-0 flex-1 flex-col p-5">
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-muted/30 shadow-sm">
+      {/* No tray around the columns: the shell already wraps this panel in
+          an `.island`, so a padded, tinted card inside it drew a second
+          border a few pixels in from the first and ate horizontal space a
+          260px panel does not have. The section cards below are the only
+          surface. `relative` stays — the diff drawer slides in against
+          it. */}
+      <WorkspacePageBody className="flex min-h-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="min-h-0 flex-1">
             {multi && !vm.activeRepo ? (
               <div className="grid h-full min-h-0 gap-4 p-4 text-sm lg:grid-cols-[minmax(13rem,19rem)_minmax(0,1fr)]">
-                <div className="rounded-2xl bg-card/70 p-3 shadow-sm">
+                <div className="rounded-2xl bg-muted/30 p-3">
                   <RepoSwitcher
                     repos={vm.repos}
                     active={vm.activeRepo}
@@ -243,7 +250,7 @@ function GitRepoView({
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden p-4 text-sm lg:grid-cols-[minmax(13rem,19rem)_minmax(0,1fr)] lg:grid-rows-1">
-      <div className="space-y-3 rounded-2xl bg-card/70 p-3 shadow-sm">
+      <div className="space-y-3 rounded-2xl bg-muted/30 p-3">
         {repoSwitcher}
         <BranchSection
           status={vm.status}
@@ -252,7 +259,12 @@ function GitRepoView({
           onRefresh={vm.refresh}
         />
 
-        <SyncBar vm={mergeVm} disabled={busy} />
+        <SyncBar
+          vm={mergeVm}
+          disabled={busy}
+          ahead={vm.status.ahead}
+          onPush={() => void flowVm.startPush()}
+        />
 
         {actionError && (
           <p className="rounded-lg bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
@@ -276,11 +288,11 @@ function GitRepoView({
         )}
       </div>
       {mergeVm.merge.openPath ? (
-        <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl bg-card/70 shadow-sm">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl bg-muted/30">
           <ConflictResolver vm={mergeVm} />
         </div>
       ) : (
-      <div className="min-h-0 space-y-3 overflow-y-auto rounded-2xl bg-card/70 p-3 shadow-sm">
+      <div className="min-h-0 space-y-3 overflow-y-auto rounded-2xl bg-muted/30 p-3">
         {(inMerge || conflictSet.size > 0) && (
           <ConflictSection vm={mergeVm} busy={busy} onError={setActionError} />
         )}
@@ -368,6 +380,8 @@ function ConflictSection(props: {
 }) {
   const { vm } = props;
   const [open, setOpen] = useState(true);
+  /** File the AI-resolve chatbox is open for, if any. */
+  const [askAi, setAskAi] = useState<string | null>(null);
   const unresolved = vm.conflicts;
   const resolved = vm.merge.trackedConflicts.filter(
     (p) => !unresolved.includes(p)
@@ -451,10 +465,10 @@ function ConflictSection(props: {
                 },
                 {
                   icon: Sparkles,
-                  hint: "Resolve this file with AI",
+                  hint: "Resolve this file with AI — say what to do first",
                   tone: "ai",
                   disabled: vm.aiWorking,
-                  run: () => run(() => vm.aiResolve([path])),
+                  run: () => setAskAi(path),
                 },
               ]}
               disabled={disabled}
@@ -490,6 +504,15 @@ function ConflictSection(props: {
           )}
         </>
       )}
+
+      <AiResolveModal
+        open={askAi !== null}
+        paths={askAi ? [askAi] : []}
+        onClose={() => setAskAi(null)}
+        onSubmit={(guidance, model) => {
+          if (askAi) run(() => vm.aiResolve([askAi], guidance, model));
+        }}
+      />
     </div>
   );
 }

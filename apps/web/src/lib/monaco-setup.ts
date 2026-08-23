@@ -57,7 +57,11 @@ monaco.editor.defineTheme("atelier-dark", {
     "editorIndentGuide.activeBackground1": "#2d4144",
     "editorWidget.background": "#1d2d30",
     "editorWidget.border": "#2d4144",
-    "editorCursor.foreground": "#68aeb8",
+    // Brighter and more saturated than the focus-ring teal (#68aeb8) so a
+    // solid block caret reads clearly against both the background and the
+    // syntax-highlighted text it sits on top of.
+    "editorCursor.foreground": "#8fe0ea",
+    "editorCursor.background": "#0c1416",
     "diffEditor.insertedTextBackground": "#4fa87926",
     "diffEditor.removedTextBackground": "#d66b6b26",
     "scrollbarSlider.background": "#93a9ac2e",
@@ -83,7 +87,10 @@ monaco.editor.defineTheme("atelier-light", {
     "editorIndentGuide.activeBackground1": "#c7d4d1",
     "editorWidget.background": "#ffffff",
     "editorWidget.border": "#c7d4d1",
-    "editorCursor.foreground": "#224248",
+    // A saturated, near-black teal so the solid block caret stays crisp
+    // against the light background and the character it overlaps.
+    "editorCursor.foreground": "#0e2226",
+    "editorCursor.background": "#fbfcfc",
     "diffEditor.insertedTextBackground": "#28734d26",
     "diffEditor.removedTextBackground": "#a9444426",
     "scrollbarSlider.background": "#5f747733",
@@ -93,3 +100,35 @@ monaco.editor.defineTheme("atelier-light", {
 });
 
 loader.config({ monaco });
+
+/*
+ * Language-service diagnostics off for TS/JS.
+ *
+ * Atelier opens one file at a time out of a repository Monaco cannot see:
+ * no tsconfig, no node_modules, no sibling modules. The TypeScript worker
+ * therefore reports "Cannot find module …", "Cannot use JSX unless the
+ * '--jsx' flag is provided" and friends on perfectly healthy code, and the
+ * merge resolver's buffers come out red end to end because conflict
+ * markers are not valid syntax. None of it means anything here, and red
+ * that means nothing trains the eye to ignore the red that does — the
+ * unresolved conflicts. Tokenisation, folding and hovers are unaffected;
+ * only the squiggles and the overview-ruler ticks go away.
+ */
+for (const defaults of [
+  monaco.languages.typescript.typescriptDefaults,
+  monaco.languages.typescript.javascriptDefaults,
+]) {
+  defaults.setDiagnosticsOptions({
+    noSemanticValidation: true,
+    noSyntaxValidation: true,
+    noSuggestionDiagnostics: true,
+  });
+  defaults.setCompilerOptions({
+    ...defaults.getCompilerOptions(),
+    allowJs: true,
+    allowNonTsExtensions: true,
+    jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+    target: monaco.languages.typescript.ScriptTarget.ESNext,
+    moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+  });
+}

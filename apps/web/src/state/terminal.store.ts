@@ -9,7 +9,9 @@ const TERMINAL_PROFILE_KEY = "atelier.terminal.profile";
 
 function initialProfile(): TerminalProfileId {
   const stored = localStorage.getItem(TERMINAL_PROFILE_KEY);
-  return isTerminalProfileId(stored) ? stored : "ubuntu";
+  // "system" by default: a terminal that stays aubergine while the rest of
+  // the app is light reads as a foreign object dropped into the window.
+  return isTerminalProfileId(stored) ? stored : "system";
 }
 
 interface TerminalStore {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Check, ChevronDown, FolderGit2, Plus } from "lucide-react";
+import { Check, ChevronDown, FolderGit2, Loader2, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useProjectsStore } from "@/state/projects.store";
 import { useSessionsStore } from "@/state/sessions.store";
@@ -44,18 +44,34 @@ export function WorkspaceSwitcher() {
     };
   }, [open]);
 
-  /** Pick a folder, register it, and open it as a workspace. */
+  /**
+   * Pick a folder, register it, and open it as a workspace.
+   *
+   * `adding` covers the part `switching` cannot: registering the project and
+   * forking its agent happen BEFORE openWorkspace sets that flag, and both
+   * take seconds on a cold start. Without it the menu simply closed and the
+   * window sat on the old workspace with nothing to say — which reads as a
+   * click that did not land, and invites a second one.
+   */
+  const [adding, setAdding] = useState(false);
   const addNew = async () => {
     setOpen(false);
     const path = await window.atelierDesktop?.pickFolder();
+    // Cancelling the folder dialog is not the start of anything.
     if (!path) return;
+    setAdding(true);
     try {
       const project = await addProject(path);
       await openWorkspace(project.id);
     } catch {
       // The status bar reports a failed attach; the current workspace stays.
+    } finally {
+      setAdding(false);
     }
   };
+
+  /** Either kind of wait: adding a new project, or switching to one. */
+  const busy = adding || switching;
 
   const isWorking = (project: AtelierProjectInfo): boolean =>
     project.id === activeId ? activeWorking : project.working;
@@ -77,7 +93,7 @@ export function WorkspaceSwitcher() {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        disabled={switching}
+        disabled={busy}
         title={active?.path}
         className={cn(
           "flex h-9 max-w-[min(15rem,32vw)] items-center gap-2 rounded-full",
@@ -87,9 +103,19 @@ export function WorkspaceSwitcher() {
         )}
       >
         <span className="icon-tile icon-tile-sm">
-          <FolderGit2 className="h-3.5 w-3.5" />
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <FolderGit2 className="h-3.5 w-3.5" />
+          )}
         </span>
-        <span className="truncate">{active?.name ?? "Workspace"}</span>
+        <span className="truncate">
+          {adding
+            ? "Opening workspace…"
+            : switching
+              ? "Switching…"
+              : (active?.name ?? "Workspace")}
+        </span>
         {othersWorking > 0 && (
           <Tooltip
             content={`${othersWorking} other workspace${
@@ -137,6 +163,7 @@ export function WorkspaceSwitcher() {
                     selected={project.id === activeId}
                     working={isWorking(project)}
                     onSelect={() => {
+                      if (busy) return;
                       setOpen(false);
                       if (project.id !== activeId) {
                         void openWorkspace(project.id).catch(() => undefined);
@@ -150,15 +177,21 @@ export function WorkspaceSwitcher() {
               <button
                 type="button"
                 role="menuitem"
+                disabled={busy}
                 onClick={() => void addNew()}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-md px-2 py-1.5",
                   "text-left text-xs font-medium text-primary",
-                  "outline-none transition-colors hover:bg-accent/60"
+                  "outline-none transition-colors hover:bg-accent/60",
+                  "disabled:cursor-default disabled:opacity-50"
                 )}
               >
-                <Plus className="h-3.5 w-3.5" />
-                New project…
+                {busy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Plus className="h-3.5 w-3.5" />
+                )}
+                {adding ? "Opening…" : "New project…"}
               </button>
             </div>
           </motion.div>

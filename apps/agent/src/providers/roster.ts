@@ -84,11 +84,59 @@ function enabledSet(id: SessionProvider, models: ModelOption[]): Set<string> {
  * itself the same way — its own module owns the two endpoints.
  */
 export async function pickerRoster(cwd: string): Promise<ModelOption[]> {
-  const claude = await pickerSlice(CLAUDE, cwd);
-  const ollama = await probeOllamaModels();
-  const grok = await probeGrokModels();
-  const codex = await pickerSlice(CODEX, cwd);
+  const [claude, ollama, grok, codex] = await Promise.all([
+    slice("claude", () => pickerSlice(CLAUDE, cwd)),
+    slice("ollama", () => probeOllamaModels()),
+    slice("grok", () => probeGrokModels()),
+    slice("codex", () => pickerSlice(CODEX, cwd)),
+  ]);
   return [...claude, ...ollama, ...grok, ...codex];
+}
+
+/**
+ * How long one provider gets to answer before the picker goes on without it.
+ *
+ * Every probe here talks to something that can be slow or gone: a CLI that
+ * may not be installed, a daemon that may not be running, a hosted endpoint
+ * over the network. Serially awaited and unbounded, the slowest of them set
+ * the latency of the whole picker, and ONE rejection emptied it — the RPC
+ * failed, the composer's `.catch` swallowed it, and every provider vanished
+ * because of a provider the user may not even use.
+ */
+const PROBE_TIMEOUT_MS = 12_000;
+
+/**
+ * One provider's rows, or none — never an exception and never a wait
+ * without end. A provider that fails is a provider that is missing from the
+ * picker, which is exactly what it is.
+ */
+async function slice(
+  name: string,
+  probe: () => Promise<ModelOption[]>
+): Promise<ModelOption[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      probe(),
+      new Promise<ModelOption[]>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${name} probe timed out`)),
+          PROBE_TIMEOUT_MS
+        );
+      }),
+    ]);
+  } catch (error) {
+    // No logger reaches this module; the roster is read on demand and the
+    // reason belongs where the user is looking — Settings' Test button asks
+    // the same probe and reports what it says.
+    console.warn(
+      `[roster] ${name} offered no models:`,
+      (error as Error).message ?? error
+    );
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

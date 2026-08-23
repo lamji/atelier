@@ -23,10 +23,10 @@ export type ActivityView =
   | "explorer"
   | "markdown"
   | "git"
-  | "knowledge"
-  | "hooks"
   | "monitor"
-  | "settings";
+  | "settings"
+  | "knowledge"
+  | "hooks";
 
 /**
  * A glyph the dock can render. Lucide icons are the common case; the two
@@ -76,9 +76,7 @@ const DESTINATIONS: Array<{
   { id: "agents", icon: Bot, label: "Agents" },
   { id: "explorer", icon: Files, label: "Files" },
   { id: "git", icon: GitBranch, label: "Changes" },
-  { id: "knowledge", icon: Network, label: "Knowledge" },
   { id: "markdown", icon: BookOpen, label: "Notes" },
-  { id: "hooks", icon: Webhook, label: "Hooks" },
 ];
 
 /** Everything the dock needs from the shell to describe its tiles. */

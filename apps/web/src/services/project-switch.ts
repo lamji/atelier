@@ -6,6 +6,7 @@ import { setRosterScope } from "./terminal-roster.js";
 import { useProjectsStore } from "@/state/projects.store";
 import { usePreferencesStore } from "@/state/preferences.store";
 import { useConnectionStore } from "@/state/connection.store";
+import { alert } from "@/state/alerts.store";
 import { resetWorkspaceStores } from "@/state/reset";
 
 let started = false;
@@ -20,6 +21,7 @@ export function startProjectSync(): void {
   const desktop = window.atelierDesktop;
   desktop.projects.onChanged((projects) => {
     useProjectsStore.getState().setProjects(projects);
+    noticeAgentDeath(projects);
   });
   void desktop.projects
     .list()
@@ -57,6 +59,45 @@ export async function openWorkspace(id: string): Promise<void> {
 }
 
 const pending = new Map<string, Promise<void>>();
+
+/** Agent deaths already reported, so one crash raises one alert. */
+const reportedDeaths = new Set<string>();
+
+/**
+ * The open project's agent host exited.
+ *
+ * The renderer holds a MessagePort, and a closed channel delivers no event —
+ * so without this the app kept looking connected over a dead agent: chat
+ * messages sat unanswered, the explorer waited for a tree that would never
+ * arrive, and nothing on screen said why. Main reports the run state
+ * out-of-band; this is what acts on it.
+ */
+function noticeAgentDeath(projects: AtelierProjectInfo[]): void {
+  const store = useProjectsStore.getState();
+  const activeId = store.activeId;
+  if (!activeId || store.switching) return;
+  const active = projects.find((project) => project.id === activeId);
+  if (!active) return;
+  if (active.status !== "error" && active.status !== "stopped") {
+    reportedDeaths.delete(activeId);
+    return;
+  }
+  if (reportedDeaths.has(activeId)) return;
+  reportedDeaths.add(activeId);
+  // Everything in flight was addressed to a process that is gone.
+  bridge.disconnect();
+  bridge.dropQueued();
+  useConnectionStore.getState().setAgentStatus("idle");
+  alert.danger(
+    "The agent for this workspace stopped",
+    active.error ?? "Reopen the workspace to start it again.",
+    {
+      id: `agent-dead-${activeId}`,
+      sticky: true,
+      action: { label: "Reopen", run: () => void openWorkspace(activeId) },
+    }
+  );
+}
 
 async function attach(id: string): Promise<void> {
   const store = useProjectsStore.getState();

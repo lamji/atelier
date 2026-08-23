@@ -65,14 +65,6 @@ export function EditorTabBar(props: EditorTabBarProps) {
       icon: TerminalSquare,
     },
   ];
-  if (props.rightTab === "graph") {
-    tabs.push({
-      id: "graph",
-      label: "Graph",
-      title: "Knowledge graph",
-      icon: Network,
-    });
-  }
   if (props.rightTab === "activity") {
     tabs.push({
       id: "activity",
@@ -81,11 +73,19 @@ export function EditorTabBar(props: EditorTabBarProps) {
       icon: Activity,
     });
   }
+  if (props.rightTab === "graph") {
+    tabs.push({
+      id: "graph",
+      label: "Knowledge graph",
+      title: "Knowledge graph",
+      icon: Network,
+    });
+  }
   if (props.rightTab === "rag") {
     tabs.push({
       id: "rag",
-      label: "Retrieval",
-      title: "Retrieval inspector",
+      label: "RAG inspector",
+      title: "RAG inspector",
       icon: Search,
     });
   }

@@ -28,6 +28,7 @@ import {
   type ConflictChoice,
 } from "@/lib/conflict-markers";
 import { MonacoDiff } from "@/components/MonacoDiff";
+import { AiResolveModal } from "./AiResolveModal";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useThemeStore } from "@/state/theme.store";
@@ -36,6 +37,28 @@ import type { MergeConflictViewModel } from "@/hooks/useMergeConflictViewModel";
 type CodeEditor = MonacoEditor.IStandaloneCodeEditor;
 
 const AUTOSAVE_MS = 800;
+
+/** Overview-ruler tick for an unresolved conflict (Monaco needs a literal). */
+const CONFLICT_RULER_COLOR = "#d66b6bcc";
+
+/** Longest branch name a lens or an inline tag shows before eliding. */
+const LABEL_MAX = 28;
+
+function short(label: string): string {
+  return label.length > LABEL_MAX ? `${label.slice(0, LABEL_MAX - 1)}…` : label;
+}
+
+/**
+ * The branch a side belongs to. Git writes `<<<<<<< HEAD` for our side, so
+ * the marker itself never says which branch "HEAD" is — the one thing
+ * needed to choose. The block's own label is used when git wrote a real
+ * name (rebase and cherry-pick write commit subjects), and the merge's
+ * branch fills in for HEAD.
+ */
+function sideLabel(fromMarker: string, fallback: string): string {
+  const marker = fromMarker.trim();
+  return !marker || marker === "HEAD" ? fallback : marker;
+}
 
 const EDITOR_OPTIONS: MonacoEditor.IStandaloneEditorConstructionOptions = {
   minimap: { enabled: false },
@@ -103,8 +126,8 @@ function ensureLensProvider(monaco: Monaco): void {
           command: { id: entry.commands[choice], title, arguments: [i] },
         });
         const out = [
-          lens("Accept Current", "ours"),
-          lens("Accept Incoming", "theirs"),
+          lens(`Accept Current (${short(entry.oursLabel)})`, "ours"),
+          lens(`Accept Incoming (${short(entry.theirsLabel)})`, "theirs"),
           lens("Accept Both", "both"),
         ];
         if (block.baseSep !== null) out.push(lens("Take Base", "base"));
@@ -188,6 +211,7 @@ function ResolverBody(props: {
   );
   const [busy, setBusy] = useState(false);
   const [forceAsk, setForceAsk] = useState(false);
+  const [askAi, setAskAi] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const editorRef = useRef<CodeEditor | null>(null);
@@ -201,6 +225,10 @@ function ResolverBody(props: {
   /** Monaco commands + registry key owned by this mount, released on unmount. */
   const disposablesRef = useRef<IDisposable[]>([]);
   const modelKeyRef = useRef<string | null>(null);
+
+  /** Branch names for the two sides, for the markers git labelled HEAD. */
+  const oursFallback = file.oursLabel;
+  const theirsFallback = file.theirsLabel;
 
   const blocks = useMemo(() => parseConflicts(content), [content]);
   const blocksRef = useRef(blocks);
@@ -264,21 +292,48 @@ function ResolverBody(props: {
       from: number,
       to: number,
       className: string,
-      glyph?: string
+      extra?: Partial<MonacoEditor.IModelDecorationOptions>
     ) => {
       if (to < from) return;
       decs.push({
         range: new monaco.Range(from, 1, to, 1),
+        options: { isWholeLine: true, className, ...extra },
+      });
+    };
+    // One red tick in the scrollbar per conflict still open. Language
+    // diagnostics are off (see monaco-setup), so red in this editor means
+    // exactly "unresolved conflict", and it goes as each one is resolved.
+    const ruler = {
+      color: CONFLICT_RULER_COLOR,
+      position: monaco.editor.OverviewRulerLane.Full,
+    };
+    // The branch name pinned to the end of a marker line. `<<<<<<< HEAD`
+    // says nothing about which branch HEAD is, and that is the whole
+    // question in front of someone reading a conflict, so each marker gets
+    // the name of the branch whose code follows it.
+    const model = editorRef.current?.getModel();
+    const tag = (line: number, text: string, inlineClassName: string) => {
+      if (!model || line < 1 || line > model.getLineCount()) return;
+      const column = model.getLineMaxColumn(line);
+      decs.push({
+        range: new monaco.Range(line, column, line, column),
         options: {
-          isWholeLine: true,
-          className,
-          ...(glyph ? { glyphMarginClassName: glyph } : {}),
+          after: { content: `  ${text}`, inlineClassName },
+          showIfCollapsed: true,
         },
       });
     };
     for (const b of blocks) {
       const oursEnd = (b.baseSep ?? b.sep) - 1;
-      whole(b.start, b.start, "conflict-line-marker conflict-line-ours-head", "conflict-glyph-ours");
+      const ours = short(sideLabel(b.oursLabel, oursFallback));
+      const theirs = short(sideLabel(b.theirsLabel, theirsFallback));
+      tag(b.start, `${ours} · current`, "conflict-tag conflict-tag-ours");
+      if (b.baseSep !== null) tag(b.baseSep, "common ancestor", "conflict-tag");
+      tag(b.sep, `${theirs} · incoming`, "conflict-tag conflict-tag-theirs");
+      whole(b.start, b.start, "conflict-line-marker conflict-line-ours-head", {
+        glyphMarginClassName: "conflict-glyph-ours",
+        overviewRuler: ruler,
+      });
       whole(b.start + 1, oursEnd, "conflict-line-ours");
       if (b.baseSep !== null) {
         whole(b.baseSep, b.baseSep, "conflict-line-marker");
@@ -286,10 +341,12 @@ function ResolverBody(props: {
       }
       whole(b.sep, b.sep, "conflict-line-marker");
       whole(b.sep + 1, b.end - 1, "conflict-line-theirs");
-      whole(b.end, b.end, "conflict-line-marker conflict-line-theirs-tail", "conflict-glyph-theirs");
+      whole(b.end, b.end, "conflict-line-marker conflict-line-theirs-tail", {
+        glyphMarginClassName: "conflict-glyph-theirs",
+      });
     }
     collection.set(decs);
-  }, []);
+  }, [oursFallback, theirsFallback]);
   useEffect(() => {
     paint();
     // Blocks moved: the lens row above each conflict must move with them.
@@ -423,6 +480,23 @@ function ResolverBody(props: {
         theirsLabel: file.theirsLabel,
       });
       lensEmitter?.fire();
+
+      // A conflicted buffer is not valid source — the markers alone break
+      // parsing — and no worker here has the project around the file. So
+      // whatever a language worker underlines in this editor is noise, and
+      // it drowns out the conflicts. Clear it as it arrives.
+      const uri = model.uri;
+      disposablesRef.current.push(
+        monaco.editor.onDidChangeMarkers((changed) => {
+          if (!changed.some((u) => u.toString() === uri.toString())) return;
+          const owners = new Set(
+            monaco.editor.getModelMarkers({ resource: uri }).map((m) => m.owner)
+          );
+          for (const owner of owners) {
+            monaco.editor.setModelMarkers(model, owner, []);
+          }
+        })
+      );
     }
     paint();
     editor.onDidChangeCursorPosition((e) => setCursorLine(e.position.lineNumber));
@@ -575,13 +649,13 @@ function ResolverBody(props: {
           onClick={() => applyAll("both")}
         />
         <span className="mx-0.5 h-4 w-px bg-white/10" />
-        <Tooltip content="Ask Sonnet to resolve just this file">
+        <Tooltip content="Resolve just this file with AI — pick the model and say what to do first">
           <Button
             size="sm"
             variant="ghost"
             className="h-6 px-2 text-[11px]"
             disabled={aiBusy || vm.aiWorking || remaining === 0}
-            onClick={() => void vm.aiResolve([path])}
+            onClick={() => setAskAi(true)}
           >
             {aiBusy ? (
               <Loader2 className="mr-1 h-3 w-3 animate-spin" />
@@ -711,6 +785,13 @@ function ResolverBody(props: {
           Ctrl+S saves · edits autosave to the working tree
         </p>
       </div>
+
+      <AiResolveModal
+        open={askAi}
+        paths={[path]}
+        onClose={() => setAskAi(false)}
+        onSubmit={(guidance, model) => void vm.aiResolve([path], guidance, model)}
+      />
     </div>
   );
 }

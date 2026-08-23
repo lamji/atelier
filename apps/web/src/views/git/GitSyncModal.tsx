@@ -8,6 +8,7 @@ import {
   GitBranch,
   GitBranchPlus,
   GitMerge,
+  GitPullRequestArrow,
   Loader2,
   Plus,
   RefreshCw,
@@ -25,18 +26,49 @@ import { useWorkspaceStore } from "@/state/workspace.store";
 import {
   useMergeConflictViewModel,
   type MergeConflictViewModel,
+  type RebaseOptions,
 } from "@/hooks/useMergeConflictViewModel";
 import type { SyncModalKind } from "@/state/git-merge.store";
 
 const TITLES: Record<SyncModalKind, string> = {
   pull: "Pull from",
   checkout: "Checkout",
+  rebase: "Rebase onto",
 };
 
 const ICONS: Record<SyncModalKind, typeof GitBranch> = {
   pull: ArrowDownToLine,
   checkout: GitBranch,
+  rebase: GitPullRequestArrow,
 };
+
+/**
+ * Which side wins a conflicting hunk, in the rebaser's terms. Git's own
+ * -X flags are named from the replay's point of view — during a rebase
+ * "ours" is the branch you are landing ON — so the wording here is the
+ * thing people mean and the agent does the inversion.
+ */
+const KEEP_MODES: Array<{
+  value: RebaseOptions["keep"];
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "mine",
+    label: "Keep my changes",
+    hint: "conflicting hunks resolve to this branch (-X theirs)",
+  },
+  {
+    value: "base",
+    label: "Keep the base's changes",
+    hint: "conflicting hunks resolve to the branch below (-X ours)",
+  },
+  {
+    value: "none",
+    label: "Stop and let me resolve",
+    hint: "every conflict opens in the resolver",
+  },
+];
 
 const PULL_MODES: Array<{ value: GitPullMode; label: string; hint: string }> = [
   { value: "merge", label: "Merge", hint: "merge commit when diverged" },
@@ -145,6 +177,7 @@ function ConfigureScreen({ kind, vm }: { kind: SyncModalKind; vm: MergeConflictV
     );
   }
   if (kind === "checkout") return <CheckoutForm refs={refs} vm={vm} />;
+  if (kind === "rebase") return <RebaseForm refs={refs} vm={vm} />;
   if (refs.remotes.length === 0) {
     return (
       <p className="flex items-start gap-2 rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
@@ -310,7 +343,13 @@ function CheckoutForm({ refs, vm }: { refs: GitRefs; vm: MergeConflictViewModel 
           empty="No branch matches."
         />
       </Field>
-      <Field label="Or branch out" hint={`from ${base}`}>
+      {/* The base is whatever row is picked above; with nothing picked it
+          falls back to the branch you are on, and says so — otherwise the
+          two cases read identically and the base looks stuck on HEAD. */}
+      <Field
+        label="Or branch out"
+        hint={selected ? `from ${base}` : `from ${base} · current`}
+      >
         <div className="flex items-center gap-1.5">
           <Plus className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <Input
@@ -329,6 +368,109 @@ function CheckoutForm({ refs, vm }: { refs: GitRefs; vm: MergeConflictViewModel 
         primary={primary}
         icon={branching ? GitBranchPlus : GitBranch}
         disabled={isCurrent || (!branching && !selected)}
+        onRun={run}
+      />
+    </>
+  );
+}
+
+/**
+ * Replay this branch on top of another.
+ *
+ * The list is the same one the checkout picker uses, minus the branch you
+ * are standing on: rebasing onto yourself is a no-op git would refuse
+ * anyway. The current branch is never the target here — it is always what
+ * moves — so the row says what it will land on.
+ */
+function RebaseForm({ refs, vm }: { refs: GitRefs; vm: MergeConflictViewModel }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string>("");
+  const [keep, setKeep] = useState<RebaseOptions["keep"]>("mine");
+  const branch = refs.current;
+
+  const items = useMemo(() => {
+    const q = query.toLowerCase();
+    const local = refs.local
+      .filter((b) => b.name !== branch && b.name.toLowerCase().includes(q))
+      .map((b) => ({
+        id: `local:${b.name}`,
+        label: b.name,
+        meta: b.upstream ?? "local",
+      }));
+    const remote = refs.remote
+      .filter((r) => r.ref.toLowerCase().includes(q))
+      .map((r) => ({
+        id: `remote:${r.ref}`,
+        label: r.ref,
+        meta: `${r.remote} · fetched first`,
+        remoteIcon: true,
+      }));
+    return [...local, ...remote];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refs, query, branch]);
+
+  const onto = selected.startsWith("local:")
+    ? selected.slice("local:".length)
+    : selected.startsWith("remote:")
+      ? selected.slice("remote:".length)
+      : "";
+  const remote = selected.startsWith("remote:")
+    ? refs.remote.find((r) => r.ref === onto)?.remote
+    : undefined;
+
+  const run = () => {
+    if (!onto) return;
+    void vm.rebaseRun({ onto, keep, remote });
+  };
+
+  return (
+    <>
+      <Field
+        label="Base branch"
+        hint={`${refs.local.length} local · ${refs.remote.length} remote`}
+      >
+        <BranchList
+          items={items}
+          selected={selected}
+          onSelect={setSelected}
+          query={query}
+          onQuery={setQuery}
+          tall
+          empty="No other branch to rebase onto."
+        />
+      </Field>
+
+      <Field
+        label="When a hunk conflicts"
+        hint={KEEP_MODES.find((m) => m.value === keep)?.hint}
+      >
+        <Select
+          value={keep}
+          onChange={(v) => setKeep(v as RebaseOptions["keep"])}
+          options={KEEP_MODES.map((m) => ({
+            value: m.value,
+            label: m.label,
+            hint: m.hint,
+          }))}
+          direction="up"
+        />
+      </Field>
+
+      <p className="flex items-start gap-2 rounded-lg bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
+        <CircleAlert className="mt-0.5 h-3 w-3 shrink-0" />
+        <span>
+          Rebasing rewrites {branch ? <b>{branch}</b> : "this branch"}'s
+          commits. Uncommitted work is stashed and put back automatically
+          (<span className="font-mono">--autostash</span>); already-pushed
+          commits will need a force-push afterwards.
+        </span>
+      </p>
+
+      <Footer
+        onCancel={vm.closeSync}
+        primary={onto ? `Rebase onto ${onto}` : "Pick a base branch"}
+        icon={GitPullRequestArrow}
+        disabled={!onto}
         onRun={run}
       />
     </>
@@ -497,7 +639,7 @@ function RunScreen({ kind, vm }: { kind: SyncModalKind; vm: MergeConflictViewMod
             : result?.ok
               ? `Done${result.summary ? ` · ${result.summary}` : ""}`
               : conflicted
-                ? `Pull stopped — ${result?.summary}`
+                ? `${RUN_NOUN[kind]} stopped — ${result?.summary}`
                 : `Failed (exit ${result?.exitCode ?? "?"})${result?.summary ? ` · ${result.summary}` : ""}`}
         </span>
       </div>
@@ -528,6 +670,13 @@ function RunScreen({ kind, vm }: { kind: SyncModalKind; vm: MergeConflictViewMod
     </>
   );
 }
+
+/** How the result line names the command that just stopped on conflicts. */
+const RUN_NOUN: Record<SyncModalKind, string> = {
+  pull: "Pull",
+  checkout: "Checkout",
+  rebase: "Rebase",
+};
 
 /** The `$ git …` echo the agent writes first — the pane's title bar text. */
 function firstCommand(output: string): string | null {

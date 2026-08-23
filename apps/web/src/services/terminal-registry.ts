@@ -146,7 +146,9 @@ class TerminalRegistry {
   }
 
   themeFor(dark: boolean, profile: TerminalProfileId | null = null) {
-    if (profile) return terminalProfile(profile).theme;
+    // "system" is not a palette, it is a deferral: it takes the same branch
+    // as no profile at all, so the terminal turns over with the app.
+    if (profile && profile !== "system") return terminalProfile(profile).theme;
     return dark
       ? {
           background: "#00000000",

@@ -6,6 +6,7 @@ const AUTO_REVIEW_KEY = "atelier.autoReview";
 const AUTO_VALIDATE_KEY = "atelier.autoValidate";
 const CLI_MODE_KEY = "atelier.cliMode";
 const DEFAULTS_KEY = "atelier.composer.defaults";
+const RESOLVER_MODEL_KEY = "atelier.merge.aiModel";
 const PER_CHAT_KEY = "atelier.composer.byChat";
 /** Keys from when the picks were one global setting; read once, then dead. */
 const LEGACY_MODEL_KEY = "atelier.model";
@@ -122,6 +123,17 @@ function readDefaults(): ComposerPrefs {
 }
 
 /**
+ * Model for the merge resolver. Its own pick, not the composer's: the
+ * model that suits a chat is rarely the one you want rewriting a merge,
+ * and the resolver runs in a conversation of its own anyway. "" means the
+ * resolver's built-in default.
+ */
+function readResolverModel(): string {
+  const own = localStorage.getItem(scoped(RESOLVER_MODEL_KEY));
+  return own ?? localStorage.getItem(RESOLVER_MODEL_KEY) ?? "";
+}
+
+/**
  * Per-chat picks, scoped per project so a busy workspace's conversations
  * cannot evict another workspace's picks out of the capped map.
  */
@@ -162,6 +174,9 @@ interface PreferencesStore {
   /** CLI mode: the main console is the real codex CLI, nothing added. */
   cliMode: boolean;
   setCliMode: (value: boolean) => void;
+  /** Model the AI merge resolver runs on; "" is the resolver's default. */
+  resolverModel: string;
+  setResolverModel: (value: string) => void;
   /** Applied to a chat that has never had a pick of its own. */
   defaults: ComposerPrefs;
   /**
@@ -207,6 +222,12 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
     set({ cliMode: value });
   },
 
+  resolverModel: readResolverModel(),
+  setResolverModel: (value) => {
+    localStorage.setItem(scoped(RESOLVER_MODEL_KEY), value);
+    set({ resolverModel: value });
+  },
+
   defaults: readDefaults(),
   byChat: readByChat(),
 
@@ -219,6 +240,7 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
       autoReview: readAutoReview(),
       autoValidate: readAutoValidate(),
       cliMode: readCliMode(),
+      resolverModel: readResolverModel(),
       defaults: readDefaults(),
       byChat: readByChat(),
     });
@@ -226,9 +248,21 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
 
   setComposer: (conversationId, patch) =>
     set((s) => {
-      // The pick also becomes the starting point for the next new chat, so
-      // choosing a model still feels sticky — it just stops leaking sideways
-      // into chats you already set.
+      // With a selected conversation, every picker update belongs only to
+      // that chat. Mutating defaults here made untouched sibling sessions
+      // inherit the most recently edited chat's model and reasoning choices.
+      if (conversationId) {
+        const byChat = prune({
+          ...s.byChat,
+          [conversationId]: { ...s.byChat[conversationId], ...patch },
+        });
+        localStorage.setItem(scoped(PER_CHAT_KEY), JSON.stringify(byChat));
+        return { byChat };
+      }
+
+      // Before any conversation exists, the controls may still establish the
+      // starting point for a future chat. Per-task and prompt-file choices do
+      // not become defaults.
       const defaults: ComposerPrefs = {
         ...s.defaults,
         ...patch,
@@ -236,12 +270,6 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
         promptFile: "",
       };
       localStorage.setItem(scoped(DEFAULTS_KEY), JSON.stringify(defaults));
-      if (!conversationId) return { defaults };
-      const byChat = prune({
-        ...s.byChat,
-        [conversationId]: { ...s.byChat[conversationId], ...patch },
-      });
-      localStorage.setItem(scoped(PER_CHAT_KEY), JSON.stringify(byChat));
-      return { defaults, byChat };
+      return { defaults };
     }),
 }));

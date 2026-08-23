@@ -15,6 +15,7 @@
  * fallback anywhere.
  */
 import pino from "pino";
+import { disableAsar } from "./workspace/no-asar.js";
 import type {
   AgentControlMessage,
   AgentInitMessage,
@@ -22,6 +23,10 @@ import type {
 } from "@atelier/protocol";
 import { WorkspaceHost } from "./workspace-host.js";
 import type { MessagePortLike } from "./bridge/ipc-server.js";
+
+// Before anything reads the filesystem: this host walks user workspaces, and
+// Electron's fs shim turns any *.asar path inside one into a thrown error.
+disableAsar();
 
 interface ParentPort {
   on(event: "message", cb: (e: { data: unknown; ports: unknown[] }) => void): void;

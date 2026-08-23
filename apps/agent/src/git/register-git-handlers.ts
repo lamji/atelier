@@ -171,6 +171,18 @@ export function registerGitHandlers(
     return outcome;
   });
 
+  router.register("git.rebaseRun", async (params, ctx) => {
+    const outcome = await ops.rebaseRun(
+      git,
+      params.onto,
+      params.keep ?? "none",
+      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal },
+      params.remote
+    );
+    await git.refresh();
+    return outcome;
+  });
+
   router.register("git.conflictFile", async (params) => ({
     file: await ops.conflictFile(git, params.path),
   }));

@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   const analyzer = new SymbolImpactAnalyzer(db, async (identifier) => {
     const esc = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const m = await files.search(`\\b${esc}\\b`, undefined, 200, true);
-    return m.map((x) => ({ path: x.path, row: x.row }));
+    return m.matches.map((x) => ({ path: x.path, row: x.row }));
   });
   let fail = 0;
   const check = (name: string, ok: boolean, extra = "") => {

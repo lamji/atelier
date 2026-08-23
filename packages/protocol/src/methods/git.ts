@@ -180,9 +180,15 @@ export const gitMethods = {
   // Pull is where conflicts are born; everything after it is the resolver.
 
   /** Quiet `git fetch`; the fresh ahead/behind is what the sync row shows. */
+  /** `git fetch --all --prune --tags`: refs only, nothing merged. */
   "git.fetch": {
     params: z.object({}).optional(),
-    result: z.object({ ahead: z.number(), behind: z.number() }),
+    result: z.object({
+      ahead: z.number(),
+      behind: z.number(),
+      /** Remote-tracking refs the fetch moved. */
+      updated: z.number().optional(),
+    }),
   },
   /**
    * Streamed `git pull`. A conflicted exit is an expected outcome, not an
@@ -195,6 +201,31 @@ export const gitMethods = {
       /** Explicit source; omitted = the branch's tracked upstream. */
       remote: z.string().optional(),
       branch: z.string().optional(),
+    }),
+    result: z.object({
+      result: GitOpResult,
+      conflicts: z.array(z.string()),
+    }),
+  },
+  /**
+   * Streamed `git rebase <onto>`, replaying the current branch on top of
+   * another. Like a pull, a conflicted exit is an expected outcome and
+   * comes back with the unmerged paths rather than as an error.
+   *
+   * `keep` picks the automatic resolution. Git's -X flags are named from
+   * the rebase's point of view, where "ours" is the branch being replayed
+   * ONTO and "theirs" is the work being replayed — the opposite of what
+   * the words mean to the person rebasing — so this asks for the side in
+   * plain terms and the agent maps it: "mine" (the branch's own commits)
+   * is -X theirs, "base" is -X ours, "none" stops for the resolver.
+   */
+  "git.rebaseRun": {
+    params: z.object({
+      /** Ref to replay onto, e.g. "main" or "origin/main". */
+      onto: z.string(),
+      keep: z.enum(["mine", "base", "none"]).optional(),
+      /** Fetch this remote's copy of `onto` before starting. */
+      remote: z.string().optional(),
     }),
     result: z.object({
       result: GitOpResult,

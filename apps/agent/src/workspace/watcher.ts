@@ -18,6 +18,7 @@ export type FileChangeListener = (
  */
 export class WorkspaceWatcher {
   private watcher: FSWatcher | null = null;
+  private onError?: (error: Error) => void;
   private recentAgentWrites = new Map<string, number>();
   private listeners = new Set<FileChangeListener>();
 
@@ -77,6 +78,23 @@ export class WorkspaceWatcher {
     // and the indexer, and neither has anything to do with a directory.
     this.watcher.on("addDir", emitDirOnly("addDir"));
     this.watcher.on("unlinkDir", emitDirOnly("unlinkDir"));
+    /*
+     * chokidar emits "error" on an EventEmitter, and an 'error' event with no
+     * listener is a process-level throw in Node — so one unreadable path in a
+     * user's workspace (a permission-denied folder, a broken symlink, an
+     * archive Electron refuses to stat) killed the agent for that project
+     * entirely. Watching is best-effort by nature: the workspace keeps
+     * working without live file events, which is a far better outcome than
+     * no workspace at all.
+     */
+    this.watcher.on("error", (error) => {
+      this.onError?.(error instanceof Error ? error : new Error(String(error)));
+    });
+  }
+
+  /** Told about watcher failures so the runtime can log them. */
+  onWatchError(handler: (error: Error) => void): void {
+    this.onError = handler;
   }
 
   private consumeAgentWrite(relPath: string): boolean {

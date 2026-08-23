@@ -18,6 +18,9 @@ const DEFAULT_IGNORES = [
   ".turbo/",
   "*.log",
   ".DS_Store",
+  // Electron archives. Nothing here can read one, and on an Electron-forked
+  // host the fs shim treats the path as an archive rather than a file.
+  "*.asar",
 ];
 
 const ATELIER_GITIGNORE_ENTRY = ".atelier/";
@@ -71,15 +74,46 @@ export function ensureAtelierGitignored(workspaceRoot: string): boolean {
  */
 export class WorkspaceIgnore {
   private ig: Ignore;
+  /** The built-in noise list ONLY, without the project's .gitignore. */
+  private noise: Ignore;
 
   constructor(private workspaceRoot: string, extraGlobs: string[] = []) {
     this.ig = ignore().add(DEFAULT_IGNORES).add(extraGlobs);
+    this.noise = ignore().add(DEFAULT_IGNORES).add(extraGlobs);
     const gitignorePath = path.join(workspaceRoot, ".gitignore");
     try {
       this.ig.add(fs.readFileSync(gitignorePath, "utf8"));
     } catch {
       // no .gitignore — defaults still apply
     }
+  }
+
+  /**
+   * Whether the FILE EXPLORER should hide this path.
+   *
+   * Deliberately weaker than `ignores`: it applies the built-in noise list
+   * (node_modules, .git, build output) and NOT the project's .gitignore.
+   *
+   * Those are two different questions that were being answered by one rule,
+   * and the cost was real: `.env` is gitignored in every sane project, so
+   * the explorer refused to show a file the user had just created and was
+   * actively editing. Git ignoring a file means "do not commit it", not "do
+   * not let me see it" — VS Code shows it, and so should this.
+   *
+   * The stricter `ignores` still guards the index, the watcher and search,
+   * which is where a .env genuinely does not belong: nothing gitignored is
+   * embedded, retrieved, or sent to a model.
+   */
+  hiddenFromTree(relPath: string, isDir = false): boolean {
+    const posix = toPosix(relPath);
+    if (!posix || posix === ".") return false;
+    return this.noise.ignores(isDir ? `${posix}/` : posix);
+  }
+
+  hiddenFromTreeAbsolute(absPath: string, isDir = false): boolean {
+    const rel = path.relative(this.workspaceRoot, absPath);
+    if (!rel || rel.startsWith("..")) return false;
+    return this.hiddenFromTree(rel, isDir);
   }
 
   /** relPath is workspace-relative; dirs may pass a trailing slash. */

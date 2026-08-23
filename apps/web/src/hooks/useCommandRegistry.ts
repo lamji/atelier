@@ -57,9 +57,7 @@ const VIEWS: Array<{ id: ActivityView; label: string; icon: LucideIcon }> = [
   { id: "agents", label: "Agents", icon: Bot },
   { id: "explorer", label: "Explorer", icon: Files },
   { id: "git", label: "Source Control", icon: GitBranch },
-  { id: "knowledge", label: "Knowledge", icon: Network },
   { id: "markdown", label: "Notes", icon: BookOpen },
-  { id: "hooks", label: "Hooks", icon: Webhook },
   { id: "monitor", label: "Monitor", icon: Activity },
 ];
 

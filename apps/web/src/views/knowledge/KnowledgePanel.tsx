@@ -21,6 +21,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { WorkspacePageBody } from "@/components/ui/workspace-page";
 import { cn } from "@/lib/cn";
 import type { useKnowledgeViewModel } from "@/hooks/useKnowledgeViewModel";
+import { WikiModal } from "./WikiModal";
 
 export interface KnowledgePanelProps {
   vm: ReturnType<typeof useKnowledgeViewModel>;
@@ -34,6 +35,8 @@ export interface KnowledgePanelProps {
  */
 export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
   const [reindexing, setReindexing] = useState(false);
+  const [wikiSyncing, setWikiSyncing] = useState(false);
+  const [wikiOpen, setWikiOpen] = useState(false);
   const { stats, indexing } = vm;
   const indexPct =
     indexing && indexing.total > 0
@@ -48,6 +51,11 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
         })
       : "Never";
 
+  const resyncWiki = () => {
+    setWikiSyncing(true);
+    void vm.refreshWiki().finally(() => setWikiSyncing(false));
+  };
+
   const runReindex = async (force: boolean) => {
     setReindexing(true);
     try {
@@ -59,9 +67,20 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
 
   return (
     <div className="flex h-full flex-col">
-      <WorkspacePageBody className="min-h-0 flex-1 overflow-y-auto p-5">
-        <div className="grid min-h-full gap-4 xl:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="space-y-3">
+      {/* Two independent scroll areas once there is room for two columns:
+          the left column holds the controls for everything on the right —
+          index state, graph/inspector/scan links, force re-index — and
+          scrolling them away with the stats put them out of reach exactly
+          when a long right-hand column made them wanted. Below xl the
+          grid collapses to one column and scrolls as one page again. */}
+      <WorkspacePageBody className="min-h-0 flex-1 overflow-y-auto p-5 xl:overflow-hidden">
+        <div
+          className={cn(
+            "grid min-h-full gap-4",
+            "xl:h-full xl:min-h-0 xl:grid-cols-[260px_minmax(0,1fr)]"
+          )}
+        >
+          <aside className="space-y-3 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
             <section className="rounded-lg border border-border-subtle bg-card p-3 shadow-sm">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
@@ -128,7 +147,7 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
             </button>
           </aside>
 
-          <main className="min-w-0 space-y-4">
+          <main className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
             <section className="rounded-lg border border-border-subtle bg-card shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle px-4 py-3">
                 <div className="flex min-w-0 items-center gap-3">
@@ -246,20 +265,34 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
                     ? `${vm.wikiPages.length} · ${vm.wikiLint.length} lint`
                     : `${vm.wikiPages.length}`
                 }
+                onTitleClick={() => setWikiOpen(true)}
+                titleHint="Browse the wiki — read any page here"
+                action={
+                  <Tooltip content="Re-read the wiki from disk and re-run its lint">
+                    <button
+                      onClick={resyncWiki}
+                      disabled={!vm.connected || wikiSyncing}
+                      aria-label="Resync the feature wiki"
+                      className={cn(
+                        "rounded-md p-1 text-muted-foreground transition-colors",
+                        "hover:bg-accent/60 hover:text-foreground disabled:opacity-40"
+                      )}
+                    >
+                      {wikiSyncing ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </Tooltip>
+                }
                 empty="No feature pages yet — a change task compiles the first one."
                 emptyWhen={vm.wikiPages.length === 0}
               >
                 {vm.wikiPages.slice(0, 8).map((page) => {
                   const findings = vm.wikiLint.filter((f) => f.slug === page.slug);
-                  const tip = [
-                    page.aliases.length > 0 ? `aliases: ${page.aliases.join(", ")}` : "",
-                    page.moved.length > 0 ? `moved: ${page.moved.join(", ")}` : "",
-                    ...findings.map((f) => `${f.kind}: ${f.detail}`),
-                  ]
-                    .filter(Boolean)
-                    .join("\n");
                   return (
-                    <Tooltip key={page.slug} content={tip || page.path}>
+                    <Tooltip key={page.slug} content={page.path}>
                       <li
                         className="cursor-pointer rounded-md px-2.5 py-2 transition-colors hover:bg-muted/60"
                         onClick={() => void vm.openWikiPage(page.path)}
@@ -358,6 +391,15 @@ export function KnowledgePanel({ vm, onOpenRag }: KnowledgePanelProps) {
           </main>
         </div>
       </WorkspacePageBody>
+
+      <WikiModal
+        open={wikiOpen}
+        pages={vm.wikiPages}
+        lint={vm.wikiLint}
+        onClose={() => setWikiOpen(false)}
+        onOpenInEditor={(path) => void vm.openWikiPage(path)}
+        onResync={vm.refreshWiki}
+      />
     </div>
   );
 }
@@ -439,17 +481,43 @@ function KnowledgeList(props: {
   meta: string;
   empty: string;
   emptyWhen: boolean;
+  /** Makes the title a button — for a list that has more behind it. */
+  onTitleClick?: () => void;
+  titleHint?: string;
+  /** Extra control in the header, beside the count. */
+  action?: ReactNode;
   children: ReactNode;
 }) {
+  const heading = (
+    <div className="flex items-center gap-2">
+      <props.icon className="h-4 w-4 text-primary" />
+      <h3 className="text-sm font-semibold">{props.title}</h3>
+      {props.onTitleClick && (
+        <ArrowRight className="h-3 w-3 text-muted-foreground/60" />
+      )}
+    </div>
+  );
   return (
     <section className="rounded-lg border border-border-subtle bg-card shadow-sm">
       <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
-        <div className="flex items-center gap-2">
-          <props.icon className="h-4 w-4 text-primary" />
-          <h3 className="text-sm font-semibold">{props.title}</h3>
-        </div>
-        <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
-          {props.meta}
+        {props.onTitleClick ? (
+          <Tooltip content={props.titleHint ?? props.title}>
+            <button
+              type="button"
+              onClick={props.onTitleClick}
+              className="-mx-1 rounded-md px-1 py-0.5 text-left hover:bg-accent/60"
+            >
+              {heading}
+            </button>
+          </Tooltip>
+        ) : (
+          heading
+        )}
+        <span className="flex items-center gap-1.5">
+          <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+            {props.meta}
+          </span>
+          {props.action}
         </span>
       </div>
       {props.emptyWhen ? (
