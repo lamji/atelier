@@ -9,6 +9,7 @@ import {
 import { cn } from "@/lib/cn";
 import { CommandCenter } from "./CommandCenter";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { BrandMark } from "@/components/BrandMark";
 
 export type AgentSurface = "agent" | "preview";
 
@@ -72,12 +73,13 @@ export function HeaderBar(props: HeaderBarProps) {
     <div className="flex h-full items-center gap-3 px-4">
       <div className="flex min-w-0 flex-1 items-center gap-3">
       <div className="app-no-drag flex min-w-0 shrink-0 items-center gap-2.5">
+        <BrandMark className="h-8 w-8 shrink-0" />
         <p className="hidden shrink-0 text-sm font-semibold tracking-tight sm:block">
           Atelier
         </p>
       </div>
 
-      <div className="app-no-drag min-w-0 shrink-0">
+      <div className="app-no-drag min-w-0">
         <WorkspaceSwitcher />
       </div>
 
@@ -123,11 +125,10 @@ export function HeaderBar(props: HeaderBarProps) {
             type="button"
             title="Stop the page preview server"
             aria-label="Stop page preview server"
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-destructive/25 bg-destructive/10 px-3 text-xs font-medium text-destructive transition-colors hover:bg-destructive/15"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-destructive/25 bg-destructive/10 text-destructive transition-colors hover:bg-destructive/15"
             onClick={props.onStopPagePreview}
           >
             <Square className="h-3 w-3 fill-current" />
-            <span className="hidden sm:inline">Stop</span>
           </button>
         )}
         </div>

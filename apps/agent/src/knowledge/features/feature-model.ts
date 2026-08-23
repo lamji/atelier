@@ -123,10 +123,16 @@ export class FeatureModelService {
     if (this.working || this.stopped || this.isBusy()) return;
     this.working = true;
     try {
+      // Session-pinned tree-sitter maps share the feature graph but are
+      // rebuilt by /context, not by the background LLM summarizer. They must
+      // not suppress normal feature seeding in a newly indexed workspace.
       const count = (
-        this.db.prepare("SELECT COUNT(*) n FROM features").get() as {
-          n: number;
-        }
+        this.db
+          .prepare(
+            "SELECT COUNT(*) n FROM features WHERE " +
+              "COALESCE(model_version, '') NOT LIKE 'session-context-%'"
+          )
+          .get() as { n: number }
       ).n;
       if (count === 0) await this.seedFeatures();
       else await this.refreshStale();
@@ -149,7 +155,8 @@ export class FeatureModelService {
   async refreshStale(): Promise<void> {
     const stale = this.db
       .prepare(
-        "SELECT id, slug, summary FROM features WHERE status='stale' LIMIT 10"
+        "SELECT id, slug, summary FROM features WHERE status='stale' " +
+          "AND COALESCE(model_version, '') NOT LIKE 'session-context-%' LIMIT 10"
       )
       .all() as Array<{ id: number; slug: string; summary: string }>;
     for (const feature of stale) {

@@ -17,18 +17,21 @@ import type { ChatItemVm } from "@/types";
 export interface ChatPanelProps {
   /** Shell-level failure (creating a session), not a task failure. */
   shellError?: string | null;
+  /** Fits the same timeline and composer into the Page preview sidebar. */
+  compact?: boolean;
 }
 
 /**
  * The chat surface: transcript in the centre and composer at the bottom.
  *
- * Reads its own data (see {@link useChatViewModel}) instead of taking it as
- * props, and is memoized on the one prop it does take — so a shell re-render
- * (a file event, an index tick, a usage refresh) cannot walk into the
- * transcript, and a keystroke stays inside {@link Composer}.
+ * Reads its own data (see {@link useChatViewModel}) instead of receiving the
+ * transcript through props, and is memoized on its small presentation surface
+ * so a shell re-render (a file event, an index tick, a usage refresh) cannot
+ * walk into the transcript, and a keystroke stays inside {@link Composer}.
  */
 export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
   const vm = useChatViewModel();
+  const compact = props.compact === true;
 
   // Follows the stream only while you're at the bottom; scroll up to read
   // and it stops yanking you back down. The process card lives in the stream
@@ -73,28 +76,30 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="px-4 pb-3 pt-4">
-        <div className="flex w-full items-center gap-3">
-          <span
-            className={cn(
-              "orb relative h-9 w-9 shrink-0 rounded-xl",
-              vm.busy && "orb-spin"
-            )}
-          >
-            <span className="absolute inset-[3px] rounded-[0.6rem] bg-card/85 backdrop-blur" />
-            <Sparkles className="absolute inset-0 m-auto h-4 w-4 text-primary" />
-          </span>
-          <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight">
-            {vm.sessionTitle}
-          </span>
-          {vm.busy && (
-            <span className="chip chip-accent">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-              <span className="text-shimmer font-semibold">working…</span>
+      {!compact && (
+        <div className="px-4 pb-3 pt-4">
+          <div className="flex w-full items-center gap-3">
+            <span
+              className={cn(
+                "orb relative h-9 w-9 shrink-0 rounded-xl",
+                vm.busy && "orb-spin"
+              )}
+            >
+              <span className="absolute inset-[3px] rounded-[0.6rem] bg-card/85 backdrop-blur" />
+              <Sparkles className="absolute inset-0 m-auto h-4 w-4 text-primary" />
             </span>
-          )}
+            <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight">
+              {vm.sessionTitle}
+            </span>
+            {vm.busy && (
+              <span className="chip chip-accent">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+                <span className="text-shimmer font-semibold">working…</span>
+              </span>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -107,9 +112,17 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 [scrollbar-gutter:stable_both-edges]"
+            className={cn(
+              "flex-1 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable_both-edges]",
+              compact ? "px-2 py-3" : "px-4 py-4"
+            )}
           >
-            <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-5">
+            <div
+              className={cn(
+                "mx-auto flex min-h-full w-full max-w-4xl flex-col",
+                compact ? "gap-3" : "gap-5"
+              )}
+            >
               {vm.items.length === 0 && vm.executions.length === 0 && !vm.busy && (
                 <EmptyState connected={vm.connected} />
               )}
@@ -155,6 +168,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
                       logs={execution.logs}
                       thinking=""
                       status=""
+                      compact={compact}
                     />
                   ))}
                 {showProcess && (
@@ -175,6 +189,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
                     logs={workflowLogs}
                     thinking={vm.thinking}
                     status={status ?? ""}
+                    compact={compact}
                   />
                 )}
               </AnimatePresence>
@@ -182,7 +197,12 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           </div>
 
           {error && (
-            <div className="mx-auto w-full max-w-4xl px-4">
+            <div
+              className={cn(
+                "mx-auto w-full max-w-4xl",
+                compact ? "px-2" : "px-4"
+              )}
+            >
               <motion.p
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -195,7 +215,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
               </motion.p>
             </div>
           )}
-          <Composer />
+          <Composer compact={compact} />
         </div>
       </div>
     </div>

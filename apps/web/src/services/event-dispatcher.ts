@@ -14,7 +14,11 @@ import type {
 import { bridge } from "./bridge-client.js";
 import { actionDetail, actionLabel, actionResult } from "@/lib/tool-labels";
 import { isImagePath } from "@/lib/image-file";
-import { llmRequestDetail, llmRequestSummary } from "@atelier/shared";
+import {
+  llmRequestDetail,
+  llmRequestSummary,
+  stripHiddenContext,
+} from "@atelier/shared";
 import {
   FRONTEND_REVIEW_REQUEST_EVENT,
   frontendReviewRequest,
@@ -244,7 +248,9 @@ function buildExecutionTimeline(
 
   return {
     taskId: task.id,
-    request: task.prompt,
+    // The stored prompt is what was SENT, hidden page-preview evidence and
+    // all. The card shows the request, so it gets the human half only.
+    request: stripHiddenContext(task.prompt),
     report: "",
     requestedAt: task.startedAt,
     status: task.status,

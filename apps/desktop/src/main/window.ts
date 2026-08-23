@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadWindowState, trackWindowState } from "./window-state";
 import { attachExternalLinkHandling } from "./external-links";
-import { wireMaximizedEvents } from "./ipc";
+import { wireMaximizedEvents, wirePreviewContextEvents } from "./ipc";
 
 const DARK_BACKGROUND = "#09090b";
 
@@ -52,6 +52,7 @@ export function createMainWindow(): BrowserWindow {
   trackWindowState(win);
   attachExternalLinkHandling(win);
   wireMaximizedEvents(win);
+  wirePreviewContextEvents(win);
   wireRendererDiagnostics(win);
 
   win.once("ready-to-show", () => win.show());

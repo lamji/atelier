@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { newId } from "@atelier/shared";
 import type { ModelOption } from "@atelier/protocol";
 import { AnimatePresence } from "framer-motion";
+import { Bot, Plus, Trash2, X } from "lucide-react";
 import {
   Panel,
   PanelGroup,
@@ -18,18 +19,23 @@ import { ChangelogModal } from "./ChangelogModal";
 import { useUpdatesViewModel } from "@/hooks/useUpdatesViewModel";
 import { useWebTargetViewModel } from "@/hooks/useWebTargetViewModel";
 import { BrandMark } from "@/components/BrandMark";
+import { Select } from "@/components/ui/select";
 import { Dock } from "./dock/Dock";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { CliConsolePane } from "@/views/cli/CliConsolePane";
 import { CliProviderModal } from "@/views/cli/CliProviderModal";
 import { CliSessionListPanel } from "@/views/cli/CliSessionListPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
+import { TreeContextMenu } from "@/views/explorer/TreeContextMenu";
 import { GitPanel } from "@/views/git/GitPanel";
 import { GitFlowHost } from "@/views/git/GitFlowHost";
 import { MergeConflictHost } from "@/views/git/MergeConflictHost";
 import { GitSyncModal } from "@/views/git/GitSyncModal";
 import { AlertHost } from "./AlertHost";
-import { SessionListPanel } from "@/views/sessions/SessionListPanel";
+import {
+  RenameField,
+  SessionListPanel,
+} from "@/views/sessions/SessionListPanel";
 import { MonitorPanel } from "@/views/monitor/MonitorPanel";
 import { KnowledgePanel } from "@/views/knowledge/KnowledgePanel";
 import { IndexingWelcome } from "@/views/knowledge/IndexingWelcome";
@@ -60,6 +66,7 @@ import { useUsageViewModel } from "@/hooks/useUsageViewModel";
 import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
 import { useCommandRegistry } from "@/hooks/useCommandRegistry";
 import { bridge } from "@/services/bridge-client";
+import { setActivePreviewUrl } from "@/services/preview-context";
 import {
   createCliSession,
   ensureCliSessions,
@@ -169,6 +176,13 @@ export function AppShell() {
   const [agentSurface, setAgentSurface] = useState<AgentSurface>("agent");
   const [pagePreviewTermId, setPagePreviewTermId] = useState<string | null>(null);
   const [pagePreviewUrl, setPagePreviewUrl] = useState<string | null>(null);
+  const [previewSessionMenu, setPreviewSessionMenu] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [previewRenamingId, setPreviewRenamingId] = useState<string | null>(null);
+  const [previewDeletingId, setPreviewDeletingId] = useState<string | null>(null);
   const [frontendReviewOffer, setFrontendReviewOffer] =
     useState<FrontendReviewRequest | null>(null);
   const [frontendReviewExpiresAt, setFrontendReviewExpiresAt] =
@@ -215,6 +229,18 @@ export function AppShell() {
     setPendingFrontendReviewCapture(null);
     setFrontendReviewModel("");
   }, [workspaceEpoch]);
+
+  useEffect(() => {
+    if (agentSurface === "preview") return;
+    setPreviewSessionMenu(null);
+    setPreviewRenamingId(null);
+    setPreviewDeletingId(null);
+  }, [agentSurface]);
+
+  useEffect(() => {
+    setActivePreviewUrl(agentSurface === "preview" ? pagePreviewUrl : null);
+    return () => setActivePreviewUrl(null);
+  }, [agentSurface, pagePreviewUrl]);
 
   useEffect(() => {
     const onFrontendReviewRequested = (event: Event) => {
@@ -635,6 +661,149 @@ export function AppShell() {
     [cliMode, sessions.error]
   );
 
+  const previewSessionOptions = useMemo(
+    () =>
+      sessions.sessionList.length > 0
+        ? sessions.sessionList.map((session) => ({
+            value: session.conversation.id,
+            label: session.conversation.title,
+            hint:
+              session.status === "working"
+                ? "Working…"
+                : session.status === "error"
+                  ? "Needs attention"
+                  : "Ready",
+          }))
+        : [{ value: "", label: "Creating a session…", hint: "Please wait" }],
+    [sessions.sessionList]
+  );
+
+  const previewRenamingSession =
+    sessions.sessionList.find(
+      (session) => session.conversation.id === previewRenamingId
+    ) ?? null;
+  const previewDeletingSession =
+    sessions.sessionList.find(
+      (session) => session.conversation.id === previewDeletingId
+    ) ?? null;
+
+  const previewAgentPanel =
+    !cliMode && agentSurface === "preview" ? (
+      <div className="flex h-full flex-col">
+        <div className="island-header justify-between">
+          <span className="icon-tile icon-tile-sm">
+            <Bot className="h-3.5 w-3.5" />
+          </span>
+          <span className="island-title">Agents</span>
+          <button
+            type="button"
+            title="New agent session"
+            aria-label="New agent session"
+            onClick={() => void sessions.createSession()}
+            className="tool-btn ml-auto"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="border-b border-border/60 px-2 pb-2">
+          <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+            <span className="text-[10px] font-medium text-muted-foreground">
+              Active session
+            </span>
+            <span className="text-[10px] text-muted-foreground/60">
+              {sessions.sessionList.length} total
+            </span>
+          </div>
+          {previewRenamingSession ? (
+            <div className="flex h-9 items-center">
+              <RenameField
+                initial={previewRenamingSession.conversation.title}
+                onCommit={(title) => {
+                  sessions.renameSession(previewRenamingSession.conversation.id, title);
+                  setPreviewRenamingId(null);
+                }}
+                onCancel={() => setPreviewRenamingId(null)}
+              />
+            </div>
+          ) : previewDeletingSession ? (
+            <div className="flex h-9 items-center gap-1 rounded-xl border border-destructive/30 bg-destructive/5 px-2">
+              <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+                Delete {previewDeletingSession.conversation.title}?
+              </span>
+              <button
+                type="button"
+                title="Cancel"
+                aria-label="Cancel delete"
+                onClick={() => setPreviewDeletingId(null)}
+                className="tool-btn"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                title="Confirm delete"
+                aria-label={`Confirm deleting ${previewDeletingSession.conversation.title}`}
+                onClick={() => {
+                  const id = previewDeletingSession.conversation.id;
+                  setPreviewDeletingId(null);
+                  void sessions.deleteSession(id);
+                }}
+                className="tool-btn text-destructive"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <Select
+              value={sessions.selectedId ?? ""}
+              onChange={sessions.selectSession}
+              options={previewSessionOptions}
+              disabled={sessions.sessionList.length === 0}
+              className="h-9 w-full justify-between rounded-xl border border-border/70 bg-muted/40 px-2.5 text-xs text-foreground"
+              menuClassName="max-w-[20rem]"
+              onOptionContextMenu={(option, event) => {
+                setPreviewSessionMenu({
+                  id: option.value,
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
+            />
+          )}
+          {previewSessionMenu && (
+            <TreeContextMenu
+              x={previewSessionMenu.x}
+              y={previewSessionMenu.y}
+              onClose={() => setPreviewSessionMenu(null)}
+              items={[
+                {
+                  label: "Rename",
+                  onSelect: () => {
+                    setPreviewDeletingId(null);
+                    setPreviewRenamingId(previewSessionMenu.id);
+                  },
+                },
+                {},
+                {
+                  label: "Delete",
+                  danger: true,
+                  onSelect: () => {
+                    setPreviewRenamingId(null);
+                    setPreviewDeletingId(previewSessionMenu.id);
+                  },
+                },
+              ]}
+            />
+          )}
+        </div>
+        <div className="min-h-0 flex-1">
+          <ChatPanel compact shellError={sessions.error} />
+        </div>
+      </div>
+    ) : (
+      leftPanel
+    );
+
   /*
    * Command sources. Every entry is the SAME callback the corresponding button
    * already invokes, so the palette can never drift from the UI: memoized
@@ -797,11 +966,6 @@ export function AppShell() {
        */}
       <div className="flex min-h-0 flex-1">
         <aside className="dock-rail" aria-label="Dock">
-          <BrandMark
-            className="mx-auto mt-2 h-8 w-8 shrink-0"
-            tile
-            title="Atelier"
-          />
           {dock}
           <RailStatus
             connection={connection.state}
@@ -836,7 +1000,7 @@ export function AppShell() {
                 maxSize={26}
                 className="sidebar-panel max-w-[340px]"
               >
-                <div className="island h-full">{leftPanel}</div>
+                <div className="island h-full">{previewAgentPanel}</div>
               </Panel>
               <PanelResizeHandle className="resize-handle w-px" />
               <Panel defaultSize={80} minSize={68} className="min-w-[360px]">
@@ -872,7 +1036,7 @@ export function AppShell() {
                     >
                       <RightDock
                         rightTab={editor.rightTab}
-                        chatPane={chatPane}
+                        chatPane={agentSurface === "agent" ? chatPane : null}
                         skillDetail={skillDetail}
                         onCloseSkillDetail={closeSkillDetail}
                         selectedPath={editor.selectedPath}

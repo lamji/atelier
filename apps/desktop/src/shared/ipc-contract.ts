@@ -24,6 +24,7 @@ export const IPC_CHANNELS = {
   // desktop chrome
   pickFolder: "atelier:pick-folder",
   captureRegion: "atelier:capture-region",
+  previewContext: "atelier:preview-context",
   openExternal: "atelier:open-external",
   exportPdf: "atelier:export-pdf",
   windowMinimize: "atelier:window:minimize",
@@ -113,6 +114,42 @@ export interface DesktopCaptureResult {
   frameUrl: string | null;
 }
 
+export interface DesktopPreviewConsoleEntry {
+  level: "warning" | "error";
+  message: string;
+  source: string | null;
+  line: number | null;
+  timestamp: number;
+}
+
+export interface DesktopPreviewInteractiveElement {
+  selector: string;
+  tag: string;
+  text: string;
+  ariaLabel: string | null;
+  role: string | null;
+  rect: { x: number; y: number; width: number; height: number };
+  style: {
+    color: string;
+    backgroundColor: string;
+    borderColor: string;
+    font: string;
+    display: string;
+    visibility: string;
+  };
+}
+
+/** Live runtime evidence from the exact iframe currently shown in Page preview. */
+export interface DesktopPreviewContextResult {
+  url: string;
+  title: string;
+  html: string;
+  css: string;
+  interactive: DesktopPreviewInteractiveElement[];
+  console: DesktopPreviewConsoleEntry[];
+  capturedAt: number;
+}
+
 /** What a release check found. */
 export interface DesktopUpdateStatus {
   current: string;
@@ -164,6 +201,8 @@ export interface AtelierDesktopApi {
   pickFolder(): Promise<string | null>;
   /** Captures a renderer-relative rectangle and its live preview route. */
   captureRegion(request: DesktopCaptureRequest): Promise<DesktopCaptureResult | null>;
+  /** Reads the DOM, authored CSS and diagnostics from the displayed preview iframe. */
+  getPreviewContext(previewUrl: string): Promise<DesktopPreviewContextResult | null>;
   /** Filesystem path of a dropped File (null if unavailable). */
   pathForFile(file: File): string | null;
   openExternal(url: string): Promise<void>;

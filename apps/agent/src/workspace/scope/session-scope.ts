@@ -95,7 +95,13 @@ export class SessionScopeStore {
     const stored = this.read(conversationId);
     const mentions = parseMentions(prompt, this.workspaceRoot);
     // Typed without an "@": a reference grant for this turn, not a lock.
-    const allowed = parseTypedPaths(prompt, this.workspaceRoot);
+    // Absolute entries stay out of workspace scope and only register the
+    // exact external path as readable.
+    const typedPaths = parseTypedPaths(prompt, this.workspaceRoot);
+    const allowed = typedPaths.filter((candidate) => !path.isAbsolute(candidate));
+    for (const candidate of typedPaths) {
+      if (path.isAbsolute(candidate)) this.guard?.allowRead(candidate);
+    }
 
     const mentionedRoots = new Set<string>();
     const mentionedFiles: string[] = [];

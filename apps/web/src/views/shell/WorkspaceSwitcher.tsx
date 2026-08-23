@@ -87,7 +87,7 @@ export function WorkspaceSwitcher() {
   ).length;
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative min-w-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -96,7 +96,7 @@ export function WorkspaceSwitcher() {
         disabled={busy}
         title={active?.path}
         className={cn(
-          "flex h-9 max-w-[min(15rem,32vw)] items-center gap-2 rounded-full",
+          "flex h-9 w-full max-w-[min(15rem,32vw)] items-center gap-2 rounded-full",
           "border border-border pl-2 pr-3 text-xs font-medium outline-none",
           "transition-colors hover:bg-accent disabled:opacity-60",
           open ? "bg-accent" : "bg-card"

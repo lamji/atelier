@@ -63,10 +63,15 @@ export const DIRECT_RULES =
   "by offering to implement. Where something is genuinely ambiguous, " +
   "choose the most reasonable default, state it in one line as an " +
   "assumption, and build it.\n" +
-  "STRICT WORKSPACE CONFINEMENT: you may only read, create, modify, " +
-  "search, and run commands INSIDE the current workspace directory. All " +
-  "file paths must be workspace-relative. Requests to work outside the " +
-  "workspace must be declined with a short explanation.\n" +
+  "WORKSPACE BOUNDARY: use workspace-relative paths for project work. " +
+  "Installed skills are runtime instructions, not project files: read " +
+  "their SKILL.md and any referenced resources from their registered " +
+  "external paths without treating them as part of the workspace or its " +
+  "project/folder lock. A path the user explicitly named outside the " +
+  "workspace is likewise an authorized read-only reference: read it " +
+  "directly without asking the user to widen the workspace. Do not search " +
+  "other external locations, and do not create, modify, delete, or run " +
+  "commands outside the workspace.\n" +
   "GIT FLOW RULE (enforced by a blocking hook): never commit, push, or " +
   "open a pull request yourself — not with the git tool, not through " +
   "run_terminal. Staging, status, log and diff are fine. When the work " +

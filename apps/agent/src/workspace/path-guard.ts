@@ -8,12 +8,11 @@ export type PathMode = "read" | "write";
  * Canonicalizes every model- or client-supplied path and rejects escapes
  * from the workspace root. Wire format is workspace-relative POSIX-style.
  *
- * One exception: a path the user named themselves with an "@" mention that
- * happens to live outside the workspace is registered here as a *reference*
- * — readable, never writable. Nothing else can widen the guard, and the
- * allowance covers only the exact paths mentioned (a mentioned directory
- * covers its subtree), so pointing the agent at one file next door does not
- * open the rest of the disk.
+ * One exception: installed skill roots and paths the user explicitly named
+ * outside the workspace are registered here as *references* — readable,
+ * never writable. Nothing else can widen the guard, and the allowance covers
+ * only the exact paths registered (a registered directory covers its subtree),
+ * so pointing the agent at one file next door does not open the rest of disk.
  */
 export class PathGuard {
   private rootLower: string;
@@ -41,6 +40,18 @@ export class PathGuard {
       if (lower === ref || lower.startsWith(ref + path.sep)) return true;
     }
     return false;
+  }
+
+  /**
+   * Lets the session-scope guard recognize a registered external read without
+   * teaching that project/folder lock about host paths. Relative paths never
+   * qualify, and writes still pass through `toAbsolute(_, "write")`.
+   */
+  isReadReference(candidatePath: string): boolean {
+    return (
+      path.isAbsolute(candidatePath) &&
+      this.isReference(path.resolve(candidatePath))
+    );
   }
 
   private isInRoot(absPath: string): boolean {

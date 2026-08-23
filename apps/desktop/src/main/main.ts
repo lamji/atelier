@@ -154,11 +154,11 @@ async function start(): Promise<void> {
 function ensureAuthLoopback(): Promise<string> {
   if (oauthLoopbackPromise) return oauthLoopbackPromise;
 
-  oauthLoopbackPromise = new Promise((resolve, reject) => {
-    const server = http.createServer((request, response) => {
+  const createServer = () =>
+    http.createServer((request, response) => {
       const requestUrl = new URL(
         request.url ?? "/",
-        `http://${OAUTH_LOOPBACK_HOST}:${OAUTH_LOOPBACK_PORT}`
+        `http://${OAUTH_LOOPBACK_HOST}`
       );
 
       if (request.method !== "GET" || requestUrl.pathname !== "/auth/callback") {
@@ -185,27 +185,62 @@ function ensureAuthLoopback(): Promise<string> {
       deliverAuthCallback(callback.toString());
     });
 
-    const onStartupError = (error: Error) => {
-      oauthLoopbackPromise = null;
-      reject(error);
-    };
-    server.once("error", onStartupError);
-    server.listen(OAUTH_LOOPBACK_PORT, OAUTH_LOOPBACK_HOST, () => {
-      server.removeListener("error", onStartupError);
-      server.on("error", (error) => {
-        console.error("[auth] OAuth loopback server failed", error);
-      });
-      server.once("close", () => {
-        if (oauthLoopbackServer !== server) return;
-        oauthLoopbackServer = null;
-        oauthLoopbackPromise = null;
-      });
-      oauthLoopbackServer = server;
-      server.unref();
-      resolve(
-        `http://${OAUTH_LOOPBACK_HOST}:${OAUTH_LOOPBACK_PORT}/auth/callback`
-      );
+  const listen = (port: number): Promise<http.Server> =>
+    new Promise((resolve, reject) => {
+      const server = createServer();
+      const onStartupError = (error: Error) => {
+        server.removeListener("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.removeListener("error", onStartupError);
+        resolve(server);
+      };
+
+      server.once("error", onStartupError);
+      server.once("listening", onListening);
+      server.listen(port, OAUTH_LOOPBACK_HOST);
     });
+
+  oauthLoopbackPromise = (async () => {
+    let server: http.Server;
+    try {
+      server = await listen(OAUTH_LOOPBACK_PORT);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "EADDRINUSE"
+      ) {
+        throw error;
+      }
+      console.warn(
+        `[auth] Port ${OAUTH_LOOPBACK_PORT} is occupied; using a temporary OAuth callback port.`
+      );
+      server = await listen(0);
+    }
+
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new Error("Could not determine the OAuth callback port.");
+    }
+
+    server.on("error", (error) => {
+      console.error("[auth] OAuth loopback server failed", error);
+    });
+    server.once("close", () => {
+      if (oauthLoopbackServer !== server) return;
+      oauthLoopbackServer = null;
+      oauthLoopbackPromise = null;
+    });
+    oauthLoopbackServer = server;
+    server.unref();
+
+    return `http://${OAUTH_LOOPBACK_HOST}:${address.port}/auth/callback`;
+  })().catch((error: unknown) => {
+    oauthLoopbackPromise = null;
+    throw error;
   });
 
   return oauthLoopbackPromise;

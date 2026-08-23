@@ -5,6 +5,7 @@ export * from "./conversation-title.js";
 export * from "./debounce.js";
 export * from "./frontmatter.js";
 export * from "./prompt-file.js";
+export * from "./hidden-context.js";
 export * from "./glob.js";
 export * from "./tokens/index.js";
 export * from "./llm-request-text.js";

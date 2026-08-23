@@ -82,6 +82,9 @@ const api: AtelierDesktopApi = {
   captureRegion: (request: DesktopCaptureRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.captureRegion, request),
 
+  getPreviewContext: (previewUrl: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.previewContext, previewUrl),
+
   // File.path was removed in Electron 32; webUtils is the only way to turn
   // a dropped File back into a filesystem path.
   pathForFile: (file: File) => {

@@ -115,6 +115,19 @@ import {
   parseGeneratedGlobalAlias,
   type GlobalSessionStore,
 } from "../context/global-session/index.js";
+import {
+  DEBUG_REPORT_PROMPT,
+  DEBUG_REPORT_TEMPLATE,
+  parseDebugReport,
+  parseFeatureContextCommand,
+  parseFeatureContextDebugCommand,
+  parseFeatureContextUpdateCommand,
+  renderDebugTask,
+  renderFeatureContextActivationReport,
+  renderFeatureContextRefreshReport,
+  type FeatureContextStore,
+  type SessionFeatureContext,
+} from "../context/feature-context/index.js";
 import { rankCandidates } from "../context/rank/index.js";
 import {
   detectWorkspaceProfile,
@@ -635,6 +648,8 @@ export interface PipelineDeps {
   summaries: TaskSummaryStore;
   sharedSessions: SharedSessionContextBuilder;
   globalSessions: GlobalSessionStore;
+  /** Tree-sitter feature maps explicitly pinned with /context <feature>. */
+  featureContexts: FeatureContextStore;
   codexTools: CodexToolBridge;
   skillLoader: SkillLoader;
   /** Per-conversation working-set lock, seeded by "@folder" mentions. */
@@ -758,6 +773,8 @@ export interface TaskContext {
   blockers?: BlockerLedger;
   /** Feature-wiki pages matched for this turn, best first, with what moved. */
   wiki: Array<{ page: WikiPage; moved: string[] }>;
+  /** Explicit /context feature pinned to this conversation, if any. */
+  featureContext: SessionFeatureContext | null;
   /** Progressive record of the work, for summaries and interrupted saves. */
   record: TaskRecord;
   /** The working-set lock in force for this turn. Resolved before stage 1. */
@@ -952,6 +969,70 @@ export class PipelineExecutor {
     );
   }
 
+  /**
+   * Loads the explicit /context binding before retrieval. A stale map is
+   * rebuilt from the current tree-sitter rows; otherwise this is one small
+   * SQLite read. Typed/explicit scope still wins for the current turn.
+   */
+  private async applyPinnedFeatureContext(ctx: TaskContext): Promise<void> {
+    let pinned = this.deps.featureContexts.get(ctx.conversationId);
+    if (!pinned) return;
+
+    if (pinned.status === "stale") {
+      try {
+        await this.deps.indexer.drainFor([]);
+        pinned = this.deps.featureContexts.activate(
+          ctx.conversationId,
+          pinned.name
+        ).context;
+      } catch (error) {
+        // The last compiled map remains useful as a lead even when a large
+        // refactor temporarily leaves the index without a matching seed.
+        this.deps.log.warn(
+          { error, feature: pinned.name },
+          "pinned feature context refresh failed"
+        );
+      }
+    }
+    ctx.featureContext = pinned;
+
+    if (
+      pinned.files.length === 0 ||
+      ctx.scope.source === "mention" ||
+      ctx.scope.source === "explicit"
+    ) {
+      return;
+    }
+
+    const profile = await this.workspaceProfile();
+    const focused = this.deps.scope.focusFiles(
+      ctx.conversationId,
+      pinned.files,
+      profile
+    );
+    ctx.scope = { ...focused, allowed: ctx.scope.allowed };
+    this.deps.scopeGuard.bind(ctx.taskId, ctx.scope);
+    const first = ctx.scope.roots[0];
+    if (first) {
+      void this.deps.git
+        .focus(first)
+        .catch((error) =>
+          this.deps.log.warn({ error, root: first }, "git focus failed")
+        );
+    }
+    this.deps.bus.publish(
+      "scope.locked",
+      {
+        roots: ctx.scope.roots,
+        anchors: ctx.scope.anchors.slice(0, 12),
+        source: "feature",
+        changed: ctx.scope.changed,
+        repo: this.deps.git.activeRepo,
+      },
+      ctx.taskId
+    );
+  }
+
   private featureScopeFiles(
     queryText: string,
     currentAnchors: string[]
@@ -1108,7 +1189,103 @@ export class PipelineExecutor {
     return this.userRuleBlock.text;
   }
 
+  /**
+   * `/context_update` — recompiles the pinned map in place. Same build path
+   * as /context, except the feature name comes from the existing pin, so a
+   * long debugging session can re-sync after edits without retyping it.
+   */
+  private async runFeatureContextUpdate(
+    ctx: TaskContext,
+    requestedFeature: string
+  ): Promise<PipelineOutcome> {
+    try {
+      // Explicit command: wait on the whole queue rather than the pinned
+      // files. The point of a refresh is to pick up callers and imports
+      // that did not exist when the map was first compiled.
+      await this.deps.indexer.drainFor([]);
+      const result = this.deps.featureContexts.refresh(
+        ctx.conversationId,
+        requestedFeature || undefined
+      );
+      return {
+        assistantText: renderFeatureContextRefreshReport(result),
+        sdkSessionId: null,
+      };
+    } catch (error) {
+      return {
+        assistantText: String((error as { message?: string })?.message ?? error),
+        sdkSessionId: null,
+      };
+    }
+  }
+
+  /**
+   * `/context_debug` — hands back the report to fill in. Fenced, so the
+   * markdown survives being rendered as an assistant message and can be
+   * copied or loaded straight into an editor rather than read as prose.
+   */
+  private debugReportForm(retry: boolean): PipelineOutcome {
+    return {
+      assistantText:
+        (retry
+          ? "That report still has an empty \"Steps to replicate\" or " +
+            "\"Expected result\" — I cannot reproduce a defect from either " +
+            "one alone. Here is the form again.\n\n"
+          : "") +
+        DEBUG_REPORT_PROMPT +
+        "\n\n```markdown\n" +
+        DEBUG_REPORT_TEMPLATE +
+        "```\n",
+      sdkSessionId: null,
+    };
+  }
+
   async run(ctx: TaskContext): Promise<PipelineOutcome> {
+    const debugBody = parseFeatureContextDebugCommand(ctx.prompt);
+    if (debugBody !== undefined) {
+      const report = debugBody ? parseDebugReport(debugBody) : null;
+      if (!report) return this.debugReportForm(debugBody.length > 0);
+      // A filled report is not a command, it is the turn's task. Rewriting
+      // the prompt rather than answering here is what lets the rest of the
+      // pipeline run on it: the pinned feature map, retrieval, the
+      // debugging skill, and any screenshots attached to the same send.
+      ctx.prompt = renderDebugTask(report, ctx.opts.images?.length ?? 0);
+    }
+    const updatedFeature = parseFeatureContextUpdateCommand(ctx.prompt);
+    if (updatedFeature !== undefined) {
+      return this.runFeatureContextUpdate(ctx, updatedFeature);
+    }
+    const requestedFeature = parseFeatureContextCommand(ctx.prompt);
+    if (requestedFeature !== undefined) {
+      if (!requestedFeature) {
+        return {
+          assistantText:
+            "Usage: /context <feature> — for example, /context login.",
+          sdkSessionId: null,
+        };
+      }
+      try {
+        // The command snapshots the local tree-sitter index, not provider
+        // output. Waiting here ensures a just-opened workspace is mapped
+        // before the feature is bound to the conversation.
+        await this.deps.indexer.drainFor([]);
+        const result = this.deps.featureContexts.activate(
+          ctx.conversationId,
+          requestedFeature
+        );
+        return {
+          assistantText: renderFeatureContextActivationReport(result),
+          sdkSessionId: null,
+        };
+      } catch (error) {
+        return {
+          assistantText: String(
+            (error as { message?: string })?.message ?? error
+          ),
+          sdkSessionId: null,
+        };
+      }
+    }
     if (isGlobalSessionCommand(ctx.prompt)) {
       const aliasContext = this.deps.globalSessions.aliasContext(ctx.conversationId);
       const alias =
@@ -1257,6 +1434,7 @@ export class PipelineExecutor {
 
     try {
       await this.applyScope(ctx);
+      await this.applyPinnedFeatureContext(ctx);
       // Nothing below reads these, and every one of them is memoised — so
       // starting them here means the workspace layout, the locked project's
       // directory map and the user's rule files resolve DURING retrieval
@@ -1301,8 +1479,18 @@ export class PipelineExecutor {
         }
         const base =
           [ctx.prompt, ...intent.targets].join(" ").trim() || ctx.prompt;
-        const queryText = anchoredQuery(base, ctx.priorTurns);
-        await this.applyFeatureScope(ctx, base);
+        const anchored = anchoredQuery(base, ctx.priorTurns);
+        const queryText = [
+          anchored,
+          ctx.featureContext
+            ? "Pinned feature: " + ctx.featureContext.queryHint
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        // An explicit /context binding is stronger than the automatic
+        // plain-language feature matcher and must not be re-locked elsewhere.
+        if (!ctx.featureContext) await this.applyFeatureScope(ctx, base);
         // Over-fetch, then re-rank with signals retrieval cannot see
         // (target proximity, recency, lesson priority) and keep the top.
         // The lock is a filter here, not a ranking hint: three checkouts
@@ -1323,6 +1511,17 @@ export class PipelineExecutor {
             chunk.kind === "global-session-memory" ||
             inScope(ctx.scope, chunk.path)
         );
+        const pinnedChunks = ctx.featureContext
+          ? this.deps.featureContexts
+              .retrievalChunks(ctx.featureContext.featureId, 6)
+              .filter((chunk) => inScope(ctx.scope, chunk.path))
+          : [];
+        const seenChunks = new Set<number>();
+        const candidateChunks = [...pinnedChunks, ...scoped].filter((chunk) => {
+          if (seenChunks.has(chunk.id)) return false;
+          seenChunks.add(chunk.id);
+          return true;
+        });
         // Anchors boost the ranking ONLY on a turn that names nothing of
         // its own. When the user does name a file, a route, or a component,
         // that is the subject — letting forty previously-touched files
@@ -1332,20 +1531,29 @@ export class PipelineExecutor {
           ctx.scope.named.length === 0 && intent.targets.length === 0
             ? ctx.scope.anchors.slice(0, RANK_ANCHOR_TARGETS)
             : [];
+        const ranked = rankCandidates({
+          chunks: candidateChunks,
+          targets: [
+            ...intent.targets,
+            ...ctx.scope.named,
+            ...anchorTargets,
+            ...(ctx.featureContext?.files.slice(0, 12) ?? []),
+            ...raw.features.flatMap((feature) => feature.files).slice(0, 12),
+          ],
+          graph: this.deps.graph,
+          db: this.deps.db,
+          k: 12,
+        });
+        // The feature-owned chunks lead even when the current prompt is a
+        // vague follow-up such as "debug it"; ordinary retrieval fills the
+        // remainder with evidence specific to this turn.
+        const pinnedIds = new Set(pinnedChunks.map((chunk) => chunk.id));
         const result = {
           ...raw,
-          chunks: rankCandidates({
-            chunks: scoped,
-            targets: [
-              ...intent.targets,
-              ...ctx.scope.named,
-              ...anchorTargets,
-              ...raw.features.flatMap((feature) => feature.files).slice(0, 12),
-            ],
-            graph: this.deps.graph,
-            db: this.deps.db,
-            k: 12,
-          }),
+          chunks: [
+            ...pinnedChunks,
+            ...ranked.filter((chunk) => !pinnedIds.has(chunk.id)),
+          ].slice(0, 12),
         };
         // What the model will be shown as "the files we are working on":
         // named paths, plus the anchors this turn's own hits re-earned.
@@ -1460,6 +1668,12 @@ export class PipelineExecutor {
         const appendContext: ContextSection[] = [
           { name: "answer-only rules", text: answerOnly ? ANSWER_ONLY_RULES : "" },
           { name: "session memory", text: recalled.text },
+          {
+            name: "session feature",
+            text: ctx.featureContext
+              ? this.deps.featureContexts.render(ctx.featureContext)
+              : "",
+          },
           { name: "feature wiki", text: this.renderWiki(ctx, intent.kind) },
           { name: "previously gathered", text: gathered.text },
           { name: "attachments", text: attachmentBlock(ctx) },
@@ -3578,10 +3792,15 @@ export const FAST_RULES =
   "by offering to implement. Where something is genuinely ambiguous, " +
   "choose the most reasonable default, state it in one line as an " +
   "assumption, and build it.\n" +
-  "STRICT WORKSPACE CONFINEMENT: you may only read, create, modify, " +
-  "search, and run commands INSIDE the current workspace directory. All " +
-  "file paths must be workspace-relative. Requests to work outside the " +
-  "workspace must be declined with a short explanation.\n" +
+  "WORKSPACE BOUNDARY: use workspace-relative paths for project work. " +
+  "Installed skills are runtime instructions, not project files: read " +
+  "their SKILL.md and any referenced resources from their registered " +
+  "external paths without treating them as part of the workspace or its " +
+  "project/folder lock. A path the user explicitly named outside the " +
+  "workspace is likewise an authorized read-only reference: read it " +
+  "directly without asking the user to widen the workspace. Do not search " +
+  "other external locations, and do not create, modify, delete, or run " +
+  "commands outside the workspace.\n" +
   "GIT FLOW RULE (enforced by a blocking hook): never commit, push, or " +
   "open a pull request yourself — not with the git tool, not through " +
   "run_terminal. Staging, status, log and diff are fine. When the work " +
@@ -4258,10 +4477,19 @@ const EXPLAIN_OPENERS =
   /^(?:please\s+)?(?:explain|describe|summari[sz]e|compare|analy[sz]e|review|audit|investigate|explore|walk\s+me\s+through|tell\s+me|show\s+me|help\s+me\s+understand|look\s+(?:at|into)|find|locate|list|trace|check|inspect|answer|confirm|clarify|what'?s|where'?s|which)\b/i;
 
 const CHANGE_REQUEST_OPENERS =
-  /^(?:please\s+)?(?:(?:can|could|would|will)\s+(?:you|we)\s+)?(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|make|put|set|use|replace|adjust|convert)\b/i;
+  /^(?:please\s+)?(?:(?:can|could|would|will)\s+(?:you|we)\s+)?(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|redesign|make|put|set|use|replace|adjust|convert)\b/i;
 
 const PASSIVE_CHANGE_REQUEST =
-  /^(?:can|could|would|should)\s+(?:the|this|that|these|those|my|our)\b.{0,80}\bbe\s+(?:fixed|added|implemented|updated|removed|deleted|changed|renamed|moved|centered|aligned|styled|designed|made|put|set|replaced|adjusted|converted)\b/i;
+  /^(?:can|could|would|should)\s+(?:the|this|that|these|those|my|our)\b.{0,80}\bbe\s+(?:fixed|added|implemented|updated|removed|deleted|changed|renamed|moved|centered|aligned|styled|designed|redesigned|made|put|set|replaced|adjusted|converted)\b/i;
+
+/**
+ * An imperative change may follow a question or an analysis clause:
+ * "is there a better layout? redesign it" and "review this, then fix it"
+ * still owe the user an implementation. Keep the boundary requirement so
+ * explanatory questions such as "how should I fix it?" remain read-only.
+ */
+const EXPLICIT_CHANGE_CLAUSE =
+  /(?:^|[.!?]\s+|[,;:]\s*|\b(?:and|then|also|after\s+that)\s+)(?:please\s+)?(?:go\s+ahead\s+(?:and\s+)?|do\s+(?:anything|something|whatever)(?:\s+you\s+need)?\s+to\s+)?(?:fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|redesign|make|put|set|use|replace|adjust|convert)\b/i;
 
 const FEATURE_STOPWORDS = new Set([
   "the",
@@ -4304,7 +4532,7 @@ const LEADING_FILLER = /^(?:so|ok(?:ay)?|and|but|well|hmm+|wait|also)\b[\s,]*/i;
  * with none of the change openers, and only this keeps it work.
  */
 const CHANGE_VERB_ANYWHERE =
-  /\b(fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|replace|adjust|convert)\b/i;
+  /\b(fix|add|implement|refactor|build|create|update|remove|delete|change|rename|move|center|align|style|design|redesign|replace|adjust|convert)\b/i;
 
 /** Longest trailing-"?" prompt still read as a bare question. */
 const SHORT_QUESTION_WORDS = 12;
@@ -4349,7 +4577,8 @@ function looksLikeQuestion(prompt: string): boolean {
   // "can you center the login?" still owe the user a workspace change.
   if (
     CHANGE_REQUEST_OPENERS.test(trimmed) ||
-    PASSIVE_CHANGE_REQUEST.test(trimmed)
+    PASSIVE_CHANGE_REQUEST.test(trimmed) ||
+    EXPLICIT_CHANGE_CLAUSE.test(trimmed)
   ) {
     return false;
   }

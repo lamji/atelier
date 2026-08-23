@@ -112,7 +112,10 @@ const MOBILE_TOOLKITS: MobileToolkit[] = [
     web: {
       // `npm start` opens Metro's dev menu and waits for a keypress —
       // "press w to open web" — which is a terminal ritual with no reason
-      // to exist in an editor that has a browser pane.
+      // to exist in an editor that has a browser pane. `--web` also means
+      // "open the web app", which Expo takes literally and answers with a
+      // system browser window; the launch environment sets BROWSER=none so
+      // it only serves. See ComponentPreviewPane.launch.
       command: (runner) => `${runner} expo start --web`,
       port: 8081,
       prepare: (deps, runner) =>
@@ -140,10 +143,16 @@ const MOBILE_TOOLKITS: MobileToolkit[] = [
     id: "ionic",
     label: "Ionic",
     deps: ["@ionic/core", "@ionic/angular", "@ionic/react", "@ionic/vue"],
-    // Already a web app; its own dev script is the web build.
+    // Already a web app; its own dev script is the web build — but that
+    // script pops a system browser window. `ionic serve` opens one by
+    // default, and so do the `ng serve` / `vite` / `vue-cli-service serve`
+    // scripts behind the other Ionic templates. All four read `--no-open`
+    // the same way, and this preview belongs in the pane, not in Chrome.
     web: {
       command: (_runner, script, pm) =>
-        pm === "npm" || pm === "bun" ? `${pm} run ${script}` : `${pm} ${script}`,
+        pm === "npm" || pm === "bun"
+          ? `${pm} run ${script} -- --no-open`
+          : `${pm} ${script} --no-open`,
       port: 8100,
     },
   },
@@ -244,8 +253,8 @@ export function packageManifestPaths(tree: FileTreeNode): string[] {
  * Flutter projects, which carry no package.json at all.
  *
  * The whole resolver was written around npm manifests, so a Flutter app was
- * invisible to it — no candidate, no preview, no tab, even though
- * `flutter run -d chrome` is one of the better previews there is.
+ * invisible to it — no candidate, no preview, no tab, even though a Flutter
+ * web build is one of the better previews there is.
  */
 export function pubspecPaths(tree: FileTreeNode): string[] {
   const paths: string[] = [];
@@ -283,7 +292,7 @@ function childDirNames(tree: FileTreeNode, projectDir: string): string[] {
 /**
  * A Flutter app as a preview candidate.
  *
- * Chrome is a first-class Flutter device, so the browser build needs no
+ * The web target is first-class in Flutter, so the browser build needs no
  * extra packages — only that the project has web scaffolding at all. A repo
  * created with `--platforms android,ios` has no web/ directory, and
  * `flutter create . --platforms web` adds one without touching the rest,
@@ -315,6 +324,13 @@ async function flutterCandidate(
   // A fixed port, because Flutter picks a random one otherwise and the
   // preview would have nothing to point at.
   const port = 5799;
+  // `-d chrome` is the documented Flutter web command and the wrong one
+  // here: it launches a real Chrome window and drives the app from there,
+  // leaving Atelier's pane pointed at a server that only exists inside
+  // Flutter's own browser session. `-d web-server` serves the identical
+  // build over http and opens nothing, so the iframe is the app. The cost
+  // is hot reload — web-server keeps hot restart on save, not stateful
+  // hot reload — which is the right trade for a preview that stays put.
 
   return {
     // Below a browser-first app, above nothing: same rule as the JS
@@ -327,7 +343,7 @@ async function flutterCandidate(
       framework: "Flutter (web)",
       packageManager: "npm",
       script: null,
-      command: `flutter run -d chrome --web-port ${port}`,
+      command: `flutter run -d web-server --web-hostname localhost --web-port ${port}`,
       defaultUrl: `http://localhost:${port}`,
       storageKey: previewStorageKey(workspaceRoot, projectDir),
       storybook: false,

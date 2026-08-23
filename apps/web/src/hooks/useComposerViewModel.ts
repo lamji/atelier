@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { MarkdownFile, ModelOption, SlashCommand } from "@atelier/protocol";
 import {
   composePromptFilePrompt,
@@ -6,6 +6,7 @@ import {
   newId,
 } from "@atelier/shared";
 import { bridge } from "@/services/bridge-client";
+import { captureActivePreviewContext } from "@/services/preview-context";
 import { useConnectionStore } from "@/state/connection.store";
 import { useSessionsStore, type SessionVm } from "@/state/sessions.store";
 import { useMarkdownStore } from "@/state/markdown.store";
@@ -301,38 +302,47 @@ export function useComposerViewModel(): ComposerViewModel {
     ? (drafts[selectedId] ?? EMPTY_COMPOSER_DRAFT)
     : EMPTY_COMPOSER_DRAFT;
   const { input, attachments, images } = draft;
-  const setInput = useCallback(
-    (value: string) => {
-      if (!selectedId) return;
-      setDrafts((prev) => {
-        const current = prev[selectedId] ?? EMPTY_COMPOSER_DRAFT;
-        return { ...prev, [selectedId]: { ...current, input: value } };
-      });
-    },
-    [selectedId]
-  );
+  // The setters must stay referentially stable: addImage/addImages/
+  // removeImage/addAttachment and the screenshot listener capture them
+  // once with [] deps, so a setter that changes identity with selectedId
+  // leaves them holding the mount-time closure — which still sees the
+  // null selectedId of first render and drops every write on the floor.
+  // Read the current chat from a ref instead; isolation is preserved
+  // because the ref is rewritten on every render.
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const setInput = useCallback((value: string) => {
+    const id = selectedIdRef.current;
+    if (!id) return;
+    setDrafts((prev) => {
+      const current = prev[id] ?? EMPTY_COMPOSER_DRAFT;
+      return { ...prev, [id]: { ...current, input: value } };
+    });
+  }, []);
   const setAttachments = useCallback(
     (update: string[] | ((current: string[]) => string[])) => {
-      if (!selectedId) return;
+      const id = selectedIdRef.current;
+      if (!id) return;
       setDrafts((prev) => {
-        const current = prev[selectedId] ?? EMPTY_COMPOSER_DRAFT;
+        const current = prev[id] ?? EMPTY_COMPOSER_DRAFT;
         const attachments =
           typeof update === "function" ? update(current.attachments) : update;
-        return { ...prev, [selectedId]: { ...current, attachments } };
+        return { ...prev, [id]: { ...current, attachments } };
       });
     },
-    [selectedId]
+    []
   );
   const setImages = useCallback(
     (update: PendingImage[] | ((current: PendingImage[]) => PendingImage[])) => {
-      if (!selectedId) return;
+      const id = selectedIdRef.current;
+      if (!id) return;
       setDrafts((prev) => {
-        const current = prev[selectedId] ?? EMPTY_COMPOSER_DRAFT;
+        const current = prev[id] ?? EMPTY_COMPOSER_DRAFT;
         const images = typeof update === "function" ? update(current.images) : update;
-        return { ...prev, [selectedId]: { ...current, images } };
+        return { ...prev, [id]: { ...current, images } };
       });
     },
-    [selectedId]
+    []
   );
   const [error, setError] = useState<string | null>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
@@ -477,6 +487,7 @@ export function useComposerViewModel(): ComposerViewModel {
         body = composePromptFilePrompt(clipPromptFile(content), text, note);
       }
 
+      const activePreviewContext = await captureActivePreviewContext();
       const previewUrls = Array.from(
         new Set(
           images.flatMap((image) => (image.sourceUrl ? [image.sourceUrl] : []))
@@ -487,6 +498,7 @@ export function useComposerViewModel(): ComposerViewModel {
         attachments.length > 0
           ? `Attached files:\n${attachments.map((path) => `- ${path}`).join("\n")}`
           : "",
+        activePreviewContext ?? "",
         previewUrls.length > 0
           ? `Screenshot context:\n${previewUrls
               .map((url) => `- Current page preview URL: ${url}`)

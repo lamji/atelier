@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { stripHiddenContext } from "@atelier/shared";
 import { bridge } from "@/services/bridge-client";
 import {
   loadExecutionTimeline,
@@ -114,7 +115,9 @@ export function useSessionsViewModel() {
           taskId: m.taskId,
           createdAt: m.createdAt,
           role: m.role,
-          text: m.text,
+          // Defensive: turns sent before the preview block was marked hidden
+          // still carry the DOM dump in their stored user message.
+          text: stripHiddenContext(m.text),
           logTopic: m.logTopic,
           logDetail: m.logDetail,
           diff: m.diff,

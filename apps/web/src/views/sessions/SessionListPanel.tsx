@@ -298,7 +298,7 @@ function SessionRow(props: {
 }
 
 /** Inline title editor: Enter commits, Escape and blur abandon. */
-function RenameField(props: {
+export function RenameField(props: {
   initial: string;
   onCommit: (title: string) => void;
   onCancel: () => void;

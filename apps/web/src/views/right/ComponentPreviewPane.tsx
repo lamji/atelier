@@ -432,15 +432,22 @@ export function ComponentPreviewPane({
           // A terminal can still be restarted when its history is unavailable.
         }
         if (cancelled) return;
-        const historyMatchesRenderer =
-          historyUrl && new URL(historyUrl).origin === window.location.origin;
-        if (!historyUrl || historyMatchesRenderer) {
-          setMessage("Preview terminal found, but no running server was detected. Start it again.");
-          setLoading(false);
-          return;
+        let recoveredUrl: URL;
+        try {
+          recoveredUrl = new URL(historyUrl ?? nextAddress);
+          if (recoveredUrl.origin === window.location.origin) {
+            recoveredUrl = new URL(next.defaultUrl);
+          }
+        } catch {
+          recoveredUrl = new URL(next.defaultUrl);
         }
 
-        const normalizedAddress = historyUrl.replace(/\/$/, "");
+        // Terminal history is bounded, and Expo's startup URL can scroll out
+        // while later "Web Bundled" lines prove the process is still alive.
+        // Probe the remembered/default runtime address before declaring the
+        // existing preview dead; the readiness effect below confirms it over
+        // HTTP and reports a stale terminal after its normal timeout.
+        const normalizedAddress = recoveredUrl.href.replace(/\/$/, "");
         setAddress(normalizedAddress);
         setMessage("Checking the existing preview server…");
         setLoading(false);
@@ -524,13 +531,31 @@ export function ComponentPreviewPane({
       ? `${runtime.prepareCommand} && ${command}`
       : command;
 
-    // The desktop dev process exposes its own renderer port through this
-    // environment variable. It belongs to Atelier, not to apps launched from
-    // the preview terminal; leaking it makes Vite reuse Atelier's occupied
-    // port with strictPort enabled and the preview command exits immediately.
+    /*
+     * The environment the preview server starts in, and the two things
+     * wrong with inheriting it as-is.
+     *
+     * ATELIER_WEB_PORT is the desktop dev process advertising its own
+     * renderer port. It belongs to Atelier, not to apps launched from the
+     * preview terminal; leaking it makes Vite reuse Atelier's occupied port
+     * with strictPort enabled and the preview command exits immediately.
+     *
+     * BROWSER=none is the answer to a dev server that opens a system
+     * browser on boot. Expo's `--web`, Ionic, Create React App and any
+     * Vite config with `server.open` all do it, and the result is the app
+     * running in Chrome while Atelier's pane waits beside it — the preview
+     * is supposed to be in the pane. Vite, CRA and Expo (through
+     * better-opn) each read this variable and skip the launch.
+     *
+     * Both are set as shell state rather than as a one-command `env`
+     * prefix, because `chained` can be "install web deps && start server":
+     * a prefix would only reach the install and the server — the process
+     * that actually opens the browser and binds the port — would run with
+     * the environment untouched.
+     */
     const isolatedCommand = windows
-      ? `Remove-Item Env:ATELIER_WEB_PORT -ErrorAction SilentlyContinue; ${chained}`
-      : `env -u ATELIER_WEB_PORT ${chained}`;
+      ? `Remove-Item Env:ATELIER_WEB_PORT -ErrorAction SilentlyContinue; $env:BROWSER='none'; ${chained}`
+      : `unset ATELIER_WEB_PORT; export BROWSER=none; ${chained}`;
 
     previewUrlRef.current = null;
     setPreviewUrl(null);
@@ -894,6 +919,57 @@ export function ComponentPreviewPane({
     width: Math.floor(deviceWidth * viewportScale),
     height: Math.floor(deviceHeight * viewportScale),
   };
+  /**
+   * A laptop is the screen Atelier is already running on, so a small bezelled
+   * laptop drawn inside the pane spends the page's space on a picture of a
+   * lid. Laptop therefore drops the frame and takes the whole canvas: the
+   * iframe keeps the exact 1440 CSS px width a real laptop reports, so
+   * breakpoints still behave, and its height is whatever the pane can show at
+   * that scale — full bleed, no letterboxing. Tablet and mobile keep their
+   * frames, where the device shape is the thing being previewed.
+   */
+  const frameless = viewport === "laptop";
+  const framelessScale =
+    frameless && previewCanvasSize.width > 0
+      ? previewCanvasSize.width / VIEWPORTS.laptop.width
+      : 1;
+  const screenScale = frameless ? framelessScale : 1;
+  const screenSize = frameless
+    ? {
+        width: VIEWPORTS.laptop.width,
+        height:
+          previewCanvasSize.height > 0
+            ? Math.round(previewCanvasSize.height / framelessScale)
+            : VIEWPORTS.laptop.height,
+      }
+    : { width: viewportConfig.width, height: viewportConfig.height };
+
+  /** One screen for both branches: only the chrome around it differs. */
+  const previewScreen = previewUrl ? (
+    <>
+      {loading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/85">
+          <Loader2 className="h-5 w-5 animate-spin text-primary/70" />
+          <span className="ml-2 text-xs text-muted-foreground">Loading preview…</span>
+        </div>
+      )}
+      <iframe
+        key={frameKey}
+        title={`${runtime.projectName} page preview`}
+        src={previewUrl}
+        className="border-0 bg-white"
+        style={{
+          width: screenSize.width,
+          height: screenSize.height,
+          transform: `scale(${screenScale})`,
+          transformOrigin: "top left",
+        }}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox"
+        allow="clipboard-read; clipboard-write"
+        onLoad={() => setLoading(false)}
+      />
+    </>
+  ) : null;
 
   return (
     <div className="flex h-full flex-col bg-muted/15">
@@ -970,7 +1046,7 @@ export function ComponentPreviewPane({
           className="hidden shrink-0 font-mono text-[10px] text-muted-foreground xl:inline"
           aria-live="polite"
         >
-          {viewportConfig.width} × {viewportConfig.height}
+          {screenSize.width} × {screenSize.height}
         </span>
         <Button
           type="button"
@@ -1032,7 +1108,12 @@ export function ComponentPreviewPane({
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1 overflow-hidden p-3">
+      <div
+        className={cn(
+          "relative min-h-0 flex-1 overflow-hidden",
+          frameless && previewUrl ? "p-0" : "p-3"
+        )}
+      >
         <div
           ref={previewCanvasRef}
           className="relative flex h-full w-full items-center justify-center overflow-hidden"
@@ -1244,79 +1325,64 @@ export function ComponentPreviewPane({
             </div>
           )}
           {previewUrl ? (
-            <div
-              className="relative shrink-0 transition-[width,height] duration-200"
-              style={{
-                width: displayedDevice.width,
-                height: displayedDevice.height,
-              }}
-            >
+            frameless ? (
               <div
-                className={cn(
-                  "absolute left-0 top-0 border border-black/70 bg-zinc-900 shadow-2xl",
-                  viewport === "laptop" && "bg-gradient-to-b from-zinc-700 to-zinc-950",
-                  viewport === "tablet" && "bg-gradient-to-br from-zinc-700 to-zinc-950",
-                  viewport === "mobile" && "bg-black"
-                )}
+                ref={previewScreenRef}
+                className="relative h-full w-full overflow-hidden bg-white"
+              >
+                {previewScreen}
+              </div>
+            ) : (
+              <div
+                className="relative shrink-0 transition-[width,height] duration-200"
                 style={{
-                  width: deviceWidth,
-                  height: deviceHeight,
-                  borderRadius: viewportConfig.frame.radius,
-                  transform: `scale(${viewportScale})`,
-                  transformOrigin: "top left",
+                  width: displayedDevice.width,
+                  height: displayedDevice.height,
                 }}
               >
                 <div
-                  ref={previewScreenRef}
-                  className="absolute overflow-hidden bg-white"
+                  className={cn(
+                    "absolute left-0 top-0 border border-black/70 bg-zinc-900 shadow-2xl",
+                    viewport === "tablet" && "bg-gradient-to-br from-zinc-700 to-zinc-950",
+                    viewport === "mobile" && "bg-black"
+                  )}
                   style={{
-                    left: viewportConfig.frame.left,
-                    top: viewportConfig.frame.top,
-                    width: viewportConfig.width,
-                    height: viewportConfig.height,
-                    borderRadius: viewportConfig.frame.screenRadius,
+                    width: deviceWidth,
+                    height: deviceHeight,
+                    borderRadius: viewportConfig.frame.radius,
+                    transform: `scale(${viewportScale})`,
+                    transformOrigin: "top left",
                   }}
                 >
-                  {loading && (
-                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/85">
-                      <Loader2 className="h-5 w-5 animate-spin text-primary/70" />
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        Loading preview…
-                      </span>
-                    </div>
-                  )}
-                  <iframe
-                    key={frameKey}
-                    title={`${runtime.projectName} page preview`}
-                    src={previewUrl}
-                    className="h-full w-full border-0 bg-white"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
-                    allow="clipboard-read; clipboard-write"
-                    onLoad={() => setLoading(false)}
-                  />
-                </div>
+                  <div
+                    ref={previewScreenRef}
+                    className="absolute overflow-hidden bg-white"
+                    style={{
+                      left: viewportConfig.frame.left,
+                      top: viewportConfig.frame.top,
+                      width: viewportConfig.width,
+                      height: viewportConfig.height,
+                      borderRadius: viewportConfig.frame.screenRadius,
+                    }}
+                  >
+                    {previewScreen}
+                  </div>
 
-                {viewport === "laptop" && (
-                  <>
-                    <span className="absolute left-1/2 top-1 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-black/80 ring-1 ring-white/10" />
-                    <span className="absolute bottom-0 left-0 h-[18px] w-full rounded-b-[11px] bg-gradient-to-b from-zinc-700 to-zinc-900" />
-                    <span className="absolute bottom-0 left-1/2 h-1.5 w-[18%] -translate-x-1/2 rounded-t-md bg-zinc-500/70" />
-                  </>
-                )}
-                {viewport === "tablet" && (
-                  <>
-                    <span className="absolute left-1/2 top-2 h-2 w-2 -translate-x-1/2 rounded-full bg-black ring-1 ring-white/10" />
-                    <span className="absolute bottom-2 left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full border border-zinc-500" />
-                  </>
-                )}
-                {viewport === "mobile" && (
-                  <>
-                    <span className="absolute left-1/2 top-[20px] z-20 h-7 w-24 -translate-x-1/2 rounded-full bg-black shadow-sm" />
-                    <span className="absolute bottom-[18px] left-1/2 z-20 h-1 w-28 -translate-x-1/2 rounded-full bg-white/80 shadow" />
-                  </>
-                )}
+                  {viewport === "tablet" && (
+                    <>
+                      <span className="absolute left-1/2 top-2 h-2 w-2 -translate-x-1/2 rounded-full bg-black ring-1 ring-white/10" />
+                      <span className="absolute bottom-2 left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full border border-zinc-500" />
+                    </>
+                  )}
+                  {viewport === "mobile" && (
+                    <>
+                      <span className="absolute left-1/2 top-[20px] z-20 h-7 w-24 -translate-x-1/2 rounded-full bg-black shadow-sm" />
+                      <span className="absolute bottom-[18px] left-1/2 z-20 h-1 w-28 -translate-x-1/2 rounded-full bg-white/80 shadow" />
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
+            )
           ) : (
             <div className="m-auto w-full max-w-lg rounded-xl border border-border/70 bg-card p-6 shadow-sm">
               <div className="flex items-start gap-3">

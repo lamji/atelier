@@ -5,10 +5,15 @@ import { join } from "node:path";
 import type {
   GitConflictFile,
   GitFlowInfo,
+  GitForge,
+  GitForgeAuthSource,
+  GitForgeStatus,
   GitOpResult,
   GitPullMode,
+  GitPullRequest,
   GitRefs,
 } from "@atelier/protocol";
+import { clearForgeAuth, forgeAuth, type ForgeAuth } from "./forge-auth.js";
 import type { GitService } from "./git-service.js";
 
 /**
@@ -482,6 +487,411 @@ export async function remoteBranches(root: string): Promise<string[]> {
     .split("\n")
     .map((line) => line.split("refs/heads/")[1]?.trim())
     .filter((name): name is string => Boolean(name));
+}
+
+/** What `git.pullRequests` hands back — see the method's contract. */
+export interface PullRequestList {
+  requests: GitPullRequest[];
+  forge: GitForge | null;
+  /** Legacy shorthand for `status === "ok"`. */
+  available: boolean;
+  reason?: string;
+  status: GitForgeStatus;
+  source?: GitForgeAuthSource;
+  repo?: string;
+  host?: string;
+  login?: string;
+  branch?: string;
+}
+
+/** Open requests are polled; a wall of them helps nobody, so cap the list. */
+const MAX_PULL_REQUESTS = 30;
+
+/** A hung socket must not outlive the poll round that opened it. */
+const FORGE_HTTP_TIMEOUT_MS = 10_000;
+
+/**
+ * Open pull/merge requests for `origin`, read with whichever credential
+ * the user already has — the forge CLI, a token in the environment, or
+ * git's own credential helper (see `forge-auth.ts`). Nothing is stored
+ * and nothing is asked for: if the checkout can push, this can read.
+ *
+ * This runs on a timer, so every way it can come up empty is reported as
+ * a `status` rather than thrown — a signed-out CLI would otherwise raise
+ * the same alert every poll for as long as the panel is open. The status
+ * matters more than the sentence beside it: only `signed-out` means the
+ * user has anything to do about it.
+ */
+export async function pullRequests(root: string): Promise<PullRequestList> {
+  const branch = await currentBranch(root).catch(() => "");
+  const remote = await originRepo(root).catch(() => null);
+  if (!remote) {
+    return {
+      requests: [],
+      forge: null,
+      available: false,
+      status: "no-remote",
+      reason: "This checkout has no origin remote.",
+    };
+  }
+  const forge: GitForge | null = /github/i.test(remote.host)
+    ? "github"
+    : /gitlab/i.test(remote.host)
+      ? "gitlab"
+      : null;
+  if (!forge) {
+    return {
+      requests: [],
+      forge: null,
+      available: false,
+      status: "no-forge",
+      host: remote.host,
+      reason: `${remote.host} is not GitHub or GitLab.`,
+    };
+  }
+  const repo = `${remote.owner}/${remote.name}`;
+  const list = await listRequests(root, forge, remote, repo);
+  return {
+    ...list,
+    forge,
+    branch,
+    repo,
+    host: remote.host,
+    available: list.status === "ok",
+    requests: list.requests.map((r) => ({ ...r, mine: r.head === branch })),
+  };
+}
+
+/** One forge's answer, before the caller stamps repo/branch/host on it. */
+interface ForgeList {
+  requests: GitPullRequest[];
+  status: GitForgeStatus;
+  reason?: string;
+  source?: GitForgeAuthSource;
+  login?: string;
+}
+
+/**
+ * The credential ladder.
+ *
+ * The forge CLI goes first because it is the only cheap source of the CI
+ * rollup — one call carries `statusCheckRollup`, where REST would need a
+ * second call per request. Everything after it exists so that a missing
+ * or signed-out CLI is never mistaken for a missing login: the user who
+ * can push has a credential somewhere, and `signed-out` is only reached
+ * once every one of those places has come up empty.
+ */
+async function listRequests(
+  root: string,
+  forge: GitForge,
+  remote: RemoteRepo,
+  repo: string
+): Promise<ForgeList> {
+  const cli =
+    forge === "github"
+      ? await githubPullRequests(root, repo)
+      : await gitlabMergeRequests(root);
+  if (cli.status === "ok") return cli;
+
+  const auth = await forgeAuth(root, forge, remote.host);
+  if (!auth) {
+    return {
+      requests: [],
+      status: "signed-out",
+      reason: `No ${forge === "github" ? "GitHub" : "GitLab"} credential found — not in ${
+        forge === "github" ? "gh" : "glab"
+      }, the environment, or git's credential helper.`,
+    };
+  }
+  const rest =
+    forge === "github"
+      ? await githubRequestsRest(remote, repo, auth)
+      : await gitlabRequestsRest(remote, repo, auth);
+  // A rejected token is worth re-probing for: the one we cached may be a
+  // stale `gh` token while the credential helper holds a working one.
+  if (rest.status === "denied") clearForgeAuth(remote.host);
+  return rest;
+}
+
+/**
+ * GitHub's REST list, spent with whatever credential answered. It cannot
+ * carry the check rollup (that is a call per request), so this is the
+ * rescue path rather than the default — the rows simply lose their CI
+ * chip when `gh` is not the one answering.
+ */
+async function githubRequestsRest(
+  remote: RemoteRepo,
+  repo: string,
+  auth: ForgeAuth
+): Promise<ForgeList> {
+  const api = /^(www\.)?github\.com$/i.test(remote.host)
+    ? "https://api.github.com"
+    : `https://${remote.host}/api/v3`;
+  const res = await forgeFetch(
+    `${api}/repos/${repo}/pulls?state=open&sort=updated&direction=desc` +
+      `&per_page=${MAX_PULL_REQUESTS}`,
+    {
+      Authorization: `Bearer ${auth.token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    }
+  );
+  if (res.status !== 200) return httpFailure(res, auth);
+  const requests = parseJsonArray(res.body).map((item) => {
+    const o = item as Record<string, unknown>;
+    const user = o["user"] as { login?: string } | null | undefined;
+    const head = o["head"] as { ref?: string } | null | undefined;
+    const base = o["base"] as { ref?: string } | null | undefined;
+    return {
+      number: numberOf(o["number"]),
+      title: String(o["title"] ?? ""),
+      author: user?.login ?? "",
+      head: String(head?.ref ?? ""),
+      base: String(base?.ref ?? ""),
+      url: String(o["html_url"] ?? ""),
+      draft: Boolean(o["draft"]),
+      updatedAt: String(o["updated_at"] ?? ""),
+    } satisfies GitPullRequest;
+  });
+  return ok(requests, auth);
+}
+
+/**
+ * GitLab's REST list. The token is offered as `PRIVATE-TOKEN` first
+ * (what a PAT wants) and retried as a bearer, because a credential
+ * helper hands back an OAuth token that only the second form accepts.
+ */
+async function gitlabRequestsRest(
+  remote: RemoteRepo,
+  repo: string,
+  auth: ForgeAuth
+): Promise<ForgeList> {
+  const url =
+    `https://${remote.host}/api/v4/projects/${encodeURIComponent(repo)}` +
+    `/merge_requests?state=opened&order_by=updated_at&per_page=${MAX_PULL_REQUESTS}`;
+  let res = await forgeFetch(url, { "PRIVATE-TOKEN": auth.token });
+  if (res.status === 401) {
+    res = await forgeFetch(url, { Authorization: `Bearer ${auth.token}` });
+  }
+  if (res.status !== 200) return httpFailure(res, auth);
+  const requests = parseJsonArray(res.body).map((item) => {
+    const o = item as Record<string, unknown>;
+    const author = o["author"] as { username?: string } | null | undefined;
+    return {
+      number: numberOf(o["iid"] ?? o["number"]),
+      title: String(o["title"] ?? ""),
+      author: author?.username ?? "",
+      head: String(o["source_branch"] ?? ""),
+      base: String(o["target_branch"] ?? ""),
+      url: String(o["web_url"] ?? ""),
+      draft: Boolean(o["draft"] ?? o["work_in_progress"]),
+      updatedAt: String(o["updated_at"] ?? ""),
+    } satisfies GitPullRequest;
+  });
+  return ok(requests, auth);
+}
+
+function ok(requests: GitPullRequest[], auth: ForgeAuth): ForgeList {
+  return {
+    requests,
+    status: "ok",
+    source: auth.source,
+    ...(auth.login ? { login: auth.login } : {}),
+  };
+}
+
+/** One fetch that cannot throw and cannot hang. */
+async function forgeFetch(
+  url: string,
+  headers: Record<string, string>
+): Promise<{ status: number; body: string }> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), FORGE_HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "atelier", ...headers },
+      signal: abort.signal,
+    });
+    return { status: res.status, body: await res.text() };
+  } catch (err) {
+    // status 0 = never reached the forge: offline, DNS, proxy, timeout.
+    return { status: 0, body: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * An HTTP answer that was not a list. Only a rejected credential is
+ * allowed to read as "denied" — everything else is an error, so the pane
+ * never offers a sign-in for a problem signing in cannot fix.
+ */
+function httpFailure(
+  res: { status: number; body: string },
+  auth: ForgeAuth
+): ForgeList {
+  const from = sourceLabel(auth.source);
+  if (res.status === 401 || res.status === 403) {
+    return {
+      requests: [],
+      status: "denied",
+      reason: `The ${from} credential was rejected (HTTP ${res.status}).`,
+    };
+  }
+  if (res.status === 404) {
+    return {
+      requests: [],
+      status: "denied",
+      reason: `This repository is not visible to the ${from} credential.`,
+    };
+  }
+  return {
+    requests: [],
+    status: "error",
+    reason: res.status
+      ? `The forge answered HTTP ${res.status}.`
+      : shortReason(res.body),
+  };
+}
+
+/** The credential source in the words the status strip uses. */
+function sourceLabel(source: GitForgeAuthSource): string {
+  return source === "env"
+    ? "environment"
+    : source === "credential-helper"
+      ? "git credential"
+      : "CLI";
+}
+
+/**
+ * `gh pr list --json`. A non-zero exit is not a verdict — it means only
+ * that gh could not answer; the ladder above tries the other credentials
+ * before anyone is told they are signed out.
+ */
+async function githubPullRequests(
+  root: string,
+  repo: string
+): Promise<ForgeList> {
+  const fields =
+    "number,title,author,headRefName,baseRefName,url,isDraft,updatedAt," +
+    "reviewDecision,statusCheckRollup";
+  const probe = await capture(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      "open",
+      "--limit",
+      String(MAX_PULL_REQUESTS),
+      "--json",
+      fields,
+    ],
+    root
+  ).catch((err: NodeJS.ErrnoException) => ({
+    code: -1,
+    out: err.code === "ENOENT" ? "gh is not installed or not on PATH" : String(err),
+  }));
+  if (probe.code !== 0) {
+    return { requests: [], status: "error", reason: shortReason(probe.out) };
+  }
+  const raw = parseJsonArray(probe.out);
+  const requests = raw.map((item) => {
+    const o = item as Record<string, unknown>;
+    const author = o["author"] as { login?: string } | null | undefined;
+    return {
+      number: numberOf(o["number"]),
+      title: String(o["title"] ?? ""),
+      author: author?.login ?? "",
+      head: String(o["headRefName"] ?? ""),
+      base: String(o["baseRefName"] ?? ""),
+      url: String(o["url"] ?? ""),
+      draft: Boolean(o["isDraft"]),
+      updatedAt: String(o["updatedAt"] ?? ""),
+      ...(o["reviewDecision"]
+        ? { reviewDecision: String(o["reviewDecision"]) }
+        : {}),
+      ...rollupChecks(o["statusCheckRollup"]),
+    } satisfies GitPullRequest;
+  });
+  return { requests, status: "ok", source: "cli" };
+}
+
+/** `glab mr list -F json`, run in the checkout so glab resolves the project. */
+async function gitlabMergeRequests(root: string): Promise<ForgeList> {
+  const probe = await capture(
+    "glab",
+    ["mr", "list", "--per-page", String(MAX_PULL_REQUESTS), "-F", "json"],
+    root
+  ).catch((err: NodeJS.ErrnoException) => ({
+    code: -1,
+    out:
+      err.code === "ENOENT" ? "glab is not installed or not on PATH" : String(err),
+  }));
+  if (probe.code !== 0) {
+    return { requests: [], status: "error", reason: shortReason(probe.out) };
+  }
+  const raw = parseJsonArray(probe.out);
+  const requests = raw.map((item) => {
+    const o = item as Record<string, unknown>;
+    const author = o["author"] as { username?: string } | null | undefined;
+    return {
+      number: numberOf(o["iid"] ?? o["number"]),
+      title: String(o["title"] ?? ""),
+      author: author?.username ?? "",
+      head: String(o["source_branch"] ?? ""),
+      base: String(o["target_branch"] ?? ""),
+      url: String(o["web_url"] ?? ""),
+      draft: Boolean(o["draft"] ?? o["work_in_progress"]),
+      updatedAt: String(o["updated_at"] ?? ""),
+    } satisfies GitPullRequest;
+  });
+  return { requests, status: "ok", source: "cli" };
+}
+
+/**
+ * gh's per-PR check contexts as one word. A single failure decides the
+ * whole rollup — that is what the user has to go and look at — and
+ * anything still running keeps it "pending" rather than calling it green.
+ */
+function rollupChecks(
+  rollup: unknown
+): { checks?: GitPullRequest["checks"] } {
+  if (!Array.isArray(rollup) || rollup.length === 0) return {};
+  let pending = false;
+  for (const entry of rollup) {
+    const c = entry as Record<string, unknown>;
+    const state = String(c["conclusion"] ?? c["state"] ?? "").toUpperCase();
+    if (["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "FAILED"].includes(state)) {
+      return { checks: "failing" };
+    }
+    if (!state || ["PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "RUNNING"].includes(state)) {
+      pending = true;
+    }
+  }
+  return { checks: pending ? "pending" : "passing" };
+}
+
+function parseJsonArray(out: string): unknown[] {
+  try {
+    const parsed: unknown = JSON.parse(out || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function numberOf(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** CLI failure text is a paragraph; the pane has room for a sentence. */
+function shortReason(out: string): string {
+  const line = out.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return line.replace(/^ERROR:\s*/i, "").slice(0, 160) || "The CLI returned no output.";
 }
 
 /**

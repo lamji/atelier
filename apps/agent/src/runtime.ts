@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type pino from "pino";
 import type { AgentConfig } from "./config/agent-config.js";
@@ -109,6 +110,7 @@ import { VectorStore } from "./knowledge/embeddings/vector-store.js";
 import { LessonStore } from "./knowledge/lessons/lesson-store.js";
 import { registerKnowledgeTools } from "./tools/knowledge-tools.js";
 import { GlobalSessionStore } from "./context/global-session/index.js";
+import { FeatureContextStore } from "./context/feature-context/index.js";
 import { registerPlanTools } from "./tools/plan-tools.js";
 import { PlanTracker } from "./orchestrator/plan-tracker.js";
 import {
@@ -196,6 +198,14 @@ export function createAgentRuntime(
   initUsage(settings);
 
   const guard = new PathGuard(config.workspaceRoot);
+  // Provider-owned skills live outside the active workspace, but their
+  // instructions are part of the agent runtime rather than project data.
+  // Register only the conventional skill directories, read-only: this lets
+  // Claude and Codex open SKILL.md and its supporting files without opening
+  // the rest of the user's home directory or widening writes.
+  for (const provider of [".agents", ".codex", ".claude"]) {
+    guard.allowRead(path.join(os.homedir(), provider, "skills"));
+  }
   const ig = new WorkspaceIgnore(config.workspaceRoot, settings.get().ignoreGlobs);
   const files = new FileService(guard, ig, bus);
   const tools = new ToolRegistry(bus);
@@ -560,6 +570,9 @@ export function createAgentRuntime(
     vectors,
     () => generation.bump()
   );
+  // /context materializes a bounded call/import closure from the same
+  // tree-sitter tables the knowledge tools use, then binds it to one chat.
+  const featureContexts = new FeatureContextStore(db);
   const sharedSessions = new SharedSessionContextBuilder({
     conversations,
     summaries: taskSummaries,
@@ -594,6 +607,7 @@ export function createAgentRuntime(
           twinStmt.get(`${root}/%`, `%/${basename}`) !== undefined ||
           fileNamedUnder(path.join(config.workspaceRoot, root), basename, ig)
       ),
+    readReference: (candidatePath) => guard.isReadReference(candidatePath),
     onEscape: (taskId, escapedPath, tool) => {
       log.info({ taskId, path: escapedPath, tool }, "scope lock let a path through");
       bus.publish(
@@ -639,6 +653,7 @@ export function createAgentRuntime(
     summaries: taskSummaries,
     sharedSessions,
     globalSessions,
+    featureContexts,
     codexTools,
     skillLoader,
     conversations,

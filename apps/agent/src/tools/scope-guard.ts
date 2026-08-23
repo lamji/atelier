@@ -54,6 +54,12 @@ export class ScopeGuard {
        * there is none, an existing file outside the lock is unambiguous.
        */
       twinExists: (roots: string[], basename: string) => boolean;
+      /**
+       * True only for an external path the runtime registered as a read-only
+       * reference (for example, an installed skill). These reads are runtime
+       * context and must not become part of a project/folder lock.
+       */
+      readReference?: (candidatePath: string) => boolean;
       /** Told when a task is let outside its lock, for the rail and log. */
       onEscape?: (taskId: string, path: string, tool: string) => void;
     } = { workspaceRoot: process.cwd(), twinExists: () => false }
@@ -107,7 +113,7 @@ export class ScopeGuard {
   }
 
   private existsInWorkspace(rel: string): boolean {
-    if (rel.includes("..")) return false;
+    if (path.isAbsolute(rel) || rel.includes("..")) return false;
     try {
       return fs.statSync(path.resolve(this.deps.workspaceRoot, rel)).isFile();
     } catch {
@@ -129,6 +135,7 @@ export class ScopeGuard {
       if (
         typeof value === "string" &&
         !inScope(scope, value) &&
+        !this.isRegisteredRead(name, value) &&
         !this.mayEscape(taskId, scope, name, value)
       ) {
         throw new Error(denial(name, value, scope, this.hasTwin(scope, value)));
@@ -145,6 +152,7 @@ export class ScopeGuard {
           if (
             typeof entryPath === "string" &&
             !inScope(scope, entryPath) &&
+            !this.isRegisteredRead(name, entryPath) &&
             !this.mayEscape(taskId, scope, name, entryPath)
           ) {
             throw new Error(
@@ -175,6 +183,13 @@ export class ScopeGuard {
     }
 
     return input;
+  }
+
+  private isRegisteredRead(tool: string, target: string): boolean {
+    return (
+      (tool === "read_file" || tool === "read_many_files") &&
+      this.deps.readReference?.(target) === true
+    );
   }
 
   private hasTwin(scope: SessionScope, target: string): boolean {

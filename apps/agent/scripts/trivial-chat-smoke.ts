@@ -12,8 +12,10 @@ import { fileURLToPath } from "node:url";
 import { isTrivialChat } from "../src/orchestrator/trivial-chat.js";
 import {
   ANSWER_ONLY_RULES,
+  FAST_RULES,
   readIntent,
 } from "../src/orchestrator/pipeline-executor.js";
+import { DIRECT_RULES } from "../src/orchestrator/direct-mode.js";
 
 const CASES: Array<[string, boolean]> = [
   ["hi", true],
@@ -57,6 +59,8 @@ const INTENT: Array<[string, "question" | "work"]> = [
   ["did you follow the task?", "question"],
   ["explain the 422 middleware", "question"],
   ["show me where the resolver lives", "question"],
+  ["how should I fix the requests pane?", "question"],
+  ["is there a better way to redesign the listing?", "question"],
   // Imperative in form or in effect: these still owe a change. A question
   // mark is punctuation, not intent.
   ["fix the Spend by Region card", "work"],
@@ -64,6 +68,14 @@ const INTENT: Array<[string, "question" | "work"]> = [
   ["remove the retry in tag coverage", "work"],
   ["apply that to all api", "work"],
   ["add the same approach to gke-kpi", "work"],
+  [
+    "is there a better way of listing? not a traditional but unique listing. redesign it with a better ui ux",
+    "work",
+  ],
+  [
+    "Do antyhtnng to redesign this and after that fix what was in the image",
+    "work",
+  ],
 ];
 
 for (const [prompt, want] of INTENT) {
@@ -76,6 +88,18 @@ check(
   ANSWER_ONLY_RULES.includes("set_plan") &&
     ANSWER_ONLY_RULES.includes("DO NOT IMPLEMENT")
 );
+
+for (const [name, rules] of [
+  ["normal", FAST_RULES],
+  ["direct", DIRECT_RULES],
+] as const) {
+  check(
+    `${name} rules exempt skills and user-named external reads`,
+    rules.includes("Installed skills are runtime instructions") &&
+      rules.includes("authorized read-only reference") &&
+      !rules.includes("Requests to work outside the workspace must be declined")
+  );
+}
 
 // The block only helps if the pipeline actually withholds the execution
 // contract from a question turn; requiring a plan is what makes the model

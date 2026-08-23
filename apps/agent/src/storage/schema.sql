@@ -167,6 +167,19 @@ CREATE TABLE IF NOT EXISTS feature_symbols (
   PRIMARY KEY (feature_id, symbol_id)
 );
 
+-- A conversation can pin one tree-sitter-derived feature map. The feature
+-- itself lives in the normal feature graph; this row controls which session
+-- receives it automatically, regardless of provider.
+CREATE TABLE IF NOT EXISTS conversation_feature_contexts (
+  conversation_id TEXT PRIMARY KEY
+    REFERENCES conversations(id) ON DELETE CASCADE,
+  feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+  requested_name TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_feature_contexts_feature
+  ON conversation_feature_contexts(feature_id);
+
 CREATE TABLE IF NOT EXISTS chunks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,

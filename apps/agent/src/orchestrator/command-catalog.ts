@@ -7,6 +7,16 @@ import {
   GLOBAL_SESSION_COMMAND_ID,
   GLOBAL_SESSION_COMMAND_NAME,
 } from "../context/global-session/index.js";
+import {
+  DEBUG_REPORT_PROMPT,
+  DEBUG_REPORT_TEMPLATE,
+  FEATURE_CONTEXT_COMMAND_ID,
+  FEATURE_CONTEXT_COMMAND_NAME,
+  FEATURE_CONTEXT_DEBUG_COMMAND_ID,
+  FEATURE_CONTEXT_DEBUG_COMMAND_NAME,
+  FEATURE_CONTEXT_UPDATE_COMMAND_ID,
+  FEATURE_CONTEXT_UPDATE_COMMAND_NAME,
+} from "../context/feature-context/index.js";
 
 const GLOBAL_SESSION_COMMAND: SlashCommand = {
   id: GLOBAL_SESSION_COMMAND_ID,
@@ -22,6 +32,68 @@ const GLOBAL_SESSION_DETAIL = `# Global session\n\n` +
   `Use /global-session to promote this conversation into the experimental ` +
   `cross-session knowledge index. The selected AI names it from the session. ` +
   `Running it again updates the same stable memory instead of duplicating it.`;
+
+const FEATURE_CONTEXT_COMMAND: SlashCommand = {
+  id: FEATURE_CONTEXT_COMMAND_ID,
+  name: FEATURE_CONTEXT_COMMAND_NAME,
+  description:
+    "Equip this conversation with one end-to-end tree-sitter feature flow.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+const FEATURE_CONTEXT_DETAIL = `# Feature context\n\n` +
+  `Use /context <feature> after naming a conversation for that work, for ` +
+  `example /context login. Atelier maps matching indexed symbols and files, ` +
+  `walks calls and imports end to end, and pins that compiled feature to this ` +
+  `conversation. Claude and Codex receive the same map on every later send. ` +
+  `Run /context_update to refresh it after a large code change.`;
+
+const FEATURE_CONTEXT_UPDATE_COMMAND: SlashCommand = {
+  id: FEATURE_CONTEXT_UPDATE_COMMAND_ID,
+  name: FEATURE_CONTEXT_UPDATE_COMMAND_NAME,
+  description:
+    "Rebuild this conversation's pinned feature flow from the current index.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+const FEATURE_CONTEXT_UPDATE_DETAIL = `# Update feature context\n\n` +
+  `Use /context_update when the code behind a pinned feature has moved on. ` +
+  `It recompiles the map this conversation is already pinned to — no feature ` +
+  `name to retype — waiting for indexing to catch up first, and reports the ` +
+  `files that joined or left the flow. Pass a name (/context_update billing) ` +
+  `to point the same conversation at a different feature. Nothing is pinned ` +
+  `yet? Run /context <feature> first.`;
+
+const FEATURE_CONTEXT_DEBUG_COMMAND: SlashCommand = {
+  id: FEATURE_CONTEXT_DEBUG_COMMAND_ID,
+  name: FEATURE_CONTEXT_DEBUG_COMMAND_NAME,
+  description:
+    "Report a defect on a form: steps to replicate, expected result, screenshots.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+/**
+ * The detail IS the editor's starting document. A surface that can open a
+ * markdown editor on a command loads this and gets the form; one that only
+ * renders the detail as markdown still shows the user exactly what to fill
+ * in. Either way there is one copy of the template.
+ */
+const FEATURE_CONTEXT_DEBUG_DETAIL = `# Debug report\n\n` +
+  `Use /context_debug to hand Atelier a defect it can act on. The command ` +
+  `answers with the report below; edit it and send it back under the same ` +
+  `command. ${DEBUG_REPORT_PROMPT} Steps and expectation are then debugged ` +
+  `against this conversation's pinned feature, so run /context <feature> ` +
+  `first if the defect is somewhere the conversation has not been pointed ` +
+  `at yet.\n\n` +
+  "```markdown\n" +
+  DEBUG_REPORT_TEMPLATE +
+  "```\n";
 
 /**
  * Discovers the app-owned skills plus the Claude Code-compatible commands
@@ -41,6 +113,9 @@ export function listSlashCommands(
 ): SlashCommand[] {
   const disabled = new Set(disabledSkills);
   const commands: SlashCommand[] = [
+    FEATURE_CONTEXT_COMMAND,
+    FEATURE_CONTEXT_UPDATE_COMMAND,
+    FEATURE_CONTEXT_DEBUG_COMMAND,
     GLOBAL_SESSION_COMMAND,
     ...scanSkills(bundledSkillsRoot(), "app"),
     ...scanBase(os.homedir(), "user"),
@@ -60,6 +135,21 @@ export function readSlashCommandDetail(
 ): { command: SlashCommand; content: string } | null {
   if (id === GLOBAL_SESSION_COMMAND_ID) {
     return { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL };
+  }
+  if (id === FEATURE_CONTEXT_COMMAND_ID) {
+    return { command: FEATURE_CONTEXT_COMMAND, content: FEATURE_CONTEXT_DETAIL };
+  }
+  if (id === FEATURE_CONTEXT_UPDATE_COMMAND_ID) {
+    return {
+      command: FEATURE_CONTEXT_UPDATE_COMMAND,
+      content: FEATURE_CONTEXT_UPDATE_DETAIL,
+    };
+  }
+  if (id === FEATURE_CONTEXT_DEBUG_COMMAND_ID) {
+    return {
+      command: FEATURE_CONTEXT_DEBUG_COMMAND,
+      content: FEATURE_CONTEXT_DEBUG_DETAIL,
+    };
   }
   const disabled = new Set(disabledSkills);
   for (const entry of scanSkillDetails(bundledSkillsRoot(), "app")) {
@@ -104,6 +194,15 @@ export function listSlashCommandDetails(
 ): Array<{ command: SlashCommand; content: string }> {
   const disabled = new Set(disabledSkills);
   const details = [
+    { command: FEATURE_CONTEXT_COMMAND, content: FEATURE_CONTEXT_DETAIL },
+    {
+      command: FEATURE_CONTEXT_UPDATE_COMMAND,
+      content: FEATURE_CONTEXT_UPDATE_DETAIL,
+    },
+    {
+      command: FEATURE_CONTEXT_DEBUG_COMMAND,
+      content: FEATURE_CONTEXT_DEBUG_DETAIL,
+    },
     { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL },
     ...scanSkillDetails(bundledSkillsRoot(), "app"),
     ...scanDetails(os.homedir(), "user"),

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from "react";
 import { OpeningScreen } from "@/screens/OpeningScreen";
 import { LoginScreen } from "@/screens/LoginScreen";
+import { SessionConflictModal } from "@/screens/SessionConflictModal";
 import { WelcomeScreen } from "@/screens/WelcomeScreen";
 import { WorkspaceSkeleton } from "@/screens/WorkspaceSkeleton";
 import { ErrorBoundary } from "@/views/shell/ErrorBoundary";
@@ -77,7 +78,14 @@ export function App() {
   }, [canResume, projects, user]);
 
   if (authLoading) return <Shell />;
-  if (!user) return <LoginScreen />;
+  if (!user) {
+    return (
+      <>
+        <LoginScreen />
+        <SessionConflictModal />
+      </>
+    );
+  }
 
   // Hold the frame until the registry answers — a sub-second IPC round trip
   // that does not deserve a loading screen of its own.

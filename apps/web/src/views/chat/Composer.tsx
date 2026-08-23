@@ -19,6 +19,7 @@ import {
   Palette,
   Plus,
   ServerCog,
+  SlidersHorizontal,
   Sparkles,
   Square,
   X,
@@ -185,12 +186,19 @@ function effortLabel(level: string): string {
  * The chat composer: the textarea, its "/" and "@" menus, the staged
  * attachments and images, and the model/effort/plan/vibe picks.
  *
- * Owns the draft itself (via {@link useComposerViewModel}) and takes NO
- * props, so a keystroke re-renders this subtree and nothing else — the
- * transcript, the process rail, and the rest of the console stay put.
+ * Owns the draft itself (via {@link useComposerViewModel}); its only prop
+ * changes presentation for the narrow preview sidebar. A keystroke still
+ * re-renders this subtree and nothing else — the transcript, the process
+ * rail, and the rest of the console stay put.
  */
-export const Composer = memo(function Composer() {
+export interface ComposerProps {
+  /** Uses container-friendly spacing and wrapping in the preview sidebar. */
+  compact?: boolean;
+}
+
+export const Composer = memo(function Composer(props: ComposerProps) {
   const vm = useComposerViewModel();
+  const compact = props.compact === true;
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -479,8 +487,54 @@ export const Composer = memo(function Composer() {
     }
   };
 
+  /** Per-turn switches: pills in the full composer, rows in the sidebar. */
+  const turnItems: CheckItem[] = [
+    {
+      key: "plan",
+      label: "Plan",
+      hint: "The agent proposes a plan for approval before touching files",
+      checked: vm.planMode,
+      onChange: vm.setPlanMode,
+    },
+    {
+      key: "knowledge",
+      label: "Knowledge",
+      hint: "System knowledge: retrieval, impact, plan, review and session memory",
+      checked: vm.systemKnowledge,
+      onChange: vm.setSystemKnowledge,
+    },
+  ];
+  const modeItems: CheckItem[] = [
+    {
+      key: "vibe",
+      label: "Vibe code",
+      hint: "Owns the feature end to end — UX, edge cases, polish",
+      checked: vm.vibe,
+      onChange: vm.changeVibe,
+    },
+    {
+      key: "autoReview",
+      label: "Auto review",
+      hint: "An independent reviewer checks the changes and can send them back for a fix",
+      checked: vm.autoReview,
+      onChange: vm.changeAutoReview,
+    },
+    {
+      key: "autoValidate",
+      label: "Auto validate",
+      hint: "Runs this project's typecheck, lint and test scripts after the changes land — the turn waits for them",
+      checked: vm.autoValidate,
+      onChange: vm.changeAutoValidate,
+    },
+  ];
+
   return (
-    <div className="mx-auto w-full max-w-4xl pb-3">
+    <div
+      className={cn(
+        "mx-auto w-full max-w-4xl",
+        compact ? "px-2 pb-2" : "pb-3"
+      )}
+    >
       <NoProviderModal
         open={providerAlert}
         onClose={() => setProviderAlert(false)}
@@ -589,7 +643,8 @@ export const Composer = memo(function Composer() {
               // The transcript sits on a white card now, so the composer can
               // no longer separate itself by being white too — it takes a
               // hairline and a shadow instead, and deepens both on focus.
-              "rounded-3xl border border-border bg-card shadow-sm",
+              compact ? "rounded-2xl" : "rounded-3xl",
+              "border border-border bg-card shadow-sm",
               "transition-[box-shadow,border-color]",
               "focus-within:border-primary/40 focus-within:shadow-card",
               dragging && "ring-2 ring-primary/60"
@@ -607,8 +662,10 @@ export const Composer = memo(function Composer() {
                 value={vm.input}
                 placeholder={
                   vm.busy
-                    ? "Agent is working — send to queue a follow-up"
-                    : "Describe a task, paste or drop a screenshot…"
+                    ? "Agent is working — queue a follow-up"
+                    : compact
+                      ? "Message the agent…"
+                      : "Describe a task, paste or drop a screenshot…"
                 }
                 disabled={!vm.connected}
                 rows={1}
@@ -619,7 +676,7 @@ export const Composer = memo(function Composer() {
                 onSelect={syncCaret}
                 onPaste={onPaste}
                 className={cn(
-                  "max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5",
+                  "max-h-40 min-h-[36px] min-w-0 flex-1 resize-none bg-transparent px-2 py-1.5",
                   "text-sm text-foreground outline-none placeholder:text-muted-foreground/70",
                   "disabled:opacity-60"
                 )}
@@ -696,13 +753,23 @@ export const Composer = memo(function Composer() {
                 </button>
               </div>
             )}
-            <div className="flex items-center gap-1">
+            {/* The sidebar column is ~230px wide, so wrapping this row fanned
+                the picks out over three stacked lines. Compact holds ONE
+                line instead: attach, the model (which takes the slack and
+                truncates), the prompt glyph, and a single Options drop-up
+                carrying reasoning, plan, knowledge and the modes. */}
+            <div
+              className={cn(
+                "flex items-center gap-1",
+                compact && "min-w-0 gap-0.5"
+              )}
+            >
               <Tooltip content="Attach an image (or paste / drop a screenshot)">
                 <button
                   type="button"
                   disabled={!vm.connected}
                   onClick={() => fileInputRef.current?.click()}
-                  className="tool-btn disabled:opacity-35"
+                  className="tool-btn shrink-0 disabled:opacity-35"
                 >
                   <Paperclip className="h-3.5 w-3.5" />
                 </button>
@@ -718,6 +785,7 @@ export const Composer = memo(function Composer() {
                 disabled={vm.busy}
                 className={cn(
                   "flex min-w-0 items-center gap-1",
+                  compact && "flex-1 gap-0.5",
                   "disabled:pointer-events-none disabled:opacity-40"
                 )}
               >
@@ -725,6 +793,7 @@ export const Composer = memo(function Composer() {
                   icon={agentRoleIcon(vm.model)}
                   tooltip="Model"
                   value={vm.model}
+                  grow={compact}
                   options={modelOptions(vm.models)}
                   onChange={(v) => vm.changeModel(v as ModelChoice)}
                   shortLabel={(label) => label.replace(/\s*\(recommended\)/i, "")}
@@ -734,68 +803,71 @@ export const Composer = memo(function Composer() {
                     return true;
                   }}
                 />
-                <ComposerMenu
-                  icon={Gauge}
-                  tooltip="Reasoning effort"
-                  value={vm.effort}
-                  options={reasoningOptions}
-                  onChange={(v) => vm.changeEffort(v as EffortChoice)}
-                  shortLabel={(label) => label.replace(/^Reasoning:\s*/i, "")}
-                />
-                <PromptFileMenu
-                  value={vm.promptFile}
-                  files={vm.promptFiles}
-                  onChange={vm.setPromptFile}
-                />
-                <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
-                <ComposerToggle
-                  icon={ClipboardList}
-                  label="Plan"
-                  active={vm.planMode}
-                  onToggle={vm.setPlanMode}
-                  tooltip="Plan mode: the agent proposes a plan for approval before touching files"
-                />
-                <ComposerToggle
-                  icon={Brain}
-                  label="Knowledge"
-                  active={vm.systemKnowledge}
-                  onToggle={vm.setSystemKnowledge}
-                  tooltip={
-                    vm.systemKnowledge
-                      ? "System knowledge ON: retrieval, impact, plan, review and session memory"
-                      : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
-                  }
-                />
-                <ComposerChecks
-                  icon={Sparkles}
-                  label="Modes"
-                  tooltip="How the agent works on this project"
-                  items={[
-                    {
-                      key: "vibe",
-                      label: "Vibe code",
-                      hint: "Owns the feature end to end — UX, edge cases, polish",
-                      checked: vm.vibe,
-                      onChange: vm.changeVibe,
-                    },
-                    {
-                      key: "autoReview",
-                      label: "Auto review",
-                      hint: "An independent reviewer checks the changes and can send them back for a fix",
-                      checked: vm.autoReview,
-                      onChange: vm.changeAutoReview,
-                    },
-                    {
-                      key: "autoValidate",
-                      label: "Auto validate",
-                      hint: "Runs this project's typecheck, lint and test scripts after the changes land — the turn waits for them",
-                      checked: vm.autoValidate,
-                      onChange: vm.changeAutoValidate,
-                    },
-                  ]}
-                />
+                {compact ? (
+                  <>
+                    <PromptFileMenu
+                      compact
+                      value={vm.promptFile}
+                      files={vm.promptFiles}
+                      onChange={vm.setPromptFile}
+                    />
+                    <ComposerOptions
+                      effort={vm.effort}
+                      effortOptions={reasoningOptions}
+                      onEffort={(v) => vm.changeEffort(v as EffortChoice)}
+                      switches={turnItems}
+                      modes={modeItems}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <ComposerMenu
+                      icon={Gauge}
+                      tooltip="Reasoning effort"
+                      value={vm.effort}
+                      options={reasoningOptions}
+                      onChange={(v) => vm.changeEffort(v as EffortChoice)}
+                      shortLabel={(label) => label.replace(/^Reasoning:\s*/i, "")}
+                    />
+                    <PromptFileMenu
+                      value={vm.promptFile}
+                      files={vm.promptFiles}
+                      onChange={vm.setPromptFile}
+                    />
+                    <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
+                    <ComposerToggle
+                      icon={ClipboardList}
+                      label="Plan"
+                      active={vm.planMode}
+                      onToggle={vm.setPlanMode}
+                      tooltip="Plan mode: the agent proposes a plan for approval before touching files"
+                    />
+                    <ComposerToggle
+                      icon={Brain}
+                      label="Knowledge"
+                      active={vm.systemKnowledge}
+                      onToggle={vm.setSystemKnowledge}
+                      tooltip={
+                        vm.systemKnowledge
+                          ? "System knowledge ON: retrieval, impact, plan, review and session memory"
+                          : "System knowledge OFF: a plain Claude/Codex turn — no retrieval, impact or memory"
+                      }
+                    />
+                    <ComposerChecks
+                      icon={Sparkles}
+                      label="Modes"
+                      tooltip="How the agent works on this project"
+                      items={modeItems}
+                    />
+                  </>
+                )}
               </fieldset>
-              <span className="ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/50 min-[560px]:inline">
+              <span
+                className={cn(
+                  "ml-auto hidden whitespace-nowrap text-[10px] text-muted-foreground/50",
+                  !compact && "min-[560px]:inline"
+                )}
+              >
                 {vm.busy
                   ? "Locked while the turn runs"
                   : "Enter ↵ · Shift+Enter newline"}
@@ -1145,37 +1217,150 @@ function ComposerChecks(props: {
             )}
           >
             {props.items.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={item.checked}
-                onClick={() => item.onChange(!item.checked)}
-                className={cn(
-                  "flex w-full items-start gap-2 rounded-md px-2 py-1.5",
-                  "text-left transition-colors hover:bg-accent/60"
-                )}
-              >
-                <span
-                  className={cn(
-                    "mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center",
-                    "rounded border transition-colors",
-                    item.checked
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border"
-                  )}
-                >
-                  {item.checked && <Check className="h-2.5 w-2.5" />}
-                </span>
-                <span className="min-w-0">
-                  <span className="block text-[11px] text-foreground">
-                    {item.label}
-                  </span>
-                  <span className="block text-[10px] leading-tight text-muted-foreground">
-                    {item.hint}
-                  </span>
-                </span>
-              </button>
+              <CheckRow key={item.key} item={item} />
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** One tickable line of a drop-up: box, label, and the why underneath. */
+function CheckRow(props: { item: CheckItem }) {
+  const { item } = props;
+  return (
+    <button
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={item.checked}
+      onClick={() => item.onChange(!item.checked)}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-md px-2 py-1.5",
+        "text-left transition-colors hover:bg-accent/60"
+      )}
+    >
+      <span
+        className={cn(
+          "mt-px flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+          "rounded border transition-colors",
+          item.checked
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-border"
+        )}
+      >
+        {item.checked && <Check className="h-2.5 w-2.5" />}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[11px] text-foreground">{item.label}</span>
+        <span className="block text-[10px] leading-tight text-muted-foreground">
+          {item.hint}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * The preview sidebar's single settings drop-up. Reasoning, the per-turn
+ * switches and the working modes all live behind one pill there, because a
+ * ~230px column cannot hold six pills without folding into three rows —
+ * and a folded row of pills is what the composer looked like before.
+ */
+function ComposerOptions(props: {
+  effort: string;
+  effortOptions: PickerOption[];
+  onEffort: (value: string) => void;
+  /** Picks that apply to the next turn (plan, knowledge). */
+  switches: CheckItem[];
+  /** How the agent works on the project (vibe, review, validate). */
+  modes: CheckItem[];
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissOnOutside(open, rootRef, () => setOpen(false));
+
+  // The pill has no room for the picks themselves, so it carries a count:
+  // anything switched on here stays visible while the panel is shut.
+  const onCount =
+    [...props.switches, ...props.modes].filter((item) => item.checked).length +
+    (props.effort === "default" ? 0 : 1);
+
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <Tooltip content="Reasoning, plan, knowledge and modes">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-haspopup="true"
+          aria-expanded={open}
+          className={cn(
+            "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+            "text-[11px] font-medium transition-colors",
+            onCount > 0
+              ? "bg-primary/15 text-primary"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            open && onCount === 0 && "bg-accent text-foreground"
+          )}
+        >
+          <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
+          {onCount > 0 && <span className="tabular-nums">{onCount}</span>}
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </Tooltip>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full right-0 z-50 mb-1 w-60 max-w-[80vw]",
+              "rounded-lg border border-border bg-card p-1 shadow-pop"
+            )}
+          >
+            <p className="px-2 pb-1 pt-1 text-[10px] font-semibold text-muted-foreground/60">
+              Reasoning
+            </p>
+            <div className="flex flex-wrap items-center gap-1 px-1">
+              {props.effortOptions.map((option) =>
+                isSeparator(option) ? null : (
+                  <button
+                    key={optionValue(option)}
+                    type="button"
+                    onClick={() => props.onEffort(optionValue(option))}
+                    className={cn(
+                      "rounded-md px-2 py-1 text-[10px] transition-colors",
+                      optionValue(option) === props.effort
+                        ? "bg-primary/15 text-primary"
+                        : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                    )}
+                  >
+                    {optionLabel(option).replace(/^Reasoning:\s*/i, "")}
+                  </button>
+                )
+              )}
+            </div>
+            <div className="my-1 h-px bg-border" />
+            <p className="px-2 pb-0.5 text-[10px] font-semibold text-muted-foreground/60">
+              This turn
+            </p>
+            {props.switches.map((item) => (
+              <CheckRow key={item.key} item={item} />
+            ))}
+            <div className="my-1 h-px bg-border" />
+            <p className="px-2 pb-0.5 text-[10px] font-semibold text-muted-foreground/60">
+              Modes
+            </p>
+            {props.modes.map((item) => (
+              <CheckRow key={item.key} item={item} />
             ))}
           </motion.div>
         )}
@@ -1221,6 +1406,8 @@ function ComposerMenu(props: {
   onChange: (value: string) => void;
   /** Compresses the selected label for the trigger pill. */
   shortLabel?: (label: string) => string;
+  /** Fills the leftover row width instead of hugging its label. */
+  grow?: boolean;
   /**
    * Runs before the menu opens; returning true swallows the click. Lets a
    * caller answer the click with an explanation when the list would be
@@ -1255,7 +1442,10 @@ function ComposerMenu(props: {
   const label = props.shortLabel ? props.shortLabel(rawLabel) : rawLabel;
 
   return (
-    <div ref={rootRef} className="relative">
+    <div
+      ref={rootRef}
+      className={cn("relative", props.grow && "min-w-0 flex-1")}
+    >
       <Tooltip content={props.tooltip}>
         <button
           type="button"
@@ -1269,11 +1459,19 @@ function ComposerMenu(props: {
             "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
             "text-[11px] text-muted-foreground transition-colors",
             "hover:bg-accent hover:text-foreground",
+            props.grow && "w-full min-w-0",
             open && "bg-accent text-foreground"
           )}
         >
-          <Icon className="h-3.5 w-3.5" />
-          <span className="max-w-[9rem] truncate">{label}</span>
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          <span
+            className={cn(
+              "truncate",
+              props.grow ? "min-w-0 flex-1 text-left" : "max-w-[9rem]"
+            )}
+          >
+            {label}
+          </span>
           <ChevronDown
             className={cn(
               "h-3 w-3 shrink-0 opacity-60 transition-transform",
@@ -1356,6 +1554,8 @@ function PromptFileMenu(props: {
   value: string;
   files: MarkdownFile[];
   onChange: (value: string) => void;
+  /** Sidebar width: a glyph until a prompt is actually picked. */
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -1429,8 +1629,9 @@ function PromptFileMenu(props: {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        title={selected?.title ?? "Prompt file"}
         className={cn(
-          "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+          "flex h-6 shrink-0 select-none items-center gap-1 rounded-md px-1.5",
           "text-[11px] outline-none transition-colors",
           selected
             ? "bg-primary/15 text-primary"
@@ -1438,16 +1639,27 @@ function PromptFileMenu(props: {
           open && !selected && "bg-accent text-foreground"
         )}
       >
-        <FileText className="h-3.5 w-3.5" />
-        <span className="max-w-[9rem] truncate">
-          {selected?.title ?? "Prompt"}
-        </span>
-        <ChevronDown
-          className={cn(
-            "h-3 w-3 shrink-0 opacity-60 transition-transform",
-            open && "rotate-180"
-          )}
-        />
+        <FileText className="h-3.5 w-3.5 shrink-0" />
+        {/* In the sidebar the pill is a glyph until a prompt is chosen: the
+            row has no width to spend on a label that says "none yet". */}
+        {(!props.compact || selected) && (
+          <span
+            className={cn(
+              "truncate",
+              props.compact ? "max-w-[4rem]" : "max-w-[9rem]"
+            )}
+          >
+            {selected?.title ?? "Prompt"}
+          </span>
+        )}
+        {!props.compact && (
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        )}
       </button>
 
       <AnimatePresence>
@@ -1458,7 +1670,10 @@ function PromptFileMenu(props: {
             exit={{ opacity: 0, y: 4 }}
             transition={{ duration: 0.12 }}
             className={cn(
-              "absolute bottom-full left-0 z-50 mb-1 w-64 max-w-[80vw]",
+              "absolute bottom-full z-50 mb-1 w-64 max-w-[80vw]",
+              // Rightmost pill in the sidebar row — anchor right so the
+              // panel grows inward instead of off the panel edge.
+              props.compact ? "right-0" : "left-0",
               "overflow-hidden rounded-lg border border-border bg-card p-1 shadow-pop"
             )}
           >

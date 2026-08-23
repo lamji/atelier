@@ -10,6 +10,7 @@ import {
   llmRequestDetail,
   llmRequestSummary,
   newId,
+  stripHiddenContext,
 } from "@atelier/shared";
 import type { EventBus, PublishedEvent } from "../events/event-bus.js";
 import type { AttachmentStore } from "../context/attachments/attachment-store.js";
@@ -207,11 +208,16 @@ export class Orchestrator {
       throw new Error(`Unknown conversation: ${conversationId}`);
     }
     const busy = this.busyWith(conversationId);
+    // What the user actually wrote. The run keeps `prompt` whole — hidden
+    // blocks (the live page preview's DOM, CSS and console evidence) are
+    // there for the model — but nothing a human reads is allowed to show
+    // them: not the history title, not the transcript, not the queue notice.
+    const visible = stripHiddenContext(prompt);
     // A note-driven prompt IS the note's whole text, so naming the
     // conversation after it would drop the file's body into the history
     // list. trackNote names it after the note's heading instead.
     if (conversation.title === "New conversation" && !opts.promptFile) {
-      this.conversations.setTitle(conversationId, conversationTitle(prompt));
+      this.conversations.setTitle(conversationId, conversationTitle(visible));
     }
     const taskId = newId("task");
 
@@ -229,7 +235,7 @@ export class Orchestrator {
       conversationId,
       taskId,
       role: "user",
-      text: prompt,
+      text: visible,
       createdAt: Date.now(),
     });
     // Fire and forget: the note is a side record, and startTask must stay
@@ -244,7 +250,7 @@ export class Orchestrator {
         "task.queued",
         {
           conversationId,
-          prompt,
+          prompt: visible,
           position: this.queue.filter(
             (task) => task.conversationId === conversationId
           ).length,
@@ -524,6 +530,7 @@ export class Orchestrator {
       turnLimitContinuations: 0,
       turnLimitStalls: 0,
       wiki: [],
+      featureContext: null,
       record: newTaskRecord(),
     };
 

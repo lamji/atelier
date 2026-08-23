@@ -33,6 +33,8 @@ export interface SelectProps {
   disabled?: boolean;
   className?: string;
   menuClassName?: string;
+  /** Optional right-click action for non-separator options. */
+  onOptionContextMenu?: (option: SelectOption, event: MouseEvent) => void;
 }
 
 /**
@@ -47,6 +49,7 @@ export function Select({
   disabled,
   className,
   menuClassName,
+  onOptionContextMenu,
 }: SelectProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -186,6 +189,12 @@ export function Select({
                       onClick={() => {
                         onChange(option.value);
                         setOpen(false);
+                      }}
+                      onContextMenu={(event) => {
+                        if (!onOptionContextMenu) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onOptionContextMenu(option, event.nativeEvent);
                       }}
                       className={cn(
                         "flex w-full items-start gap-2 rounded-md",

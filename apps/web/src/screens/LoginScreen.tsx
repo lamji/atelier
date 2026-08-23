@@ -1,13 +1,20 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
 import { supabase, supabaseConfigured } from "@/lib/supabase";
+import { useAuthStore } from "@/state/auth.store";
 import { BareTitleBar } from "@/views/shell/WindowControls";
 
 export function LoginScreen() {
+  const authLoading = useAuthStore((state) => state.loading);
+  const notice = useAuthStore((state) => state.notice);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!authLoading) setBusy(false);
+  }, [authLoading]);
 
   const signInWithGoogle = async () => {
     if (!supabase) return;
@@ -63,6 +70,15 @@ export function LoginScreen() {
             </div>
           ) : (
             <div className="flex flex-col gap-4">
+              {notice && (
+                <p
+                  role="alert"
+                  className="rounded-xl bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                >
+                  {notice}
+                </p>
+              )}
+
               {error && (
                 <p role="alert" className="rounded-xl bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   {error}

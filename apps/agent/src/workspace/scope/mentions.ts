@@ -32,13 +32,21 @@ const TRAILING = /[.,;:!?)\]}'"]+$/;
 const BARE_PATH = /(?:^|[\s"'`(\[])([A-Za-z0-9._-]+(?:[/\\][A-Za-z0-9._-]+)+)/g;
 
 /**
+ * Absolute paths explicitly typed by the user, quoted or unquoted. These
+ * are references, not workspace scope: resolving them here lets the runtime
+ * grant the exact path without opening its parent directory.
+ */
+const ABSOLUTE_PATH =
+  /(?:^|[\s(\[])(?:"([A-Za-z]:[\\/][^"]+|\/[^"]+)"|'([A-Za-z]:[\\/][^']+|\/[^']+)'|`([A-Za-z]:[\\/][^`]+|\/[^`]+)`|([A-Za-z]:[\\/][^\s"'`,;!?)}\]]+|\/[^\s"'`,;!?)}\]]+))/g;
+
+/**
  * Paths the user typed literally, without an "@".
  *
  * Naming a file IS pointing at it. Only "@" mentions used to register, so a
  * prompt like "update .atelier/foo.md" left the session's lock untouched and
- * the guard then refused to read the very file the request named. These do
- * not re-lock the session — they grant access to what was named, and
- * nothing else.
+ * the guard then refused to read the very file the request named. Workspace
+ * paths become per-turn grants; absolute external paths become exact read-only
+ * references. Neither form re-locks the session or opens a parent directory.
  */
 export function parseTypedPaths(
   prompt: string,
@@ -47,22 +55,30 @@ export function parseTypedPaths(
   const root = path.resolve(workspaceRoot);
   const found = new Set<string>();
 
-  for (const match of prompt.matchAll(BARE_PATH)) {
-    const raw = (match[1] ?? "").replace(TRAILING, "");
-    if (!raw || raw.includes("..")) continue;
-    const cleaned = toPosix(raw).replace(/\/+$/, "");
-    if (!cleaned) continue;
+  for (const pattern of [BARE_PATH, ABSOLUTE_PATH]) {
+    for (const match of prompt.matchAll(pattern)) {
+      const raw = (
+        match[1] ??
+        match[2] ??
+        match[3] ??
+        match[4] ??
+        ""
+      ).replace(TRAILING, "");
+      if (!raw || raw.includes("..")) continue;
+      const cleaned = toPosix(raw).replace(/\/+$/, "");
+      if (!cleaned) continue;
 
-    const abs = path.resolve(root, cleaned);
-    // Reference access is granted inside the workspace only; "@" remains
-    // the way to point at something outside it.
-    if (abs !== root && !abs.startsWith(root + path.sep)) continue;
-    try {
-      fs.statSync(abs);
-    } catch {
-      continue; // a path-shaped string that names nothing real
+      const abs = path.isAbsolute(cleaned)
+        ? path.resolve(cleaned)
+        : path.resolve(root, cleaned);
+      const outside = abs !== root && !abs.startsWith(root + path.sep);
+      try {
+        fs.statSync(abs);
+      } catch {
+        continue; // a path-shaped string that names nothing real
+      }
+      found.add(outside ? toPosix(abs) : cleaned);
     }
-    found.add(cleaned);
   }
   return [...found];
 }

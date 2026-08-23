@@ -18,6 +18,7 @@
     "smoke:modularity": "tsx scripts/modularity-smoke.ts",
     "smoke:pipeline": "tsx scripts/pipeline-smoke.ts",
     "smoke:context": "tsx scripts/context-smoke.ts",
+    "smoke:feature-context": "tsx scripts/feature-context-smoke.ts",
     "smoke:global-session": "tsx scripts/global-session-smoke.ts",
     "smoke:rules": "tsx scripts/user-rules-smoke.ts",
     "smoke:turn": "tsx scripts/turn-smoke.ts",

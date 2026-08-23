@@ -60,6 +60,41 @@ declare global {
     frameUrl: string | null;
   }
 
+  interface AtelierDesktopPreviewConsoleEntry {
+    level: "warning" | "error";
+    message: string;
+    source: string | null;
+    line: number | null;
+    timestamp: number;
+  }
+
+  interface AtelierDesktopPreviewInteractiveElement {
+    selector: string;
+    tag: string;
+    text: string;
+    ariaLabel: string | null;
+    role: string | null;
+    rect: { x: number; y: number; width: number; height: number };
+    style: {
+      color: string;
+      backgroundColor: string;
+      borderColor: string;
+      font: string;
+      display: string;
+      visibility: string;
+    };
+  }
+
+  interface AtelierDesktopPreviewContextResult {
+    url: string;
+    title: string;
+    html: string;
+    css: string;
+    interactive: AtelierDesktopPreviewInteractiveElement[];
+    console: AtelierDesktopPreviewConsoleEntry[];
+    capturedAt: number;
+  }
+
   interface AtelierDesktopUpdateStatus {
     current: string;
     latest: string | null;
@@ -106,6 +141,10 @@ declare global {
     captureRegion(
       request: AtelierDesktopCaptureRequest
     ): Promise<AtelierDesktopCaptureResult | null>;
+    /** Reads runtime evidence from the exact iframe displayed in Page preview. */
+    getPreviewContext(
+      previewUrl: string
+    ): Promise<AtelierDesktopPreviewContextResult | null>;
     /** Filesystem path of a dropped File (null if unavailable). */
     pathForFile(file: File): string | null;
     openExternal(url: string): Promise<void>;

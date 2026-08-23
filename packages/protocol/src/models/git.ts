@@ -170,6 +170,77 @@ export const GitOpResult = z.object({
 });
 export type GitOpResult = z.infer<typeof GitOpResult>;
 
+/** Which forge the `origin` remote points at — decides which CLI is asked. */
+export const GitForge = z.enum(["github", "gitlab"]);
+export type GitForge = z.infer<typeof GitForge>;
+
+/**
+ * Why the request list looks the way it does. Split out of the old
+ * `available: false` plus a prose `reason`, because the pane's next
+ * action differs per case and a sentence cannot be branched on: only
+ * `signed-out` may ever suggest signing in.
+ */
+export const GitForgeStatus = z.enum([
+  "ok",
+  /** No `origin` remote at all — nothing to ask about. */
+  "no-remote",
+  /** origin is neither GitHub nor GitLab; there is no list to show. */
+  "no-forge",
+  /** No credential anywhere we look — the one sign-in case. */
+  "signed-out",
+  /** A credential answered and the forge rejected it (401/403). */
+  "denied",
+  /** Something else broke: network, rate limit, a CLI crash. */
+  "error",
+]);
+export type GitForgeStatus = z.infer<typeof GitForgeStatus>;
+
+/**
+ * Which credential actually answered. Shown as a dot in the pane so
+ * "am I logged in?" is answerable at a glance — and so the wrong-account
+ * case (gh signed in as someone other than the push credential) is
+ * visible rather than inferred.
+ */
+export const GitForgeAuthSource = z.enum([
+  /** The forge's own CLI answered (`gh` / `glab`). */
+  "cli",
+  /** GITHUB_TOKEN / GH_TOKEN / GITLAB_TOKEN from the environment. */
+  "env",
+  /** A token handed over by the CLI, spent over REST. */
+  "cli-token",
+  /** git's own credential helper — the same login that pushes. */
+  "credential-helper",
+]);
+export type GitForgeAuthSource = z.infer<typeof GitForgeAuthSource>;
+
+/**
+ * One open pull request (GitHub) or merge request (GitLab). Deliberately
+ * the small common shape of both CLIs: everything richer differs per forge
+ * and the panel only ever shows a one-line row plus a couple of chips.
+ */
+export const GitPullRequest = z.object({
+  /** PR/MR number — the id the user actually says out loud. */
+  number: z.number(),
+  title: z.string(),
+  /** Login of whoever opened it, or "" when the CLI did not say. */
+  author: z.string(),
+  /** Source branch. */
+  head: z.string(),
+  /** Target branch. */
+  base: z.string(),
+  url: z.string(),
+  draft: z.boolean(),
+  /** ISO timestamp of the last update, for the relative age on the row. */
+  updatedAt: z.string(),
+  /** GitHub review state ("APPROVED", "CHANGES_REQUESTED", …) when known. */
+  reviewDecision: z.string().optional(),
+  /** Rolled-up CI state, normalised across forges. */
+  checks: z.enum(["passing", "failing", "pending"]).optional(),
+  /** True when this request's head branch is the current checkout's branch. */
+  mine: z.boolean().optional(),
+});
+export type GitPullRequest = z.infer<typeof GitPullRequest>;
+
 /** The step of the flow the agent tried to run on its own. */
 export const GitFlowOperation = z.enum(["commit", "push", "pr"]);
 export type GitFlowOperation = z.infer<typeof GitFlowOperation>;

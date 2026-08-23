@@ -4,12 +4,42 @@ import {
   GitCommit,
   GitConflictFile,
   GitFlowInfo,
+  GitForge,
+  GitForgeAuthSource,
+  GitForgeStatus,
   GitOpResult,
   GitPullMode,
+  GitPullRequest,
   GitRefs,
   GitRepo,
   GitStatus,
 } from "../models/git.js";
+
+/**
+ * The answer both `git.pullRequests` and `git.forgeConnect` give. Shared
+ * so the Connect button can drop its result straight into the pane's
+ * state without a second shape to reconcile.
+ */
+const GitPullRequestList = z.object({
+  requests: z.array(GitPullRequest),
+  /** null when origin is not a forge this can query. */
+  forge: GitForge.nullable(),
+  /** Kept for callers that only ask "is there a list?" — `status === "ok"`. */
+  available: z.boolean(),
+  /** Why the list is empty. Prose, for display only — branch on `status`. */
+  reason: z.string().optional(),
+  status: GitForgeStatus,
+  /** Which credential answered; absent when none did. */
+  source: GitForgeAuthSource.optional(),
+  /** "owner/name" on the forge, for the pane's status strip. */
+  repo: z.string().optional(),
+  /** Account the answering credential belongs to, when it named one. */
+  login: z.string().optional(),
+  /** Forge host, so a self-hosted GitLab names itself. */
+  host: z.string().optional(),
+  /** Branch the checkout is on, so the UI can mark "yours". */
+  branch: z.string().optional(),
+});
 
 export const gitMethods = {
   // Every checkout in the workspace. Empty only when there is genuinely no
@@ -174,6 +204,28 @@ export const gitMethods = {
       body: z.string(),
     }),
     result: z.object({ result: GitOpResult }),
+  },
+
+  /**
+   * Open pull requests (GitHub) or merge requests (GitLab) for `origin`,
+   * read through whichever credential answers first — the forge CLI, a
+   * token in the environment, or git's own credential helper. Polled by
+   * the panel, so nothing here throws: `status` says why the list is
+   * empty and the pane picks its next action from that.
+   */
+  "git.pullRequests": {
+    params: z.object({}).optional(),
+    result: GitPullRequestList,
+  },
+
+  /**
+   * Forget every cached forge token and probe the credentials again.
+   * What the pane's "Connect" button runs: the usual cause of a
+   * signed-out pane is a login that happened after the agent started.
+   */
+  "git.forgeConnect": {
+    params: z.object({}).optional(),
+    result: GitPullRequestList,
   },
 
   // ── Sync + merge-conflict resolution ──────────────────────────────────

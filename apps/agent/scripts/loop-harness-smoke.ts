@@ -15,6 +15,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ScopeGuard, fileNamedUnder } from "../src/tools/scope-guard.js";
+import { PathGuard } from "../src/workspace/path-guard.js";
+import type { Db } from "../src/storage/db.js";
+import type { WorkspaceProfile } from "../src/workspace/profile/types.js";
+import {
+  parseTypedPaths,
+  SessionScopeStore,
+} from "../src/workspace/scope/index.js";
 import {
   BlockerLedger,
   harnessPrompt,
@@ -39,10 +46,26 @@ function check(ok: boolean, label: string): void {
 
 function scopeGuard(): void {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-guard-"));
-  for (const rel of ["a/x.ts", "b/x.ts", "b/only.ts", "b/node_modules/pkg/only.ts"]) {
+  const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-skill-"));
+  const skillFile = path.join(skillRoot, "debugging", "SKILL.md");
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-user-ref-"));
+  const externalFile = path.join(externalRoot, "user files", "requirements.md");
+  for (const rel of [
+    "a/x.ts",
+    "a/SKILL.md",
+    "b/x.ts",
+    "b/only.ts",
+    "b/node_modules/pkg/only.ts",
+  ]) {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
     fs.writeFileSync(path.join(root, rel), "//");
   }
+  fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+  fs.writeFileSync(skillFile, "# Debugging");
+  fs.mkdirSync(path.dirname(externalFile), { recursive: true });
+  fs.writeFileSync(externalFile, "# Requirements");
+  const pathGuard = new PathGuard(root);
+  pathGuard.allowRead(skillRoot);
   const ignore = {
     ignoresAbsolute: (abs: string) => abs.includes("node_modules"),
   };
@@ -51,6 +74,7 @@ function scopeGuard(): void {
     workspaceRoot: root,
     twinExists: (roots, basename) =>
       roots.some((r) => fileNamedUnder(path.join(root, r), basename, ignore)),
+    readReference: (candidatePath) => pathGuard.isReadReference(candidatePath),
     onEscape: (_task, p, tool) => escapes.push(`${tool}:${p}`),
   });
   const scope = {
@@ -104,12 +128,65 @@ function scopeGuard(): void {
     "escaping the workspace is refused"
   );
   check(
+    refused(() => guard.check("read_file", { path: skillFile }, "t1")) === "" &&
+      refused(() =>
+        guard.check("read_many_files", { files: [{ path: skillFile }] }, "t1")
+      ) === "",
+    "registered skill references bypass the project lock for reads"
+  );
+  check(
+    pathGuard.toAbsolute(skillFile, "read") === path.resolve(skillFile) &&
+      refused(() => pathGuard.toAbsolute(skillFile, "write")) !== "" &&
+      refused(() => guard.check("replace_code", { path: skillFile }, "t1")) !== "",
+    "registered skill references stay read-only"
+  );
+
+  const externalPrompt = `read "${externalFile}"`;
+  const typedExternal = parseTypedPaths(externalPrompt, root);
+  let registered = "";
+  const fakeDb = {
+    prepare: () => ({ get: () => undefined, run: () => undefined }),
+  } as unknown as Db;
+  const scopeStore = new SessionScopeStore(fakeDb, root, {
+    allowRead: (candidate) => {
+      registered = candidate;
+      return pathGuard.allowRead(candidate);
+    },
+  });
+  scopeStore.resolve(
+    "external-ref",
+    externalPrompt,
+    { projects: [] } as unknown as WorkspaceProfile
+  );
+  check(
+    typedExternal.length === 1 &&
+      typedExternal[0] === toPosixPath(externalFile) &&
+      registered === toPosixPath(externalFile),
+    "an absolute path typed without @ is registered as an exact reference"
+  );
+  check(
+    refused(() => guard.check("read_file", { path: externalFile }, "t1")) === "" &&
+      pathGuard.toAbsolute(externalFile, "read") === path.resolve(externalFile),
+    "a user-named external file bypasses the project lock for reads"
+  );
+  check(
+    refused(() => guard.check("replace_code", { path: externalFile }, "t1")) !== "" &&
+      refused(() => pathGuard.toAbsolute(externalFile, "write")) !== "",
+    "a user-named external file remains read-only"
+  );
+  check(
     !fileNamedUnder(path.join(root, "b"), "nope.ts", ignore) &&
       fileNamedUnder(path.join(root, "b"), "only.ts", ignore),
     "fileNamedUnder walks the tree, skipping ignored folders"
   );
   guard.release("t1");
   fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(skillRoot, { recursive: true, force: true });
+  fs.rmSync(externalRoot, { recursive: true, force: true });
+}
+
+function toPosixPath(value: string): string {
+  return value.replace(/\\/g, "/");
 }
 
 function harness(): void {

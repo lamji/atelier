@@ -37,6 +37,8 @@ const QUESTIONS = [
   "what do you mean by this? and sample scenario?",
   "why is the residual harmless?",
   "how does the freeze interact with Redis?",
+  "how should I fix the requests pane?",
+  "is there a better way to redesign the listing?",
   "explain that last paragraph",
   // The bare confirmations that used to classify as work: no opener word,
   // just a question mark. Each one cost a full change turn.
@@ -54,6 +56,11 @@ const WORK = [
   // arrives too late for the openers to see it.
   "so fix the residual lag",
   "the login is broken, can you center it?",
+  // A question may lead into an imperative. The imperative wins because the
+  // autonomous timeline must implement it in this same turn.
+  "is there a better way of listing? not a traditional but unique listing. redesign it with a better ui ux",
+  "Do antyhtnng to redesign this and after that fix what was in the image",
+  "review this, then fix it",
 ];
 for (const prompt of QUESTIONS) {
   check(`question: "${prompt.slice(0, 34)}…"`, readIntent(prompt).kind === "question");

@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,6 +12,7 @@ import {
   ClipboardList,
   FileCheck2,
   Loader2,
+  Maximize2,
   Radar,
   FolderLock,
   History,
@@ -49,6 +51,8 @@ export interface ProcessCardProps {
   logs: ChatItemVm[];
   thinking: string;
   status: string;
+  /** Summarises the final report behind "Show more" in the preview sidebar. */
+  compact?: boolean;
 }
 
 /**
@@ -145,6 +149,7 @@ export const ProcessCard = memo(function ProcessCard(props: ProcessCardProps) {
           status={props.status}
           actions={props.actions}
           diffs={props.diffs}
+          compact={props.compact === true}
           openSteps={openSteps}
           onToggleStep={toggleStep}
         />
@@ -176,6 +181,7 @@ const WorkflowTimeline = memo(function WorkflowTimeline({
   status,
   actions,
   diffs,
+  compact,
   openSteps,
   onToggleStep,
 }: {
@@ -191,6 +197,7 @@ const WorkflowTimeline = memo(function WorkflowTimeline({
   status: string;
   actions: AgentAction[];
   diffs: LiveDiff[];
+  compact: boolean;
   openSteps: string[];
   onToggleStep: (stepId: string) => void;
 }) {
@@ -473,43 +480,185 @@ const WorkflowTimeline = memo(function WorkflowTimeline({
           </li>
         )}
         {!busy && (
-          <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-            <span
-              className={cn(
-                "relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full text-white",
-                frontendReviewFailed ? "bg-destructive" : "bg-success"
-              )}
-            >
-              {frontendReviewFailed ? (
-                <XCircle className="h-2.5 w-2.5" />
-              ) : (
-                <FileCheck2 className="h-2.5 w-2.5" />
-              )}
-            </span>
-            <div className="min-w-0 flex-1">
-              <span className="block text-[11px] font-semibold leading-[17px] text-foreground">
-                {frontendReview
-                  ? frontendReviewFailed
-                    ? "Review failed"
-                    : "Review passed"
-                  : "Report"}
-              </span>
-              {report.trim() ? (
-                <div className="chat-md mt-1 rounded-lg bg-muted/35 px-3 py-2 text-[11px] text-foreground/80">
-                  <Markdown remarkPlugins={[remarkGfm]}>{report}</Markdown>
-                </div>
-              ) : (
-                <p className="mt-1 text-[11px] text-muted-foreground/65">
-                  No final report was recorded for this request.
-                </p>
-              )}
-            </div>
-          </li>
+          <ReportRow
+            report={report}
+            frontendReview={frontendReview}
+            frontendReviewFailed={frontendReviewFailed}
+            compact={compact}
+          />
         )}
       </ol>
     </div>
   );
 });
+
+/**
+ * The turn's closing row.
+ *
+ * Full width the report prints inline, where there is room for it. In the
+ * preview sidebar (~230px) that same report is by far the tallest thing on
+ * the timeline and pushes everything it summarises off-screen, so compact
+ * keeps its opening line and moves the document itself behind "Show more".
+ */
+function ReportRow({
+  report,
+  frontendReview,
+  frontendReviewFailed,
+  compact,
+}: {
+  report: string;
+  frontendReview: boolean;
+  frontendReviewFailed: boolean;
+  compact: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const body = report.trim();
+  const title = frontendReview
+    ? frontendReviewFailed
+      ? "Review failed"
+      : "Review passed"
+    : "Report";
+
+  return (
+    <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+      <span
+        className={cn(
+          "relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full text-white",
+          frontendReviewFailed ? "bg-destructive" : "bg-success"
+        )}
+      >
+        {frontendReviewFailed ? (
+          <XCircle className="h-2.5 w-2.5" />
+        ) : (
+          <FileCheck2 className="h-2.5 w-2.5" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <span className="block text-[11px] font-semibold leading-[17px] text-foreground">
+          {title}
+        </span>
+        {!body ? (
+          <p className="mt-1 text-[11px] text-muted-foreground/65">
+            No final report was recorded for this request.
+          </p>
+        ) : compact ? (
+          <div className="mt-1 flex flex-col gap-1.5 rounded-lg bg-muted/35 px-2.5 py-2">
+            <p className="line-clamp-3 text-[11px] leading-relaxed text-foreground/80">
+              {reportSummary(body)}
+            </p>
+            <button
+              type="button"
+              onClick={() => setOpen(true)}
+              className={cn(
+                "flex w-full items-center justify-center gap-1 rounded-md bg-primary/10 px-2 py-1",
+                "text-[10px] font-semibold text-primary hover:bg-primary/20"
+              )}
+            >
+              <Maximize2 className="h-3 w-3 shrink-0" />
+              Show more
+            </button>
+          </div>
+        ) : (
+          <div className="chat-md mt-1 rounded-lg bg-muted/35 px-3 py-2 text-[11px] text-foreground/80">
+            <Markdown remarkPlugins={[remarkGfm]}>{report}</Markdown>
+          </div>
+        )}
+      </div>
+      <AnimatePresence>
+        {open && (
+          <ReportModal title={title} report={report} onClose={() => setOpen(false)} />
+        )}
+      </AnimatePresence>
+    </li>
+  );
+}
+
+/**
+ * The full report, over the whole window rather than the sidebar it was
+ * opened from. Mounted on `document.body`: the card above it is a framer
+ * `layout` element, and a transformed ancestor would anchor a fixed overlay
+ * to the card instead of to the viewport.
+ */
+function ReportModal({
+  title,
+  report,
+  onClose,
+}: {
+  title: string;
+  report: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      onClick={onClose}
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-6"
+    >
+      <motion.div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 8 }}
+        transition={{ type: "spring", stiffness: 300, damping: 28 }}
+        onClick={(event) => event.stopPropagation()}
+        className="modal-surface island flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden"
+      >
+        <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+            <FileCheck2 className="h-3.5 w-3.5" />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close the report"
+            className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <div className="chat-md min-h-0 flex-1 overflow-y-auto px-4 py-3 text-xs text-foreground/85">
+          <Markdown remarkPlugins={[remarkGfm]}>{report}</Markdown>
+        </div>
+      </motion.div>
+    </motion.div>,
+    document.body
+  );
+}
+
+/**
+ * The report's opening prose as plain text. Markdown markers are stripped
+ * rather than rendered: the preview is three clamped lines, and a heading or
+ * a bullet glyph there reads as a broken document instead of a summary.
+ */
+function reportSummary(report: string): string {
+  for (const raw of report.split("\n")) {
+    const line = raw.trim();
+    if (!line || /^([-*_])\1{2,}$/.test(line.replace(/\s/g, ""))) continue;
+    const text = line
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/^>\s*/, "")
+      .replace(/^[-*+]\s+/, "")
+      .replace(/^\d+[.)]\s+/, "")
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/[*_`~]/g, "")
+      .trim();
+    if (text) return text;
+  }
+  return report.trim();
+}
 
 function formatRequestTime(timestamp: number | null): string {
   if (timestamp === null) return "time unavailable";

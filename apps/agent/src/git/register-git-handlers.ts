@@ -1,6 +1,7 @@
 import type { Router } from "../bridge/router.js";
 import { generatePrDescription, suggestBranchName } from "./ai-drafts.js";
 import { generateCommitMessage } from "./commit-message.js";
+import { clearForgeAuth } from "./forge-auth.js";
 import type { GitService } from "./git-service.js";
 import * as ops from "./git-ops.js";
 
@@ -123,6 +124,18 @@ export function registerGitHandlers(
   router.register("git.remoteBranches", async () => ({
     branches: await ops.remoteBranches(git.root),
   }));
+
+  // Polled by the Requests pane: never throws on a missing/signed-out CLI,
+  // it comes back with a status and a reason to show instead.
+  router.register("git.pullRequests", () => ops.pullRequests(git.root));
+
+  // The pane's Connect button. Forgetting the cached tokens is the whole
+  // point: the usual cause of a signed-out pane is a `gh auth login` that
+  // happened after this agent started, which nothing else would notice.
+  router.register("git.forgeConnect", () => {
+    clearForgeAuth();
+    return ops.pullRequests(git.root);
+  });
 
   router.register("git.checkConflicts", (params) =>
     ops.checkConflicts(git.root, params.base)

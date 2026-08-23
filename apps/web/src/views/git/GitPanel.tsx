@@ -7,6 +7,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   Github,
+  GitPullRequestArrow,
   Loader2,
   Minus,
   Plus,
@@ -32,6 +33,9 @@ import { SyncBar } from "./SyncBar";
 import { MergeBanner } from "./MergeBanner";
 import { ConflictResolver } from "./ConflictResolver";
 import { AiResolveModal } from "./AiResolveModal";
+import { HistoryPanel } from "./HistoryPanel";
+import { RequestsPanel } from "./RequestsPanel";
+import { usePullRequestsViewModel } from "@/hooks/usePullRequestsViewModel";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import type { GitFileStatus } from "@atelier/protocol";
 
@@ -41,6 +45,12 @@ export interface GitPanelProps {
 
 /** Keep unusually large working trees from blocking the renderer on mount. */
 const MAX_RENDERED_FILES_PER_SECTION = 200;
+
+/**
+ * The right column's panes: the working tree, the commit log, or the open
+ * pull/merge requests for this checkout.
+ */
+type GitPane = "changes" | "history" | "requests";
 
 /**
  * Shell around the repo view. The switcher lives here rather than inside
@@ -61,15 +71,17 @@ export function GitPanel({ vm }: GitPanelProps) {
         <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="min-h-0 flex-1">
             {multi && !vm.activeRepo ? (
-              <div className="grid h-full min-h-0 gap-4 p-4 text-sm lg:grid-cols-[minmax(13rem,19rem)_minmax(0,1fr)]">
-                <div className="rounded-2xl bg-muted/30 p-3">
+              <div className="flex h-full min-h-0 flex-col gap-2 p-2.5 text-sm lg:flex-row">
+                <div className="shrink-0 rounded-xl bg-muted/30 p-2.5 lg:w-60 xl:w-72">
                   <RepoSwitcher
                     repos={vm.repos}
                     active={vm.activeRepo}
                     onSelect={(repo) => void vm.selectRepo(repo)}
                   />
                 </div>
-                <EmptyState text="Choose a project to see its git status." />
+                <div className="min-h-0 flex-1 rounded-xl bg-muted/30">
+                  <EmptyState text="Choose a project to see its git status." />
+                </div>
               </div>
             ) : (
               <GitRepoView
@@ -151,9 +163,10 @@ function NoRepoState({ text, vm }: { text: string; vm: GitViewModel }) {
 }
 
 /**
- * Left-column Git view for ONE checkout: branch switcher, commit box on
- * top, collapsible staged/unstaged sections with stage/unstage/discard
- * actions, and recent history. Clicking a file opens its diff.
+ * Git view for ONE checkout. The left rail is everything you act with —
+ * repo, branch, sync, commit box — and the right column is everything you
+ * look at, split into two panes: Changes (conflicts, staged, unstaged) and
+ * History. Clicking a file opens its diff.
  */
 function GitRepoView({
   vm,
@@ -163,12 +176,20 @@ function GitRepoView({
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Which pane the right column shows. Not forced back to Changes during a
+  // merge: the conflict count rides on the tab, so the user is told without
+  // having the log yanked out from under them.
+  const [pane, setPane] = useState<GitPane>("changes");
   // Same store as the shell-mounted modal (GitFlowHost) — this instance
   // only starts the flow; the host renders it.
   const flowVm = useGitFlowViewModel();
   // Sync row + merge-conflict flow. Its resolver takes over the right
   // column while a conflicted file is open.
   const mergeVm = useMergeConflictViewModel();
+  // Open PRs/MRs, polled. Mounted here rather than inside the Requests
+  // pane so the check keeps running — and the tab keeps its unseen dot —
+  // while the user is on Changes.
+  const prVm = usePullRequestsViewModel();
 
   if (vm.error) {
     // No checkouts found anywhere is the one failure the user can fix from
@@ -249,8 +270,8 @@ function GitRepoView({
   };
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden p-4 text-sm lg:grid-cols-[minmax(13rem,19rem)_minmax(0,1fr)] lg:grid-rows-1">
-      <div className="space-y-3 rounded-2xl bg-muted/30 p-3">
+    <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-2.5 text-sm lg:flex-row">
+      <aside className="flex shrink-0 flex-col gap-2 rounded-xl bg-muted/30 p-2.5 lg:w-60 xl:w-72">
         {repoSwitcher}
         <BranchSection
           status={vm.status}
@@ -264,6 +285,12 @@ function GitRepoView({
           disabled={busy}
           ahead={vm.status.ahead}
           onPush={() => void flowVm.startPush()}
+        />
+
+        <TreePulse
+          staged={staged}
+          unstaged={unstaged}
+          conflicts={conflictSet.size}
         />
 
         {actionError && (
@@ -286,13 +313,29 @@ function GitRepoView({
             onGenerate={doGenerate}
           />
         )}
-      </div>
+      </aside>
       {mergeVm.merge.openPath ? (
-        <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl bg-muted/30">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/30">
           <ConflictResolver vm={mergeVm} />
         </div>
       ) : (
-      <div className="min-h-0 space-y-3 overflow-y-auto rounded-2xl bg-muted/30 p-3">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/30 p-2">
+        <PaneTabs
+          tab={pane}
+          onSelect={setPane}
+          changedCount={staged.length + unstaged.length}
+          conflictCount={conflictSet.size}
+          commitCount={vm.commits.length}
+          requestCount={prVm.requests.length}
+          unseenRequests={prVm.unseen.size}
+          requestsAvailable={prVm.available}
+        />
+        {pane === "requests" ? (
+          <RequestsPanel vm={prVm} branch={vm.status.branch} />
+        ) : pane === "history" ? (
+          <HistoryPanel commits={vm.commits} />
+        ) : (
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
         {(inMerge || conflictSet.size > 0) && (
           <ConflictSection vm={mergeVm} busy={busy} onError={setActionError} />
         )}
@@ -361,7 +404,8 @@ function GitRepoView({
           }
         />
 
-        <HistorySection commits={vm.commits} />
+        </div>
+        )}
       </div>
       )}
     </div>
@@ -397,7 +441,7 @@ function ConflictSection(props: {
 
   return (
     <div>
-      <div className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-1 backdrop-blur">
+      <div className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-0.5 backdrop-blur">
         <button
           onClick={() => setOpen((v) => !v)}
           className={cn(
@@ -543,7 +587,7 @@ function ConflictRow(props: {
       <Tooltip content={title}>
         <button
           onClick={props.onOpen}
-          className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-0.5 text-left"
         >
           <span
             className={cn(
@@ -622,7 +666,7 @@ function CommitBox(props: {
         placeholder={props.generating ? "Drafting a message…" : "Commit message"}
         rows={2}
         disabled={props.generating}
-        className="max-h-60 min-h-14 resize-y pr-8 text-xs"
+        className="max-h-52 min-h-12 resize-y pr-8 text-xs"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) props.onCommit();
         }}
@@ -651,7 +695,7 @@ function CommitBox(props: {
     >
       <Button
         size="sm"
-        className="w-full"
+        className="h-7 w-full text-xs"
         disabled={
           props.busy ||
           props.generating ||
@@ -727,33 +771,129 @@ function BranchSection(props: {
   onRefresh: () => void;
 }) {
   const { status } = props;
+  const drifted = status.ahead > 0 || status.behind > 0;
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5 rounded-xl bg-gradient-to-br from-primary/15 via-primary/5 to-transparent p-1.5 ring-1 ring-inset ring-white/5">
       <Tooltip content="Checkout another branch…">
         <button
           onClick={props.onOpenCheckout}
           disabled={props.busy}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-accent/60 disabled:opacity-60"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-1 py-0.5 text-left hover:bg-white/5 disabled:opacity-60"
         >
-          <GitBranch className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-          <span className="truncate font-medium">{status.branch}</span>
-          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-          {(status.ahead > 0 || status.behind > 0) && (
-            <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
-              {status.ahead > 0 && `↑${status.ahead}`}
-              {status.behind > 0 && ` ↓${status.behind}`}
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+            <GitBranch className="h-3.5 w-3.5" />
+          </span>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="flex min-w-0 items-center gap-1">
+              <span className="truncate text-[13px] font-semibold leading-tight">
+                {status.branch}
+              </span>
+              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
             </span>
-          )}
+            <span className="flex items-center gap-1.5 text-[10px] leading-tight text-muted-foreground">
+              {drifted ? (
+                <>
+                  {status.ahead > 0 && (
+                    <span className="tabular-nums text-primary">
+                      ↑{status.ahead}
+                    </span>
+                  )}
+                  {status.behind > 0 && (
+                    <span className="tabular-nums text-warning">
+                      ↓{status.behind}
+                    </span>
+                  )}
+                  <span>vs remote</span>
+                </>
+              ) : (
+                <span>in sync</span>
+              )}
+            </span>
+          </span>
         </button>
       </Tooltip>
       <Tooltip content="Refresh">
         <button
           onClick={props.onRefresh}
-          className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          className="shrink-0 rounded-lg p-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
         >
           <RefreshCw className="h-3.5 w-3.5" />
         </button>
       </Tooltip>
+    </div>
+  );
+}
+
+/**
+ * The working tree at a glance: three counters and one bar whose green and
+ * red halves are sized by the added/removed ratio. The left rail was branch
+ * + commit box and then a tall column of nothing; this is the part that
+ * answers "how big is this change" without reading the file list.
+ */
+function TreePulse(props: {
+  staged: GitFileStatus[];
+  unstaged: GitFileStatus[];
+  conflicts: number;
+}) {
+  const indexed = sumStats(props.staged, "index");
+  const working = sumStats(props.unstaged, "work");
+  const added = (indexed?.added ?? 0) + (working?.added ?? 0);
+  const removed = (indexed?.removed ?? 0) + (working?.removed ?? 0);
+  const churn = added + removed;
+  const tiles = [
+    { label: "Staged", value: props.staged.length, tone: "text-success" },
+    { label: "Changed", value: props.unstaged.length, tone: "text-warning" },
+    {
+      label: "Conflicts",
+      value: props.conflicts,
+      tone:
+        props.conflicts > 0 ? "text-destructive" : "text-muted-foreground/60",
+    },
+  ];
+  return (
+    <div className="flex flex-col gap-1.5 rounded-xl bg-black/20 p-1.5">
+      <div className="flex items-stretch gap-1.5">
+        {tiles.map((t) => (
+          <div
+            key={t.label}
+            className="flex min-w-0 flex-1 flex-col items-center justify-center rounded-lg bg-white/[0.03] py-1"
+          >
+            <span
+              className={cn(
+                "text-sm font-semibold leading-none tabular-nums",
+                t.tone
+              )}
+            >
+              {t.value}
+            </span>
+            <span className="mt-0.5 truncate text-[9px] uppercase tracking-wide text-muted-foreground/70">
+              {t.label}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-1.5 px-0.5">
+        <span className="flex h-1 min-w-0 flex-1 items-stretch overflow-hidden rounded-full bg-white/5">
+          {churn > 0 && (
+            <>
+              <span
+                className="bg-success"
+                style={{ width: `${(added / churn) * 100}%` }}
+              />
+              <span
+                className="bg-destructive"
+                style={{ width: `${(removed / churn) * 100}%` }}
+              />
+            </>
+          )}
+        </span>
+        <span className="shrink-0 text-[10px] tabular-nums text-success">
+          +{added}
+        </span>
+        <span className="shrink-0 text-[10px] tabular-nums text-destructive">
+          −{removed}
+        </span>
+      </div>
     </div>
   );
 }
@@ -789,7 +929,7 @@ function FileSection(props: {
   const total = sumStats(props.files, props.side);
   return (
     <div className="border-t border-white/5 pt-1 first:border-t-0 first:pt-0">
-      <div className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-1 backdrop-blur">
+      <div className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-0.5 backdrop-blur">
         <button
           onClick={() => setOpen((v) => !v)}
           className="flex min-w-0 items-center gap-1 text-[12px] font-medium text-muted-foreground hover:text-foreground"
@@ -841,7 +981,7 @@ function FileSection(props: {
                 <Tooltip content={f.path}>
                   <button
                     onClick={() => props.onOpen(f.path)}
-                    className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-0.5 text-left"
                   >
                     <span
                       className={cn(
@@ -887,36 +1027,138 @@ function FileSection(props: {
   );
 }
 
-function HistorySection(props: { commits: GitViewModel["commits"] }) {
-  const [open, setOpen] = useState(true);
-  if (props.commits.length === 0) return null;
+/**
+ * The right column's three destinations: what is uncommitted, what is
+ * committed, and what is waiting for review.
+ *
+ * The old strip was a full-width segmented control — three equal grey
+ * slabs in a grey trough, where the only difference between selected and
+ * not was a slightly lighter slab. It read as chrome, and in a 260px panel
+ * it spent the whole width saying so. This rail is sized to its words
+ * instead: the active tab is the only filled thing on the row, carrying a
+ * left accent bar and its own count, while the others sit as quiet labels
+ * that light up on hover. The width the labels give back holds the pane's
+ * name on the right, so the header still says where you are once the tabs
+ * stop shouting it.
+ */
+function PaneTabs(props: {
+  tab: GitPane;
+  onSelect: (tab: GitPane) => void;
+  changedCount: number;
+  conflictCount: number;
+  commitCount: number;
+  requestCount: number;
+  /** Requests that showed up since this pane was last looked at. */
+  unseenRequests: number;
+  requestsAvailable: boolean;
+}) {
+  // Conflicts outrank the change count on the badge, the way the dock tile
+  // does it: a red number is the one that has to be acted on.
+  const tabs = [
+    {
+      id: "changes" as const,
+      icon: FileDiff,
+      label: "Changes",
+      count: props.conflictCount || props.changedCount,
+      danger: props.conflictCount > 0,
+      dot: false,
+    },
+    {
+      id: "history" as const,
+      icon: GitCommitHorizontal,
+      label: "History",
+      count: props.commitCount,
+      danger: false,
+      dot: false,
+    },
+    {
+      id: "requests" as const,
+      icon: GitPullRequestArrow,
+      label: "Requests",
+      // Nothing to count is not the same as nothing to say: with no forge
+      // CLI the tab still opens onto the pane that explains why.
+      count: props.requestsAvailable ? props.requestCount : 0,
+      danger: false,
+      dot: props.unseenRequests > 0,
+    },
+  ];
+
   return (
-    <div className="min-h-0 border-t border-white/5 pt-1">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="sticky top-0 z-10 flex items-center gap-1 rounded-md bg-card/95 px-1 py-1 text-[12px] font-medium text-muted-foreground backdrop-blur hover:text-foreground"
-      >
-        {open ? (
-          <ChevronDown className="h-3 w-3 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 shrink-0" />
-        )}
-        History
-      </button>
-      {open &&
-        props.commits.map((c) => (
-          <Tooltip key={c.hash} content={c.hash}>
-            <div className="flex items-start gap-1.5 px-2 py-1">
-              <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-              <div className="min-w-0">
-                <p className="truncate text-xs">{c.message}</p>
-                <p className="truncate text-[10px] text-muted-foreground/70">
-                  {c.hash.slice(0, 7)} · {c.author} · {formatDate(c.date)}
-                </p>
-              </div>
-            </div>
+    <div
+      role="tablist"
+      aria-label="Git panel"
+      className="mb-1.5 flex shrink-0 items-center gap-1 border-b border-white/5 pb-1.5"
+    >
+      {tabs.map((t) => {
+        const active = props.tab === t.id;
+        return (
+          <Tooltip
+            key={t.id}
+            content={
+              t.id === "requests"
+                ? props.unseenRequests > 0
+                  ? `${props.unseenRequests} new since you last looked`
+                  : "Open pull / merge requests, re-checked automatically"
+                : t.label
+            }
+          >
+            <button
+              role="tab"
+              aria-selected={active}
+              onClick={() => props.onSelect(t.id)}
+              className={cn(
+                "relative flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5",
+                "text-[11px] font-medium transition-colors",
+                active
+                  ? "bg-primary/10 text-foreground"
+                  : "text-muted-foreground/80 hover:bg-white/5 hover:text-foreground"
+              )}
+            >
+              {active && (
+                <span
+                  aria-hidden
+                  className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary"
+                />
+              )}
+              <t.icon
+                className={cn(
+                  "h-3 w-3 shrink-0",
+                  active ? "text-primary" : "text-current"
+                )}
+              />
+              {/* The label of an inactive tab is dropped below the panel's
+                  narrowest width: three words plus three counts do not fit
+                  a 260px column, and the icons still say which is which. */}
+              <span className={cn("truncate", !active && "hidden xl:inline")}>
+                {t.label}
+              </span>
+              {t.count > 0 && (
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-1 text-[9px] leading-[14px] tabular-nums",
+                    t.danger
+                      ? "bg-destructive/20 text-destructive"
+                      : active
+                        ? "bg-primary/20 text-primary"
+                        : "bg-white/5 text-muted-foreground"
+                  )}
+                >
+                  {t.count > 99 ? "99+" : t.count}
+                </span>
+              )}
+              {t.dot && (
+                <span
+                  aria-hidden
+                  className={cn(
+                    "absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full",
+                    "bg-cyan ring-2 ring-card"
+                  )}
+                />
+              )}
+            </button>
           </Tooltip>
-        ))}
+        );
+      })}
     </div>
   );
 }
@@ -941,13 +1183,6 @@ function statusColor(f: GitFileStatus): string {
   if (c === "D") return "text-destructive";
   if (c === "R") return "text-cyan";
   return "text-warning";
-}
-
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function shortError(err: string): string {

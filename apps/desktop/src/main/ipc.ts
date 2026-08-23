@@ -1,8 +1,92 @@
-import { BrowserWindow, dialog, ipcMain, shell, type WebContents } from "electron";
+import {
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  shell,
+  type WebContents,
+  type WebFrameMain,
+} from "electron";
 import { writeFile } from "node:fs/promises";
-import { IPC_CHANNELS } from "../shared/ipc-contract";
+import {
+  IPC_CHANNELS,
+  type DesktopPreviewConsoleEntry,
+  type DesktopPreviewContextResult,
+} from "../shared/ipc-contract";
 
 const EXTERNAL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+const MAX_PREVIEW_CONSOLE_ENTRIES = 200;
+const previewConsoleByContents = new WeakMap<
+  WebContents,
+  DesktopPreviewConsoleEntry[]
+>();
+
+const PREVIEW_CONTEXT_SCRIPT = `(() => {
+  const selectorFor = (element) => {
+    if (element.id) {
+      return element.tagName.toLowerCase() + '#' + CSS.escape(element.id);
+    }
+    const parts = [];
+    let current = element;
+    while (current && current !== document.documentElement) {
+      let part = current.tagName.toLowerCase();
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(
+          (sibling) => sibling.tagName === current.tagName
+        );
+        if (siblings.length > 1) {
+          part += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
+        }
+      }
+      parts.unshift(part);
+      current = parent;
+    }
+    return ['html', ...parts].join(' > ');
+  };
+  const stylesheets = Array.from(document.styleSheets).map((sheet, index) => {
+    const source = sheet.href || 'inline stylesheet ' + (index + 1);
+    try {
+      return '/* ' + source + ' */\\n' +
+        Array.from(sheet.cssRules).map((rule) => rule.cssText).join('\\n');
+    } catch {
+      return '/* ' + source + ' — rules unavailable to CSSOM */';
+    }
+  });
+  const interactive = Array.from(document.querySelectorAll(
+    'button, a[href], input, select, textarea, [role="button"], [tabindex]'
+  )).map((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      selector: selectorFor(element),
+      tag: element.tagName.toLowerCase(),
+      text: (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim(),
+      ariaLabel: element.getAttribute('aria-label'),
+      role: element.getAttribute('role'),
+      rect: {
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+      style: {
+        color: style.color,
+        backgroundColor: style.backgroundColor,
+        borderColor: style.borderColor,
+        font: style.font,
+        display: style.display,
+        visibility: style.visibility,
+      },
+    };
+  });
+  return {
+    url: location.href,
+    title: document.title,
+    html: document.documentElement.outerHTML,
+    css: stylesheets.join('\\n\\n'),
+    interactive,
+  };
+})()`;
 
 function isSafeExternal(url: string): boolean {
   try {
@@ -51,19 +135,44 @@ function localPreviewOrigin(value: unknown): string | null {
   }
 }
 
-/** Resolve the iframe's live URL so SPA navigation becomes screenshot context. */
-function previewFrameUrl(webContents: WebContents, requestedUrl: unknown): string | null {
+/** Resolve the exact live iframe so SPA navigation and runtime state are preserved. */
+function previewFrame(
+  webContents: WebContents,
+  requestedUrl: unknown
+): WebFrameMain | null {
   const origin = localPreviewOrigin(requestedUrl);
   if (!origin) return null;
   for (const frame of webContents.mainFrame.framesInSubtree) {
     try {
-      const url = new URL(frame.url);
-      if (url.origin === origin) return url.href;
+      if (new URL(frame.url).origin === origin) return frame;
     } catch {
       // Ignore transient or non-URL child frames.
     }
   }
   return null;
+}
+
+function previewFrameUrl(webContents: WebContents, requestedUrl: unknown): string | null {
+  return previewFrame(webContents, requestedUrl)?.url ?? null;
+}
+
+/** Keep a bounded DevTools-style buffer for local preview frames. */
+export function wirePreviewContextEvents(win: BrowserWindow): void {
+  const entries: DesktopPreviewConsoleEntry[] = [];
+  previewConsoleByContents.set(win.webContents, entries);
+  win.webContents.on("console-message", (_event, level, message, line, source) => {
+    if (level < 2 || !localPreviewOrigin(source)) return;
+    entries.push({
+      level: level >= 3 ? "error" : "warning",
+      message: message.slice(0, 2_000),
+      source: source || null,
+      line: Number.isFinite(line) ? line : null,
+      timestamp: Date.now(),
+    });
+    if (entries.length > MAX_PREVIEW_CONSOLE_ENTRIES) {
+      entries.splice(0, entries.length - MAX_PREVIEW_CONSOLE_ENTRIES);
+    }
+  });
 }
 
 export function registerIpcHandlers(): void {
@@ -96,6 +205,27 @@ export function registerIpcHandlers(): void {
       return {
         dataUrl: image.toDataURL(),
         frameUrl: previewFrameUrl(event.sender, rect.previewUrl),
+      };
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.previewContext,
+    async (event, requestedUrl: unknown): Promise<DesktopPreviewContextResult | null> => {
+      const frame = previewFrame(event.sender, requestedUrl);
+      const origin = localPreviewOrigin(requestedUrl);
+      if (!frame || !origin) return null;
+      const snapshot = (await frame.executeJavaScript(PREVIEW_CONTEXT_SCRIPT)) as
+        | Omit<DesktopPreviewContextResult, "console" | "capturedAt">
+        | null;
+      if (!snapshot || typeof snapshot.html !== "string") return null;
+      const consoleEntries = previewConsoleByContents.get(event.sender) ?? [];
+      return {
+        ...snapshot,
+        console: consoleEntries.filter(
+          (entry) => localPreviewOrigin(entry.source) === origin
+        ),
+        capturedAt: Date.now(),
       };
     }
   );

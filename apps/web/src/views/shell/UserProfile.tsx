@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { LogOut, User, X } from "lucide-react";
+import { Crown, LogOut, User, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/tooltip";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/state/auth.store";
 
@@ -11,9 +12,13 @@ export function UserProfile() {
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
   const [open, setOpen] = useState(false);
+  const [upgradeRequested, setUpgradeRequested] = useState(false);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setUpgradeRequested(false);
+      return;
+    }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
@@ -28,6 +33,10 @@ export function UserProfile() {
   const fullName: string | undefined =
     user.user_metadata?.full_name ?? undefined;
   const email = user.email;
+  const plan =
+    String(user.app_metadata?.plan ?? "free").toLowerCase() === "pro"
+      ? "Pro"
+      : "Free";
 
   const initials = fullName
     ? fullName
@@ -132,6 +141,39 @@ export function UserProfile() {
                       </span>
                     )}
                   </div>
+                </div>
+
+                <div className="border-t border-border-subtle px-6 py-4">
+                  <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-primary/5 p-4">
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Current plan
+                      </span>
+                      <span className="flex items-center gap-1.5 text-sm font-semibold">
+                        <Crown className="h-4 w-4 text-primary" />
+                        {plan}
+                      </span>
+                    </div>
+                    {plan === "Free" ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={upgradeRequested}
+                        onClick={() => setUpgradeRequested(true)}
+                      >
+                        {upgradeRequested ? "Upgrade requested" : "Upgrade to Pro"}
+                      </Button>
+                    ) : (
+                      <Badge className="bg-primary/10 text-primary">
+                        Pro account
+                      </Badge>
+                    )}
+                  </div>
+                  {upgradeRequested && plan === "Free" && (
+                    <p role="status" className="mt-2 text-xs text-muted-foreground">
+                      Pro upgrades are coming soon.
+                    </p>
+                  )}
                 </div>
 
                 <div className="border-t border-border-subtle px-6 pb-6 pt-4">
