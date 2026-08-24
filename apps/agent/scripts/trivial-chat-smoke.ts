@@ -105,14 +105,20 @@ for (const [name, rules] of [
 // contract from a question turn; requiring a plan is what makes the model
 // open a checklist in the first place.
 const here = path.dirname(fileURLToPath(import.meta.url));
-const source = fs.readFileSync(
+const pipelineSource = fs.readFileSync(
   path.join(here, "../src/orchestrator/pipeline-executor.ts"),
+  "utf8"
+);
+const ollamaSource = fs.readFileSync(
+  path.join(here, "../src/providers/ollama/agent-loop.ts"),
   "utf8"
 );
 check(
   "a question turn is not given the timeline contract",
-  source.includes("if (answerOnly) this.deps.planTracker.markAnswerOnly(ctx.taskId);") &&
-    source.includes("else this.deps.planTracker.requirePlan(ctx.taskId);")
+  pipelineSource.includes(
+    "if (answerOnly) this.deps.planTracker.markAnswerOnly(ctx.taskId);"
+  ) &&
+    pipelineSource.includes("else this.deps.planTracker.requirePlan(ctx.taskId);")
 );
 
 // The other half of the same rule: a turn that owes no edit must not be
@@ -120,7 +126,16 @@ check(
 // open" after spending the whole stall budget on work that never existed.
 check(
   "an informational turn is not held by the completion gate",
-  source.includes("!looksInformational(ctx.prompt)")
+  pipelineSource.includes("!looksInformational(ctx.prompt)")
+);
+
+// Ollama must receive the exact same assembled contract as Claude. Otherwise
+// the skill/external-reference exception can pass the rule checks above yet
+// disappear only when the selected provider is Ollama.
+check(
+  "Ollama receives the provider-neutral execution contract",
+  pipelineSource.includes("system: providerContext") &&
+    ollamaSource.includes("system: opts.system")
 );
 
 console.log(failed === 0 ? "\nall cases pass" : `\n${failed} mismatch(es)`);

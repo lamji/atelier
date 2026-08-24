@@ -67,9 +67,9 @@ export class PlanCheckpointStore {
     this.bindings.delete(taskId);
   }
 
-  /** Latest plan that still has work open, excluding the new continuation. */
-  resumeContext(conversationId: string, excludeTaskId: string): string {
-    const checkpoint = this.latestIncomplete(conversationId, excludeTaskId);
+  /** Unfinished plan for the task immediately preceding a continuation. */
+  resumeContext(conversationId: string, previousTaskId: string): string {
+    const checkpoint = this.incompleteForTask(conversationId, previousTaskId);
     if (!checkpoint) return "";
     const done = checkpoint.plan.steps.filter((step) => step.status === "done");
     const current = checkpoint.plan.steps.filter(
@@ -107,41 +107,34 @@ export class PlanCheckpointStore {
     }
   }
 
-  private latestIncomplete(
+  private incompleteForTask(
     conversationId: string,
-    excludeTaskId: string
+    taskId: string
   ): PlanCheckpoint | null {
-    const dir = this.conversationDir(conversationId);
-    let names: string[];
     try {
-      names = fs.readdirSync(dir).filter((name) => name.endsWith(".json"));
+      const parsed = JSON.parse(
+        fs.readFileSync(
+          path.join(this.conversationDir(conversationId), `${safeId(taskId)}.json`),
+          "utf8"
+        )
+      ) as PlanCheckpoint;
+      if (
+        parsed.version !== CHECKPOINT_VERSION ||
+        parsed.conversationId !== conversationId ||
+        parsed.taskId !== taskId ||
+        !Array.isArray(parsed.plan?.steps) ||
+        !parsed.plan.steps.some(
+          (step) => step.status === "pending" || step.status === "in-progress"
+        )
+      ) {
+        return null;
+      }
+      return parsed;
     } catch {
+      // Missing or truncated adjacent checkpoints do not authorize reviving
+      // an older, unrelated plan from elsewhere in the conversation.
       return null;
     }
-    const candidates: PlanCheckpoint[] = [];
-    for (const name of names) {
-      try {
-        const parsed = JSON.parse(
-          fs.readFileSync(path.join(dir, name), "utf8")
-        ) as PlanCheckpoint;
-        if (
-          parsed.version !== CHECKPOINT_VERSION ||
-          parsed.conversationId !== conversationId ||
-          parsed.taskId === excludeTaskId ||
-          !Array.isArray(parsed.plan?.steps) ||
-          !parsed.plan.steps.some(
-            (step) => step.status === "pending" || step.status === "in-progress"
-          )
-        ) {
-          continue;
-        }
-        candidates.push(parsed);
-      } catch {
-        // A truncated file cannot win over an older valid checkpoint.
-      }
-    }
-    candidates.sort((a, b) => b.updatedAt - a.updatedAt);
-    return candidates[0] ?? null;
   }
 
   private conversationDir(conversationId: string): string {

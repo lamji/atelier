@@ -5,7 +5,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { Logger } from "pino";
-import { approxTokens, newId } from "@atelier/shared";
+import { approxTokens, newId, stripHiddenContext } from "@atelier/shared";
 import type {
   ContextPurpose,
   Feature,
@@ -1241,7 +1241,12 @@ export class PipelineExecutor {
   }
 
   async run(ctx: TaskContext): Promise<PipelineOutcome> {
-    const debugBody = parseFeatureContextDebugCommand(ctx.prompt);
+    // Slash commands belong to the text the user typed. Page-preview and
+    // screenshot evidence is intentionally appended as hidden context for a
+    // model turn, but must not make an anchored command parser miss and fall
+    // through into implementation.
+    const commandPrompt = stripHiddenContext(ctx.prompt);
+    const debugBody = parseFeatureContextDebugCommand(commandPrompt);
     if (debugBody !== undefined) {
       const report = debugBody ? parseDebugReport(debugBody) : null;
       if (!report) return this.debugReportForm(debugBody.length > 0);
@@ -1251,11 +1256,11 @@ export class PipelineExecutor {
       // debugging skill, and any screenshots attached to the same send.
       ctx.prompt = renderDebugTask(report, ctx.opts.images?.length ?? 0);
     }
-    const updatedFeature = parseFeatureContextUpdateCommand(ctx.prompt);
+    const updatedFeature = parseFeatureContextUpdateCommand(commandPrompt);
     if (updatedFeature !== undefined) {
       return this.runFeatureContextUpdate(ctx, updatedFeature);
     }
-    const requestedFeature = parseFeatureContextCommand(ctx.prompt);
+    const requestedFeature = parseFeatureContextCommand(commandPrompt);
     if (requestedFeature !== undefined) {
       if (!requestedFeature) {
         return {
@@ -4483,6 +4488,17 @@ const PASSIVE_CHANGE_REQUEST =
   /^(?:can|could|would|should)\s+(?:the|this|that|these|those|my|our)\b.{0,80}\bbe\s+(?:fixed|added|implemented|updated|removed|deleted|changed|renamed|moved|centered|aligned|styled|designed|redesigned|made|put|set|replaced|adjusted|converted)\b/i;
 
 /**
+ * "Find" normally asks for information, but "find a way to support X" is
+ * a request to make X possible. This exact distinction matters because the
+ * answer-only hook enforces the classifier at the edit boundary: reading the
+ * latter as a question makes autonomous implementation physically impossible.
+ * The optional `o` preserves the real-world "supprt" spelling from the
+ * regression without turning ordinary "find the file" prompts into work.
+ */
+const FIND_IMPLEMENTATION_REQUEST =
+  /^(?:please\s+)?find\s+(?:a\s+)?(?:way|solution|approach)\s+to\s+(?:supp(?:o)?rt|implement|build|create|add|fix|enable|integrate|make)\b/i;
+
+/**
  * An imperative change may follow a question or an analysis clause:
  * "is there a better layout? redesign it" and "review this, then fix it"
  * still owe the user an implementation. Keep the boundary requirement so
@@ -4578,6 +4594,7 @@ function looksLikeQuestion(prompt: string): boolean {
   if (
     CHANGE_REQUEST_OPENERS.test(trimmed) ||
     PASSIVE_CHANGE_REQUEST.test(trimmed) ||
+    FIND_IMPLEMENTATION_REQUEST.test(trimmed) ||
     EXPLICIT_CHANGE_CLAUSE.test(trimmed)
   ) {
     return false;

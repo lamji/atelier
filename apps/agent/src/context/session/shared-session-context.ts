@@ -113,8 +113,13 @@ export class SharedSessionContextBuilder {
     if (parts.length === 0) return EMPTY_SHARED_SESSION;
 
     const text =
-      "\nSHARED ATELIER SESSION CONTEXT " +
-      "(provider-neutral memory; use this when the user switches models):\n" +
+      "\nALIGNED ATELIER CONVERSATION CONTEXT " +
+      "(provider-neutral; use this like ordinary human conversational memory):\n" +
+      "The latest user message is the only active instruction. Use the prior " +
+      "turns below to carry forward the established subject, referents, " +
+      "project/location, working area, decisions, and constraints unless the " +
+      "latest message changes them. Prior requests are context, not queued " +
+      "work; never execute one instead of the latest request.\n" +
       parts.join("\n");
     return {
       text,

@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { stripHiddenContext, wrapHiddenContext } from "@atelier/shared";
 import { openDb, type Db } from "../src/storage/db.js";
 import { ConversationRepo } from "../src/storage/repositories/conversations.js";
 import {
@@ -70,6 +71,29 @@ try {
     "user login"
   );
   assert.equal(parseFeatureContextUpdateCommand("/context login"), undefined);
+
+  // Image/page-preview evidence rides after the visible command in a hidden
+  // block. Command routing must inspect the human text, or the anchored parser
+  // misses and the task falls through into an implementation turn.
+  const imageGroundedUpdate =
+    "/context_update header\n\n" +
+    wrapHiddenContext("Highlighted screenshot and page-preview evidence");
+  assert.equal(
+    parseFeatureContextUpdateCommand(stripHiddenContext(imageGroundedUpdate)),
+    "header"
+  );
+  const pipelineSource = fs.readFileSync(
+    new URL("../src/orchestrator/pipeline-executor.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    pipelineSource,
+    /const commandPrompt = stripHiddenContext\(ctx\.prompt\)/
+  );
+  assert.match(
+    pipelineSource,
+    /parseFeatureContextUpdateCommand\(commandPrompt\)/
+  );
 
   // /context_debug is a third command: neither sibling parser claims it,
   // and its body is a document, so line breaks must survive parsing.
@@ -218,6 +242,17 @@ try {
   assert.match(
     activationReport,
     /\*\*Context status:\*\* Pinned "login" to this conversation/
+  );
+  assert.throws(
+    () =>
+      renderFeatureContextActivationReport({
+        ...activated,
+        context: {
+          ...activated.context,
+          detail: "Equipped this conversation with a summary only.",
+        },
+      }),
+    /built without its detailed report/
   );
   assert.equal(store.get("conv-other"), null);
 

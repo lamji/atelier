@@ -5,7 +5,9 @@ export const SEARCH_GROUNDING_HOOK_ID = "builtin-search-grounding";
 export const SEARCH_GROUNDING_HOOK_NAME = "Search terms must come from the turn";
 
 /** Tools whose query is a string the model chose. */
-const SEARCH_TOOLS = new Set(["search_text", "search_workspace"]);
+export const SEARCH_GROUNDING_MATCHER =
+  "retrieve_knowledge|search_text|search_workspace";
+const SEARCH_TOOLS = new Set(SEARCH_GROUNDING_MATCHER.split("|"));
 
 /** Tasks kept in the ledger; old ones are dropped oldest-first. */
 const MAX_TASKS = 32;

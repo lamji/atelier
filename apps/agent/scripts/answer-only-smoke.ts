@@ -39,6 +39,7 @@ const QUESTIONS = [
   "how does the freeze interact with Redis?",
   "how should I fix the requests pane?",
   "is there a better way to redesign the listing?",
+  "find the component preview entry point",
   "explain that last paragraph",
   // The bare confirmations that used to classify as work: no opener word,
   // just a question mark. Each one cost a full change turn.
@@ -52,6 +53,10 @@ const WORK = [
   "can you center the login?",
   "add a test for the freeze",
   "implement it",
+  // A solution request is implementation work even though it opens with
+  // "find"; keep the original typo because that is what reached production.
+  "find a way to supprt this",
+  "find a way to support multiple previews",
   // Still work: filler in front of a change verb, and a change verb that
   // arrives too late for the openers to see it.
   "so fix the residual lag",

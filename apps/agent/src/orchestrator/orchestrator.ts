@@ -477,26 +477,35 @@ export class Orchestrator {
     // The current user turn is already persisted (added on enqueue). Exclude
     // it by task id and retain the prior exchange, including the assistant's
     // answer: "fix the gap" often refers to a gap named only in that answer.
-    const priorTurns = this.conversations
+    const priorMessages = this.conversations
       .getMessages(conversationId)
       .filter(
         (message) =>
           message.taskId !== taskId &&
           (message.role === "user" || message.role === "assistant")
-      )
-      .slice(-4)
-      .map((message) => ({
-        role: message.role as "user" | "assistant",
-        text: message.text,
-      }));
+      );
+    // "Continue" belongs only to the immediately preceding user task. Looking
+    // up the newest unfinished checkpoint anywhere in the conversation can
+    // resurrect unrelated work after a later task produced no plan.
+    const previousTaskId = [...priorMessages]
+      .reverse()
+      .find(
+        (message) =>
+          message.role === "user" && typeof message.taskId === "string"
+      )?.taskId;
+    const priorTurns = priorMessages.slice(-4).map((message) => ({
+      role: message.role as "user" | "assistant",
+      text: message.text,
+    }));
 
     const ctx: TaskContext = {
       taskId,
       conversationId,
       prompt,
-      recoveryPlan: isResumePrompt(prompt)
-        ? this.planTracker.resumeContext(conversationId, taskId)
-        : "",
+      recoveryPlan:
+        isResumePrompt(prompt) && previousTaskId
+          ? this.planTracker.resumeContext(conversationId, previousTaskId)
+          : "",
       priorTurns,
       messageId,
       images: opts.images ?? [],

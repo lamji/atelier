@@ -19,6 +19,7 @@ import {
   SearchGroundingGuard,
   SEARCH_GROUNDING_HOOK_ID,
   SEARCH_GROUNDING_HOOK_NAME,
+  SEARCH_GROUNDING_MATCHER,
 } from "../src/hooks/search-grounding-guard.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 
@@ -47,7 +48,7 @@ async function main(): Promise<void> {
     name: SEARCH_GROUNDING_HOOK_NAME,
     enabled: true,
     event: "preTool",
-    matcher: "search_text|search_workspace",
+    matcher: SEARCH_GROUNDING_MATCHER,
     action: "block",
     argument: "Search for words from the turn, not invented ones",
   });
@@ -62,13 +63,18 @@ async function main(): Promise<void> {
   const registry = new ToolRegistry(bus);
   registry.setGate(hooks);
   registry.register("search_text", async (input: unknown) => input);
+  registry.register("retrieve_knowledge", async (input: unknown) => input);
   registry.register("read_file", async (input: unknown) => input);
   const abort = new AbortController();
 
-  /** Runs a search; true when the hook refused it. */
-  const search = async (taskId: string, query: string): Promise<boolean> => {
+  /** Runs a model-chosen query; true when the hook refused it. */
+  const search = async (
+    taskId: string,
+    query: string,
+    toolName = "search_text"
+  ): Promise<boolean> => {
     try {
-      await registry.run("search_text", { query }, taskId, abort.signal);
+      await registry.run(toolName, { query }, taskId, abort.signal);
       return false;
     } catch (error) {
       return String(error).includes("Blocked by hook");
@@ -87,6 +93,14 @@ async function main(): Promise<void> {
     'refuses "ACTIVE WORKFLOW"',
     await search(task, "ACTIVE WORKFLOW")
   );
+  check(
+    "retrieve_knowledge cannot bypass grounding",
+    await search(
+      task,
+      "real FinTrack app icon generated base64",
+      "retrieve_knowledge"
+    )
+  );
 
   console.log("\ngrounded terms");
   check("allows a word the user used", !(await search(task, "timeline")));
@@ -97,6 +111,10 @@ async function main(): Promise<void> {
   check(
     "allows a file name from the directory map",
     !(await search(task, "chatListRenderer"))
+  );
+  check(
+    "retrieve_knowledge allows a grounded request phrase",
+    !(await search(task, "chatbox timeline", "retrieve_knowledge"))
   );
 
   console.log("\nit is a speed bump, not a wall");

@@ -45,8 +45,8 @@ export class PlanTracker {
     this.checkpoints?.bind(conversationId, taskId, request);
   }
 
-  resumeContext(conversationId: string, excludeTaskId: string): string {
-    return this.checkpoints?.resumeContext(conversationId, excludeTaskId) ?? "";
+  resumeContext(conversationId: string, previousTaskId: string): string {
+    return this.checkpoints?.resumeContext(conversationId, previousTaskId) ?? "";
   }
 
   removeConversation(conversationId: string): void {

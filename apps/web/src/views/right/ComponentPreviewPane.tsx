@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Box,
@@ -19,6 +19,7 @@ import {
   Undo2,
   X,
 } from "lucide-react";
+import type { TerminalSession } from "@atelier/protocol";
 import {
   pendingTerminalPrompt,
   terminalAnswer,
@@ -29,7 +30,10 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/cn";
 import {
-  resolveComponentPreview,
+  packageManifestPaths,
+  previewCommandAtPort,
+  pubspecPaths,
+  resolveComponentPreviews,
   type ComponentPreviewRuntime,
 } from "@/lib/component-preview";
 import { openExternal } from "@/lib/desktop";
@@ -120,6 +124,33 @@ function previewRouteLabel(value: string | null): string {
   }
 }
 
+function previewTerminalName(runtime: ComponentPreviewRuntime): string {
+  return `${runtime.projectName} page preview · ${runtime.projectDir || "."}`;
+}
+
+function findPreviewTerminal(
+  runtime: ComponentPreviewRuntime,
+  runtimes: ComponentPreviewRuntime[],
+  sessions: TerminalSession[]
+): TerminalSession | undefined {
+  const current = sessions.find(
+    (session) => session.alive && session.name === previewTerminalName(runtime)
+  );
+  if (current) return current;
+
+  // Recover the pre-multi-preview terminal name only when it identifies one
+  // project unambiguously; duplicate package names must never share a PTY.
+  const uniqueLegacyName =
+    runtimes.filter((candidate) => candidate.projectName === runtime.projectName)
+      .length === 1;
+  return uniqueLegacyName
+    ? sessions.find(
+        (session) =>
+          session.alive && session.name === `${runtime.projectName} page preview`
+      )
+    : undefined;
+}
+
 const MOBILE_VIEWPORT_OPTIONS = MOBILE_VIEWPORTS.map((profile) => ({
   value: profile.id,
   label: `${profile.label} · ${profile.width} × ${profile.height}`,
@@ -174,7 +205,23 @@ export function ComponentPreviewPane({
 }: ComponentPreviewPaneProps) {
   const workspaceRoot = useConnectionStore((state) => state.workspaceRoot);
   const workspaceTree = useWorkspaceStore((state) => state.tree);
-  const [runtime, setRuntime] = useState<ComponentPreviewRuntime | null>(null);
+  const previewLayoutSignature = useMemo(
+    () =>
+      workspaceTree
+        ? [
+            ...packageManifestPaths(workspaceTree),
+            ...pubspecPaths(workspaceTree),
+          ].join("|")
+        : "",
+    [workspaceTree]
+  );
+  const terminalSessions = useTerminalStore((state) => state.sessions);
+  const [runtimes, setRuntimes] = useState<ComponentPreviewRuntime[]>([]);
+  const [runtimeKey, setRuntimeKey] = useState<string | null>(null);
+  const runtime =
+    runtimes.find((candidate) => candidate.storageKey === runtimeKey) ??
+    runtimes[0] ??
+    null;
   const [address, setAddress] = useState("");
   const [customCommand, setCustomCommand] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -209,6 +256,7 @@ export function ComponentPreviewPane({
   const handledReviewTaskId = useRef<string | null>(null);
   const previousManagedTermId = useRef<string | null>(managedTermId);
   const launchTimerRef = useRef<number | null>(null);
+  const reservedPortsRef = useRef(new Set<number>());
   const [previewCanvasSize, setPreviewCanvasSize] = useState({
     width: 0,
     height: 0,
@@ -222,6 +270,10 @@ export function ComponentPreviewPane({
     (nextUrl: string) => {
       const parsed = new URL(nextUrl);
       const normalizedAddress = parsed.href.replace(/\/$/, "");
+      const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+      // Once the server is bound the allocator's bind probe protects it; the
+      // reservation only closes the gap between allocation and readiness.
+      if (Number.isInteger(port)) reservedPortsRef.current.delete(port);
       if (launchTimerRef.current !== null) {
         window.clearTimeout(launchTimerRef.current);
         launchTimerRef.current = null;
@@ -380,8 +432,20 @@ export function ComponentPreviewPane({
   }, [managedTermId]);
 
   useEffect(() => {
+    if (
+      managedTermId &&
+      !terminalSessions.some(
+        (session) => session.id === managedTermId && session.alive
+      )
+    ) {
+      onManagedTermChange(null);
+    }
+  }, [managedTermId, onManagedTermChange, terminalSessions]);
+
+  useEffect(() => {
     let cancelled = false;
-    setRuntime(null);
+    setRuntimes([]);
+    setRuntimeKey(null);
     previewUrlRef.current = null;
     setPreviewUrl(null);
     setMessage(null);
@@ -389,78 +453,14 @@ export function ComponentPreviewPane({
 
     if (!workspaceTree) return;
 
-    void resolveComponentPreview(workspaceTree, workspaceRoot)
-      .then(async (next) => {
+    void resolveComponentPreviews(workspaceTree, workspaceRoot)
+      .then((next) => {
         if (cancelled) return;
-        setRuntime(next);
-        // A workspace with no web target has nothing for this pane to set
-        // up. The tab that opens it is hidden in that case, so this is the
-        // race where the tree arrives after the pane mounted.
-        if (!next) return;
-        let savedAddress = "";
-        let savedCommand = "";
-        try {
-          savedAddress = localStorage.getItem(next.storageKey) ?? "";
-          savedCommand =
-            localStorage.getItem(`${next.storageKey}::command`) ?? "";
-        } catch {
-          // A blocked localStorage only means preview settings are not remembered.
-        }
-        const nextAddress = savedAddress || next.defaultUrl;
-        setAddress(nextAddress);
-        setCustomCommand(savedCommand);
-
-        const terminalName = `${next.projectName} page preview`;
-        const existing = useTerminalStore
-          .getState()
-          .sessions.find(
-            (session) => session.alive && session.name === terminalName
-          );
-        if (!existing) {
+        setRuntimes(next);
+        setRuntimeKey(next[0]?.storageKey ?? null);
+        if (next.length === 0) {
+          setMessage("Atelier could not find a browser-capable project in this workspace.");
           setLoading(false);
-          return;
-        }
-
-        onManagedTermChange(existing.id);
-        let historyUrl: string | null = null;
-        try {
-          const { data } = await bridge.rpc("terminal.getHistory", {
-            termId: existing.id,
-          });
-          historyUrl = extractLocalPreviewUrl(data);
-        } catch {
-          // A terminal can still be restarted when its history is unavailable.
-        }
-        if (cancelled) return;
-        let recoveredUrl: URL;
-        try {
-          recoveredUrl = new URL(historyUrl ?? nextAddress);
-          if (recoveredUrl.origin === window.location.origin) {
-            recoveredUrl = new URL(next.defaultUrl);
-          }
-        } catch {
-          recoveredUrl = new URL(next.defaultUrl);
-        }
-
-        // Terminal history is bounded, and Expo's startup URL can scroll out
-        // while later "Web Bundled" lines prove the process is still alive.
-        // Probe the remembered/default runtime address before declaring the
-        // existing preview dead; the readiness effect below confirms it over
-        // HTTP and reports a stale terminal after its normal timeout.
-        const normalizedAddress = recoveredUrl.href.replace(/\/$/, "");
-        setAddress(normalizedAddress);
-        setMessage("Checking the existing preview server…");
-        setLoading(false);
-        setLaunching(true);
-        launchTimerRef.current = window.setTimeout(() => {
-          launchTimerRef.current = null;
-          setLaunching(false);
-          setMessage("The previous preview server is no longer reachable. Start it again.");
-        }, 10_000);
-        try {
-          localStorage.setItem(next.storageKey, normalizedAddress);
-        } catch {
-          // Preview remains usable when localStorage is blocked or full.
         }
       })
       .catch((error: unknown) => {
@@ -468,7 +468,7 @@ export function ComponentPreviewPane({
         setMessage(
           error instanceof Error
             ? error.message
-            : "Atelier could not discover a preview runtime."
+            : "Atelier could not discover preview runtimes."
         );
         setLoading(false);
       });
@@ -476,7 +476,93 @@ export function ComponentPreviewPane({
     return () => {
       cancelled = true;
     };
-  }, [onManagedTermChange, workspaceRoot, workspaceTree]);
+    // The tree object changes on every save; only project layout changes
+    // should rediscover targets and reset the selected preview.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewLayoutSignature, workspaceRoot]);
+
+  useEffect(() => {
+    let cancelled = false;
+    previewUrlRef.current = null;
+    setPreviewUrl(null);
+    setMessage(null);
+    setTerminalPrompt(null);
+    setLaunching(false);
+
+    if (!runtime) return;
+
+    let savedAddress = "";
+    let savedCommand = "";
+    try {
+      savedAddress = localStorage.getItem(runtime.storageKey) ?? "";
+      savedCommand =
+        localStorage.getItem(`${runtime.storageKey}::command`) ?? "";
+    } catch {
+      // A blocked localStorage only means preview settings are not remembered.
+    }
+    const nextAddress = savedAddress || runtime.defaultUrl;
+    setAddress(nextAddress);
+    setCustomCommand(savedCommand);
+
+    const existing = findPreviewTerminal(
+      runtime,
+      runtimes,
+      useTerminalStore.getState().sessions
+    );
+    if (!existing) {
+      previousManagedTermId.current = null;
+      onManagedTermChange(null);
+      setLoading(false);
+      return;
+    }
+
+    onManagedTermChange(existing.id);
+    setLoading(false);
+    void bridge
+      .rpc("terminal.getHistory", { termId: existing.id })
+      .then(({ data }) => {
+        if (cancelled) return;
+        const historyUrl = extractLocalPreviewUrl(data);
+        let recoveredUrl: URL;
+        try {
+          recoveredUrl = new URL(historyUrl ?? nextAddress);
+          if (recoveredUrl.origin === window.location.origin) {
+            recoveredUrl = new URL(runtime.defaultUrl);
+          }
+        } catch {
+          recoveredUrl = new URL(runtime.defaultUrl);
+        }
+
+        // Terminal history is bounded, so probe the remembered address when
+        // the startup URL has already scrolled out of the terminal buffer.
+        const normalizedAddress = recoveredUrl.href.replace(/\/$/, "");
+        setAddress(normalizedAddress);
+        setMessage("Checking the existing preview server…");
+        setLaunching(true);
+        launchTimerRef.current = window.setTimeout(() => {
+          launchTimerRef.current = null;
+          setLaunching(false);
+          setMessage("The previous preview server is no longer reachable. Start it again.");
+        }, 10_000);
+        try {
+          localStorage.setItem(runtime.storageKey, normalizedAddress);
+        } catch {
+          // Preview remains usable when localStorage is blocked or full.
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setMessage("The preview terminal is running, but its address could not be recovered.");
+      });
+
+    return () => {
+      cancelled = true;
+      if (launchTimerRef.current !== null) {
+        window.clearTimeout(launchTimerRef.current);
+        launchTimerRef.current = null;
+      }
+    };
+  }, [onManagedTermChange, runtime, runtimes]);
 
   const useAddress = () => {
     const raw = address.trim();
@@ -511,76 +597,95 @@ export function ComponentPreviewPane({
 
   const launch = async () => {
     if (!runtime || launching) return;
-    const command = runtime.command ?? customCommand.trim();
-    if (!command) {
+    const baseCommand = runtime.command ?? customCommand.trim();
+    if (!baseCommand) {
       setMessage("Enter the command that starts your local development server.");
       return;
     }
 
-    /*
-     * Some targets need their web dependencies before they can serve one.
-     *
-     * An Expo app that has only ever run on a device has no react-dom or
-     * react-native-web, and `expo start --web` fails on exactly that. The
-     * install runs first, chained so the server only starts if it succeeded,
-     * and both are visible in the same terminal — this is a step of the
-     * launch, not something happening quietly elsewhere.
-     */
-    const windows = workspaceRoot?.includes("\\") ?? false;
-    const chained = runtime.prepareCommand
-      ? `${runtime.prepareCommand} && ${command}`
-      : command;
-
-    /*
-     * The environment the preview server starts in, and the two things
-     * wrong with inheriting it as-is.
-     *
-     * ATELIER_WEB_PORT is the desktop dev process advertising its own
-     * renderer port. It belongs to Atelier, not to apps launched from the
-     * preview terminal; leaking it makes Vite reuse Atelier's occupied port
-     * with strictPort enabled and the preview command exits immediately.
-     *
-     * BROWSER=none is the answer to a dev server that opens a system
-     * browser on boot. Expo's `--web`, Ionic, Create React App and any
-     * Vite config with `server.open` all do it, and the result is the app
-     * running in Chrome while Atelier's pane waits beside it — the preview
-     * is supposed to be in the pane. Vite, CRA and Expo (through
-     * better-opn) each read this variable and skip the launch.
-     *
-     * Both are set as shell state rather than as a one-command `env`
-     * prefix, because `chained` can be "install web deps && start server":
-     * a prefix would only reach the install and the server — the process
-     * that actually opens the browser and binds the port — would run with
-     * the environment untouched.
-     */
-    const isolatedCommand = windows
-      ? `Remove-Item Env:ATELIER_WEB_PORT -ErrorAction SilentlyContinue; $env:BROWSER='none'; ${chained}`
-      : `unset ATELIER_WEB_PORT; export BROWSER=none; ${chained}`;
-
     previewUrlRef.current = null;
     setPreviewUrl(null);
+    // Prevent the readiness effect from probing the previously selected
+    // project's address while the allocator is choosing this launch's port.
+    setAddress("");
     setLoading(false);
     setLaunching(true);
-    setMessage(null);
+    setMessage("Finding a free local port…");
     setTerminalPrompt(null);
+
+    let allocatedPort: number | null = null;
+    let commandStarted = false;
     try {
-      if (!runtime.command) {
+      const reservations = new Set(reservedPortsRef.current);
+      for (const candidate of runtimes) {
+        if (
+          !findPreviewTerminal(
+            candidate,
+            runtimes,
+            useTerminalStore.getState().sessions
+          )
+        ) {
+          continue;
+        }
         try {
-          localStorage.setItem(`${runtime.storageKey}::command`, command);
+          const saved = localStorage.getItem(candidate.storageKey);
+          if (!saved) continue;
+          const parsed = new URL(saved);
+          const port = Number(
+            parsed.port || (parsed.protocol === "https:" ? 443 : 80)
+          );
+          if (Number.isInteger(port)) reservations.add(port);
         } catch {
-          // The command still runs when localStorage is unavailable.
+          // The bind probe still catches a running server without saved state.
         }
       }
-      const terminalName = `${runtime.projectName} page preview`;
-      const existing = useTerminalStore
-        .getState()
-        .sessions.find((session) => session.alive && session.name === terminalName);
 
+      const allocation = await bridge.rpc("terminal.freePort", {
+        start: runtime.defaultPort,
+        exclude: [...reservations],
+      });
+      allocatedPort = allocation.port;
+      reservedPortsRef.current.add(allocatedPort);
+
+      const launchUrl = new URL(runtime.defaultUrl);
+      launchUrl.port = String(allocatedPort);
+      const normalizedAddress = launchUrl.href.replace(/\/$/, "");
+      setAddress(normalizedAddress);
+      try {
+        localStorage.setItem(runtime.storageKey, normalizedAddress);
+        if (!runtime.command) {
+          localStorage.setItem(
+            `${runtime.storageKey}::command`,
+            baseCommand
+          );
+        }
+      } catch {
+        // The launch remains usable when localStorage is blocked or full.
+      }
+
+      const command = previewCommandAtPort(
+        runtime,
+        baseCommand,
+        allocatedPort
+      );
+      const chained = runtime.prepareCommand
+        ? `${runtime.prepareCommand} && ${command}`
+        : command;
+      const windows = workspaceRoot?.includes("\\") ?? false;
+      const isolatedCommand = windows
+        ? `Remove-Item Env:ATELIER_WEB_PORT -ErrorAction SilentlyContinue; $env:BROWSER='none'; $env:PORT='${allocatedPort}'; ${chained}`
+        : `unset ATELIER_WEB_PORT; export BROWSER=none; export PORT=${allocatedPort}; ${chained}`;
+
+      const sessions = useTerminalStore.getState().sessions;
+      const existing = findPreviewTerminal(runtime, runtimes, sessions);
       let termId: string;
       if (existing) {
         termId = existing.id;
         useTerminalStore.getState().setActive(termId);
         onManagedTermChange(termId);
+        // Starting an existing preview is an explicit restart. Stop only this
+        // project's process tree; every other preview terminal stays alive.
+        await bridge.rpc("terminal.interrupt", { termId });
       } else {
         const separator = workspaceRoot?.includes("\\") ? "\\" : "/";
         const root = workspaceRoot?.replace(/[\\/]+$/, "") ?? "";
@@ -588,12 +693,11 @@ export function ComponentPreviewPane({
         const cwd = root && child ? `${root}${separator}${child}` : root || undefined;
         const { session } = await bridge.rpc("terminal.create", {
           ...(cwd ? { cwd } : {}),
-          name: terminalName,
+          name: previewTerminalName(runtime),
         });
         termId = session.id;
         useTerminalStore.getState().addSession(session);
-        // Publish the managed id before the command starts so readiness
-        // checks can follow this terminal from its first server output.
+        // Publish the id before writing so URL detection sees the first output.
         onManagedTermChange(termId);
       }
 
@@ -601,14 +705,13 @@ export function ComponentPreviewPane({
         termId,
         data: `${isolatedCommand}\r`,
       });
+      commandStarted = true;
       setMessage(
         runtime.prepareCommand
           ? `${runtime.prepareReason ?? "Preparing the web build"}, then starting it…`
           : existing
-            ? "Restarting the preview server in its integrated terminal…"
-            : runtime.command
-              ? `Starting ${runtime.storybook ? "Storybook" : runtime.framework} in the integrated terminal…`
-              : "Starting the custom preview command in the integrated terminal…"
+            ? `Restarting ${runtime.projectName} on port ${allocatedPort}…`
+            : `Starting ${runtime.storybook ? "Storybook" : runtime.framework} on port ${allocatedPort}…`
       );
       if (launchTimerRef.current !== null) {
         window.clearTimeout(launchTimerRef.current);
@@ -616,17 +719,18 @@ export function ComponentPreviewPane({
       launchTimerRef.current = window.setTimeout(
         () => {
           launchTimerRef.current = null;
+          reservedPortsRef.current.delete(allocation.port);
           setLaunching(false);
           setMessage(
             "The preview server did not become reachable. Check its integrated terminal output, then try again."
           );
         },
-        // Installing web dependencies is a package-manager download, which
-        // is minutes on a cold cache. Calling that a failed launch after 30
-        // seconds would be wrong about a launch that is going fine.
         runtime.prepareCommand ? 180_000 : 30_000
       );
     } catch (error) {
+      if (allocatedPort !== null && !commandStarted) {
+        reservedPortsRef.current.delete(allocatedPort);
+      }
       setLaunching(false);
       setMessage(
         error instanceof Error ? error.message : "The app preview server could not be started."
@@ -981,6 +1085,28 @@ export function ComponentPreviewPane({
             useAddress();
           }}
         >
+          {runtimes.length > 1 && (
+            <Select
+              value={runtime.storageKey}
+              onChange={(value) => {
+                if (value === runtime.storageKey) return;
+                setLoading(true);
+                setRuntimeKey(value);
+              }}
+              options={runtimes.map((candidate) => {
+                const running = Boolean(
+                  findPreviewTerminal(candidate, runtimes, terminalSessions)
+                );
+                return {
+                  value: candidate.storageKey,
+                  label: candidate.projectName,
+                  hint: `${running ? "Running" : "Ready"} · ${candidate.framework} · ${candidate.projectDir || "workspace root"}`,
+                };
+              })}
+              className="h-7 w-[min(12rem,24vw)] shrink-0 bg-muted/60"
+              menuClassName="w-[min(22rem,80vw)]"
+            />
+          )}
           <Server className="ml-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <Input
             value={address}

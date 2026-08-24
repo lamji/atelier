@@ -249,11 +249,18 @@ export class BridgeClient {
         payload: frame.payload,
       };
       for (const entry of this.subs.values()) {
-        if (topicMatches(entry.topic, frame.topic)) {
+        if (!topicMatches(entry.topic, frame.topic)) continue;
+        // PTY output is the user's typing echo. Its handler writes straight
+        // into xterm without touching React state, so animation-frame
+        // batching only adds visible input latency (and can become 100 ms
+        // when the window is background-throttled).
+        if (frame.topic === "terminal.data") {
+          entry.handler(eventFrame);
+        } else {
           this.eventQueue.push({ handler: entry.handler, frame: eventFrame });
         }
       }
-      this.scheduleFlush();
+      if (frame.topic !== "terminal.data") this.scheduleFlush();
     }
   }
 

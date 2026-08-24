@@ -75,6 +75,33 @@ export interface FeatureContextRefresh extends FeatureContextActivation {
     removedFiles: string[];
 }
 
+const DETAILED_REPORT_MARKERS = [
+    "### Entrypoint paths",
+    "### End-to-end flow graph",
+    "### Indexed call edges",
+    "### Import flow",
+    "### Feature files",
+] as const;
+
+/**
+ * Refuse to report a successful pin when the payload is only the legacy
+ * summary. A stale or incomplete bundle must fail visibly instead of claiming
+ * the conversation was equipped without showing the evidence graph.
+ */
+function requireDetailedReport(detail: string): string {
+    const missing = DETAILED_REPORT_MARKERS.filter(
+        (marker) => !detail.includes(marker)
+    );
+    if (missing.length > 0) {
+        throw new Error(
+            "Feature context was built without its detailed report (" +
+                missing.join(", ") +
+                "). Rebuild and restart the Atelier agent bundle."
+        );
+    }
+    return detail;
+}
+
 /**
  * The direct /context reply. Detail leads deliberately: the process rail is
  * the user's report surface, so it must open on entrypoints and flow rather
@@ -84,7 +111,7 @@ export function renderFeatureContextActivationReport(
     result: FeatureContextActivation
 ): string {
     return [
-        result.context.detail,
+        requireDetailedReport(result.context.detail),
         "",
         "---",
         "",
@@ -116,7 +143,7 @@ export function renderFeatureContextRefreshReport(
         changes.push("dropped " + featureFileList(result.removedFiles));
     }
     return [
-        result.context.detail,
+        requireDetailedReport(result.context.detail),
         "",
         "---",
         "",

@@ -98,6 +98,35 @@ function restoreSessionStateScript(state: string): string {
   })()`;
 }
 
+function showPreviewOAuthLoadingScript(): string {
+  const html = `
+    <head>
+      <meta name="color-scheme" content="light dark" />
+      <style>
+        html, body {
+          width: 100%;
+          height: 100%;
+          margin: 0;
+        }
+        body {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: Canvas;
+          color: CanvasText;
+          font: 14px system-ui, sans-serif;
+        }
+      </style>
+    </head>
+    <body>Opening Google sign-in…</body>
+  `;
+
+  return `(() => {
+    document.title = "Opening Google sign-in…";
+    document.documentElement.innerHTML = ${JSON.stringify(html)};
+  })()`;
+}
+
 function applyPreviewAuthStateScript(state: string): string {
   return `(() => {
     const entries = JSON.parse(${JSON.stringify(state)});
@@ -247,9 +276,15 @@ function openRedirectedPreviewOAuth(
       }
       if (popup.isDestroyed()) return;
 
+      await popup.webContents.executeJavaScript(
+        showPreviewOAuthLoadingScript()
+      );
+      if (popup.isDestroyed()) return;
+
       oauthStarted = true;
-      await popup.loadURL(url);
-      if (!popup.isDestroyed()) popup.show();
+      const oauthLoad = popup.loadURL(url);
+      popup.show();
+      await oauthLoad;
     })
     .catch((error: unknown) => {
       console.error("[preview] Failed to open OAuth window", error);
@@ -293,6 +328,24 @@ export function attachExternalLinkHandling(win: BrowserWindow): void {
     return { action: "deny" };
   });
 
+  win.webContents.on("will-frame-navigate", (event) => {
+    const frame = event.frame;
+    const frameUrl = frame?.url;
+    if (
+      event.isMainFrame ||
+      !frame ||
+      !frameUrl ||
+      !isPreviewFrame(win, frameUrl) ||
+      isLocal(event.url) ||
+      !isSafeExternal(event.url)
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    openRedirectedPreviewOAuth(win, frame, event.url);
+  });
+
   win.webContents.session.webRequest.onBeforeRequest(
     { urls: ["http://*/*", "https://*/*"] },
     (details, callback) => {
@@ -311,12 +364,9 @@ export function attachExternalLinkHandling(win: BrowserWindow): void {
         return;
       }
 
-      // Queue storage reads while the original preview document is still alive.
+      // Server-side redirects may bypass will-frame-navigate. Keep this
+      // request-level redirect as a fallback while preserving the local frame.
       openRedirectedPreviewOAuth(win, frame, details.url);
-
-      // Cancelling the request commits chrome-error://chromewebdata in the
-      // iframe. Redirecting it to its current local URL keeps the preview alive
-      // while the managed OAuth window completes the external navigation.
       callback({ redirectURL: frameUrl });
     }
   );

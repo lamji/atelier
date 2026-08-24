@@ -2,6 +2,14 @@ import { z } from "zod";
 import { TerminalSession } from "../models/terminal.js";
 
 export const terminalMethods = {
+  "terminal.freePort": {
+    params: z.object({
+      start: z.number().int().min(1).max(65_535),
+      span: z.number().int().min(1).max(1_000).optional(),
+      exclude: z.array(z.number().int().min(1).max(65_535)).optional(),
+    }),
+    result: z.object({ port: z.number().int().min(1).max(65_535) }),
+  },
   "terminal.create": {
     params: z.object({
       cwd: z.string().optional(),

@@ -531,11 +531,15 @@ function main(): void {
     check("checkpoint Markdown exists", fs.existsSync(path.join(checkpointDir, "task-recovery.md")));
 
     const restartedStore = new PlanCheckpointStore(tempRoot, pino({ level: "silent" }));
-    const context = restartedStore.resumeContext("conv-recovery", "task-next");
+    const context = restartedStore.resumeContext("conv-recovery", persisted.taskId);
     check("original request restored", context.includes("Original request: original request"));
     check("done work restored", context.includes("Done:\n- completed work"));
     check("interrupted work restored", context.includes("In progress when interrupted:\n- interrupted work"));
     check("todo work restored", context.includes("Todo:\n- remaining work"));
+    check(
+      "an unrelated continuation cannot revive an older unfinished plan",
+      restartedStore.resumeContext("conv-recovery", "task-without-plan") === ""
+    );
     firstStore.removeConversation("conv-recovery");
     firstTracker.updateStep("task-recovery", "r3", "in-progress");
     check("deleted session checkpoint stays deleted", !fs.existsSync(checkpointDir));

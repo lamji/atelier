@@ -1,3 +1,4 @@
+import { freePort } from "@atelier/shared/node";
 import type { Router } from "../bridge/router.js";
 import type { CliSessionDiffRepo } from "../storage/repositories/cli-session-diffs.js";
 import { listCliHistory } from "./cli-history.js";
@@ -9,6 +10,14 @@ export function registerTerminalHandlers(
   workspaceRoot: string,
   sessionDiffs: CliSessionDiffRepo
 ): void {
+  router.register("terminal.freePort", async (params) => ({
+    port: await freePort(
+      params.start,
+      params.span,
+      new Set(params.exclude ?? [])
+    ),
+  }));
+
   router.register("terminal.create", (params) => ({
     session: terminals.create(params),
   }));

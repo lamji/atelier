@@ -30,8 +30,20 @@ function main(): void {
   assert.match(ATELIER_EXECUTOR_CONTRACT, /complete source of task instructions/);
   assert.match(ATELIER_EXECUTOR_CONTRACT, /finish the implementation/);
   assert.match(ATELIER_EXECUTOR_CONTRACT, /do not stop at analysis/);
+  assert.match(ATELIER_EXECUTOR_CONTRACT, /EVIDENCE BOUNDARY/);
+  assert.match(
+    ATELIER_EXECUTOR_CONTRACT,
+    /feature-map membership.*does not prove what an asset/
+  );
+  assert.match(
+    ATELIER_EXECUTOR_CONTRACT,
+    /inspect the exact source or asset with the available read\/image tool/
+  );
+  assert.match(
+    ATELIER_EXECUTOR_CONTRACT,
+    /identity is unknown.*do not invent the missing fact/
+  );
   assert.match(ATELIER_EXECUTOR_CONTRACT, /plausible partial edit/);
-  assert.match(FAST_RULES, /SIMPLEST FIX WINS/);
   assert.match(FAST_RULES, /FLEX-FIRST UI LAYOUT/);
   assert.match(FAST_RULES, /display: flex/);
 

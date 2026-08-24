@@ -117,6 +117,7 @@ import {
   SearchGroundingGuard,
   SEARCH_GROUNDING_HOOK_ID,
   SEARCH_GROUNDING_HOOK_NAME,
+  SEARCH_GROUNDING_MATCHER,
 } from "./hooks/search-grounding-guard.js";
 import { ValidationRunners } from "./validation/runners.js";
 import { Retriever } from "./rag/retriever.js";
@@ -509,10 +510,21 @@ export function createAgentRuntime(
     name: SEARCH_GROUNDING_HOOK_NAME,
     enabled: true,
     event: "preTool",
-    matcher: "search_text|search_workspace",
+    matcher: SEARCH_GROUNDING_MATCHER,
     action: "block",
     argument: "Search for words from the turn, not invented ones",
   });
+  // Existing workspaces persist built-in hook configs. Upgrade only the
+  // previous default matcher so user-customized matchers stay untouched.
+  const storedSearchGrounding = hooks
+    .list()
+    .find((hook) => hook.id === SEARCH_GROUNDING_HOOK_ID);
+  if (storedSearchGrounding?.matcher === "search_text|search_workspace") {
+    hooks.save({
+      ...storedSearchGrounding,
+      matcher: SEARCH_GROUNDING_MATCHER,
+    });
+  }
   const searchGrounding = new SearchGroundingGuard(bus);
   hooks.registerGuard(SEARCH_GROUNDING_HOOK_ID, (ctx) =>
     directTasks.has(ctx.taskId)

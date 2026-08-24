@@ -53,15 +53,26 @@ export async function freePort(
   span = 100,
   skip: ReadonlySet<number> = new Set()
 ): Promise<number> {
-  for (let port = start; port < start + span; port++) {
-    if (skip.has(port)) continue;
-    const free = await new Promise<boolean>((resolve) => {
+  const canBindHost = (port: number, host: string): Promise<boolean> =>
+    new Promise((resolve) => {
       const server = net.createServer();
-      server.once("error", () => resolve(false));
+      server.once("error", (error: NodeJS.ErrnoException) => {
+        // Some stripped-down systems have no IPv6 loopback. That stack cannot
+        // conflict there, so its absence must not make every port unavailable.
+        resolve(error.code === "EAFNOSUPPORT" || error.code === "EADDRNOTAVAIL");
+      });
       server.once("listening", () => server.close(() => resolve(true)));
-      server.listen(port, "127.0.0.1");
+      server.listen(port, host);
     });
-    if (free) return port;
+
+  for (let port = start; port < start + span && port <= 65_535; port++) {
+    if (skip.has(port)) continue;
+    if (
+      (await canBindHost(port, "127.0.0.1")) &&
+      (await canBindHost(port, "::1"))
+    ) {
+      return port;
+    }
   }
-  return start;
+  throw new Error(`No free local port found from ${start} through ${start + span - 1}.`);
 }

@@ -9,6 +9,9 @@ export interface ComponentPreviewRuntime {
   script: string | null;
   command: string | null;
   defaultUrl: string;
+  defaultPort: number;
+  /** How the selected free port reaches this framework's dev server. */
+  portStrategy: "direct" | "script" | "environment" | "flutter";
   storageKey: string;
   storybook: boolean;
   /**
@@ -227,6 +230,30 @@ function previewStorageKey(workspaceRoot: string | null, projectDir: string): st
   )}`;
 }
 
+/** Apply an allocated port using the invocation style the runtime accepts. */
+export function previewCommandAtPort(
+  runtime: ComponentPreviewRuntime,
+  command: string,
+  port: number
+): string {
+  if (runtime.portStrategy === "environment") return command;
+  if (runtime.portStrategy === "flutter") {
+    return command.replace(/--web-port\s+\d{2,5}/, `--web-port ${port}`);
+  }
+  if (runtime.portStrategy === "direct") return `${command} --port ${port}`;
+
+  // Package scripts need their own argument separator. Ionic's detected
+  // command already has one for --no-open, so append beside that argument.
+  if (command.includes(" -- ")) return `${command} --port ${port}`;
+  if (
+    runtime.packageManager === "npm" ||
+    runtime.packageManager === "pnpm"
+  ) {
+    return `${command} -- --port ${port}`;
+  }
+  return `${command} --port ${port}`;
+}
+
 /**
  * The set of manifests a preview could come from. Callers use this as the
  * identity of the tree for preview purposes: the file watcher hands out a new
@@ -345,6 +372,8 @@ async function flutterCandidate(
       script: null,
       command: `flutter run -d web-server --web-hostname localhost --web-port ${port}`,
       defaultUrl: `http://localhost:${port}`,
+      defaultPort: port,
+      portStrategy: "flutter",
       storageKey: previewStorageKey(workspaceRoot, projectDir),
       storybook: false,
       ...(hasWebDir
@@ -405,10 +434,10 @@ async function detectPackageManager(
  * file is intentionally irrelevant: Page preview belongs to the workspace,
  * so it scans every visible package manifest and prefers web-framework apps.
  */
-export async function resolveComponentPreview(
+export async function resolveComponentPreviews(
   tree: FileTreeNode,
   workspaceRoot: string | null
-): Promise<ComponentPreviewRuntime | null> {
+): Promise<ComponentPreviewRuntime[]> {
   const manifests = await Promise.all(
     packageManifestPaths(tree).map(async (manifestPath) => {
       try {
@@ -548,6 +577,13 @@ export async function resolveComponentPreview(
           script: webScript,
           command,
           defaultUrl: `http://localhost:${toolkit?.web?.port ?? defaultPort}`,
+          defaultPort: toolkit?.web?.port ?? defaultPort,
+          portStrategy:
+            toolkit?.id === "expo"
+              ? "direct"
+              : deps["react-scripts"] && !deps["vite"]
+                ? "environment"
+                : "script",
           storageKey: previewStorageKey(workspaceRoot, projectDir),
           storybook,
           ...(prepareCommand ? { prepareCommand, prepareReason } : {}),
@@ -562,20 +598,16 @@ export async function resolveComponentPreview(
     )
   );
 
-  const best = [...candidates, ...flutter]
+  return [...candidates, ...flutter]
     .filter((candidate) => candidate !== null)
-    .sort((a, b) => b.score - a.score)[0];
+    .sort((a, b) => b.score - a.score)
+    .map((candidate) => candidate.runtime);
+}
 
-  /*
-   * null, not a fallback.
-   *
-   * The fallback runtime existed so the pane always had something to render,
-   * and the cost was a Page preview tab on projects that can never serve a
-   * page. Its callers now treat null as "this workspace has no web target"
-   * — the tab disappears, which is the honest answer.
-   */
-  if (best) return best.runtime;
-  // A workspace with no manifests at all (a Go service, a Python repo) is a
-  // different thing from one whose apps are all native: neither previews.
-  return null;
+/** The highest-ranked target, kept for callers that only need availability. */
+export async function resolveComponentPreview(
+  tree: FileTreeNode,
+  workspaceRoot: string | null
+): Promise<ComponentPreviewRuntime | null> {
+  return (await resolveComponentPreviews(tree, workspaceRoot))[0] ?? null;
 }
