@@ -34,37 +34,37 @@ export interface ContextBudget {
  */
 export const BUDGETS: Record<string, ContextBudget> = {
   light: {
-    codeTokens: 500,
-    refTokens: 150,
+    codeTokens: 300,
+    refTokens: 100,
     impactTokens: 0,
     companionTokens: 0,
     planTokens: 0,
-    summaryTokens: 150,
-    totalTokens: 900,
+    summaryTokens: 100,
+    totalTokens: 500,
     maxLevel: 4,
   },
   edit: {
-    codeTokens: 1000,
-    refTokens: 150,
-    impactTokens: 400,
-    companionTokens: 100,
-    // Steps carry per-step detail now, not bare titles — the plan is what
-    // the implementer executes against, so it gets room to say what changes.
-    planTokens: 320,
-    summaryTokens: 200,
-    totalTokens: 2320,
+    codeTokens: 700,
+    refTokens: 100,
+    impactTokens: 250,
+    companionTokens: 50,
+    // The live plan remains actionable, but compact enough to leave room for
+    // the exact source evidence the implementer needs.
+    planTokens: 200,
+    summaryTokens: 100,
+    totalTokens: 1400,
     maxLevel: 5,
   },
   feature: {
-    codeTokens: 1600,
-    refTokens: 200,
-    impactTokens: 500,
-    companionTokens: 150,
-    // A feature plan is the longest (up to 12 detailed steps) and the one
-    // most expensive to lose the tail of.
-    planTokens: 560,
-    summaryTokens: 250,
-    totalTokens: 3460,
+    codeTokens: 1000,
+    refTokens: 120,
+    impactTokens: 300,
+    companionTokens: 80,
+    // Feature turns keep the widest allowance without carrying a second
+    // near-complete copy of the repository evidence.
+    planTokens: 350,
+    summaryTokens: 150,
+    totalTokens: 2000,
     maxLevel: 5,
   },
 };

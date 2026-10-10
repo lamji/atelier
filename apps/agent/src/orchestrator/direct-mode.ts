@@ -1,18 +1,17 @@
 import type { TaskOptions } from "./orchestrator.js";
 
 /**
- * Direct mode: the composer's "System knowledge" checkbox, unticked.
+ * The agent flow, from scratch (2026-08-31): ONE model loop per turn.
  *
- * With it ON (the default, and the absence of the flag) a task runs the
- * full pipeline — intent, retrieval, impact, plan, validation, review,
- * session memory. With it OFF the turn is a plain Claude or Codex agent
- * loop over the workspace: no RAG, no graph, no blast radius, no plan
- * tracking, no memory written or recalled. The only things that survive
- * are the ones that are not knowledge at all — the workspace layout, the
- * user's own hooks, and the consent gates (git flow, database approval).
+ * The prompt, the conversation so far, the rules, every tool. No intent
+ * classifier, scope lock, retrieval stage, plan stage, review, validation,
+ * completion gate, nudge or continuation harness. The staged pipeline
+ * refused the model's tool calls 58 times in one afternoon and hid its
+ * reports; the user asked for it to be gone. It remains in the source
+ * tree only; agent turns never enter it.
  */
-export function isDirectMode(opts: TaskOptions): boolean {
-  return opts.systemKnowledge === false;
+export function isDirectMode(_opts: TaskOptions): boolean {
+  return true;
 }
 
 /**
@@ -36,61 +35,139 @@ export const DIRECT_TOOLS = [
   "list_dir",
   "git",
   "preview_review",
+  "preview_console",
+  "preview_test",
   "run_terminal",
 ];
 
 /**
- * The rules a direct turn carries instead of SYSTEM_RULES. Everything that
- * described the knowledge engine is gone; what remains is the environment
- * the model is actually in — nobody to answer it, a workspace it may not
- * leave, and two hooks that will stop it and ask the user.
+ * The rules every turn carries. Short on purpose: the environment the model
+ * is in, how to use the memory it is given, and the three boundaries the
+ * remaining hooks actually enforce (git flow, approval modals, workspace).
+ * Nothing here describes a refusal, because nothing refuses.
  */
 export const DIRECT_RULES =
-  "SYSTEM KNOWLEDGE OFF: this turn deliberately runs without Atelier's " +
-  "knowledge engine — no retrieval, no impact analysis, no plan tracking, " +
-  "no session memory. Work from the workspace itself: search and read the " +
-  "files you need, then make the change.\n" +
-  "CHEAPEST CHECK FIRST: when something does not work, run the smallest " +
-  "decisive check before theorising about a cause. Is the process alive, " +
-  "is the port listening, is the container up, does the file exist, what " +
-  "does the command return RIGHT NOW. Only after those come config, env " +
-  "and code. A log file, a cached output or an earlier run is HISTORY, " +
-  "never proof of the current state — never cite one as evidence that " +
-  "something is running. Name a cause only once a check you ran this turn " +
-  "confirmed it; otherwise say which check you are running next.\n" +
-  "AUTONOMOUS EXECUTION: you are running unattended — nobody is there to " +
-  "answer you mid-turn. Never end a turn by asking whether to proceed or " +
-  "by offering to implement. Where something is genuinely ambiguous, " +
-  "choose the most reasonable default, state it in one line as an " +
-  "assumption, and build it.\n" +
-  "WORKSPACE BOUNDARY: use workspace-relative paths for project work. " +
-  "Installed skills are runtime instructions, not project files: read " +
-  "their SKILL.md and any referenced resources from their registered " +
-  "external paths without treating them as part of the workspace or its " +
-  "project/folder lock. A path the user explicitly named outside the " +
-  "workspace is likewise an authorized read-only reference: read it " +
-  "directly without asking the user to widen the workspace. Do not search " +
-  "other external locations, and do not create, modify, delete, or run " +
-  "commands outside the workspace.\n" +
-  "GIT FLOW RULE (enforced by a blocking hook): never commit, push, or " +
-  "open a pull request yourself — not with the git tool, not through " +
-  "run_terminal. Staging, status, log and diff are fine. When the work " +
-  "is ready, say so and let the user run the commit → push → PR wizard.\n" +
-  "DATABASE RULE (enforced by an approval hook): when the task needs a " +
-  "migration or DB command RUN, actually run it — the run_terminal call " +
-  "pauses in an approval modal where the user approves or cancels; that " +
-  "prompt IS how you ask permission. Only after the user cancels do you " +
-  "stop and explain.\n" +
-  "REPORTING: the process rail already shows every read/search/edit as it " +
-  "happens, so do NOT narrate each step in prose as you go. Save your " +
-  "explanation for ONE final report written LAST, as markdown bullet " +
-  "points — one '- ' bullet per change or finding.\n";
+  "ATELIER: you are the coding agent inside the user's editor, running " +
+  "unattended — nobody answers you mid-turn. Do the work the latest message " +
+  "asks for: read what you need, search, edit with replace_code / " +
+  "replace_many (write_file for new files or true rewrites), run commands, " +
+  "verify, then report once as concise markdown bullets — what changed, " +
+  "where, how you checked. Never end a turn by asking whether to proceed or " +
+  "by offering to implement; where something is ambiguous, pick the " +
+  "reasonable default, state it in one line, and build it.\n" +
+  "WORK: for a change you could describe in one sentence, do it directly. " +
+  "For anything touching several files or an unfamiliar area, look first, " +
+  "then state the plan in two or three lines, then implement it. Prefer " +
+  "the Agent tool with the `investigator` subagent for broad " +
+  "investigations, so hundreds of file reads do not fill this window, and " +
+  "the `reviewer` subagent before reporting a non-trivial change as done. " +
+  "Run several independent tool calls in ONE message.\n" +
+  "SEARCH: work like a CLI: list directories, search literal text, read " +
+  "the matching source, and follow its imports and callers. Use search_text " +
+  "or search_workspace. Copy search terms from the user's request, supplied " +
+  "context, directory entries, or actual tool results. Never invent likely " +
+  "identifiers, paths, labels, or phrases to search for. If no concrete " +
+  "term is available, list_dir and read the relevant files first. Start " +
+  "with literal search; build regex alternatives only from observed terms. " +
+  "An empty match is not evidence that a feature does not exist.\n" +
+  "VERIFY WITH EVIDENCE: after a change, run the narrowest check that " +
+  "proves it — the failing test, a typecheck, a build, a curl, the preview " +
+  "tools — and put the command and its result in the report. A claim " +
+  "without evidence is not done; a check that fails means keep working.\n" +
+  "MEMORY: the CONVERSATION SO FAR block, when present, is what " +
+  "was said and done earlier in this chat — a terse reply refers to the " +
+  "closing part of your previous answer. PREVIOUSLY GATHERED CONTEXT is " +
+  "what earlier turns already read; reuse it rather than re-reading " +
+  "unchanged files.\n" +
+  "BOUNDARY: workspace changes stay inside the active scope (the open " +
+  "project). Never commit, push, or open a PR — the user does that. " +
+  "Database and package commands use Atelier's approval modal. Installed " +
+  "skills are runtime instructions, not project files: read their SKILL.md " +
+  "and referenced resources from their registered external paths. A path " +
+  "the user explicitly named outside the workspace is an authorized " +
+  "read-only reference: read it directly.\n";
 
-/** How many prior turns ride along as plain conversation history. */
-const MAX_PRIOR_TURNS = 4;
+/** Hard caps for the locally assembled context (the user prompt is separate). */
+export const LIGHT_LAYOUT_CHARS = 4_000;
+export const LIGHT_USER_RULE_CHARS = 6_000;
+/**
+ * The carried conversation: the previous answer whole, the exchange before
+ * it, what those turns did. It was 900 chars — two turns cut to 360 chars
+ * each, head only — and the recommendation at the end of the previous
+ * answer, the thing every terse follow-up points at, was the part cut.
+ * ~14k chars is ~3.5k tokens, on turns that read 70k+ from cache: the
+ * cheapest way to make the next turn not re-derive the last one.
+ */
+export const LIGHT_APPEND_CHARS = 60_000;
+export const LIGHT_VIBE_CHARS = 2_000;
+export const LIGHT_CONTEXT_MAX_CHARS = 80_000;
+
+/** Local, deterministic compression: no model request is spent summarizing. */
+export function clipLightContext(text: string, maxChars: number): string {
+  const compact = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+/** Hard ceiling for a fresh automated continuation's execution state. */
+export const EXECUTION_CHECKPOINT_MAX_CHARS = 6_500;
+
+export interface ExecutionCheckpointInput {
+  request: string;
+  outstanding: string;
+  goal?: string;
+  steps: Array<{
+    title: string;
+    status?: string;
+    files?: string[];
+  }>;
+  changedFiles: string[];
+}
+
+/**
+ * Replaces an ever-growing native provider transcript between automated
+ * continuation rounds. The carried execute context still supplies the exact
+ * retrieved evidence; this checkpoint adds only the live state needed to
+ * finish from it, without paying again for every earlier tool call.
+ */
+export function renderExecutionCheckpoint(
+  input: ExecutionCheckpointInput
+): string {
+  const steps = input.steps
+    .map((step, index) => {
+      const files = step.files?.length
+        ? ` — ${clipLightContext(step.files.join(", "), 240)}`
+        : "";
+      return `${index + 1}. [${step.status ?? "pending"}] ${clipLightContext(
+        step.title,
+        220
+      )}${files}`;
+    })
+    .join("\n");
+  const changed = input.changedFiles.length
+    ? clipLightContext(input.changedFiles.join(", "), 600)
+    : "none yet";
+  const checkpoint = [
+    "EXECUTION CHECKPOINT (fresh bounded continuation; do not reconstruct the earlier transcript)",
+    `OUTSTANDING WORK:\n${clipLightContext(input.outstanding, 1_600)}`,
+    `LATEST REQUEST:\n${clipLightContext(input.request, 1_200)}`,
+    input.goal?.trim()
+      ? `PLAN GOAL:\n${clipLightContext(input.goal, 500)}`
+      : "",
+    `LIVE PLAN:\n${steps || "No tracked plan."}`,
+    `CHANGED FILES:\n${changed}`,
+    "Continue from this checkpoint and the carried evidence. Do not repeat broad investigation. Inspect only the exact current source needed to finish or verify the open work.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return clipLightContext(checkpoint, EXECUTION_CHECKPOINT_MAX_CHARS);
+}
+
+/** How many prior turns ride along in LIGHT mode. */
+const MAX_PRIOR_TURNS = 2;
 
 /** A prior turn is quoted this far and no further. */
-const MAX_TURN_CHARS = 1200;
+const MAX_TURN_CHARS = 360;
 
 /**
  * The conversation so far, verbatim.

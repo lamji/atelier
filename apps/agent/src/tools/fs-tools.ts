@@ -157,11 +157,6 @@ export function registerFsTools(
     }
   );
 
-  // NOTE: search_workspace is registered by registerKnowledgeTools so it
-  // resolves through the live engine-knowledge index (fast + relevance
-  // ranked), not a native filesystem scan. files.search stays for the UI
-  // editor grep (fs.search RPC) and internal word-boundary lookups.
-
   // Model-facing listing: a wrong path returns the nearest real directory
   // plus a note naming what was missing, instead of a dead-end ENOENT the
   // model cannot recover from. The UI editor keeps the strict fs.list RPC.
@@ -170,8 +165,9 @@ export function registerFsTools(
     async (input: { path?: string }) => files.listForModel(input.path ?? "")
   );
 
-  registry.register(
-    "search_text",
+  // Both search names read current source bytes, without an index or parser.
+  for (const name of ["search_text", "search_workspace"]) registry.register(
+    name,
     async (
       input: {
         query: string;

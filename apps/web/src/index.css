@@ -607,9 +607,15 @@ input:disabled,
  * strip: same job, but it reads as a control rather than as open documents,
  * which is the distinction the whole rebrand turns on.
  */
+/* The track has to read against the app canvas, not just against a panel:
+   in light mode --atelier-bg-hover (#eff3f3) and --atelier-bg-app (#eef1f2)
+   are the same colour to the eye, so on the header the strip vanished. The
+   deeper fill plus a hairline ring — inset, so the track keeps its height —
+   makes it a control on every surface it sits on. */
 .segmented {
   @apply inline-flex items-center gap-0.5 rounded-full p-1;
-  background: var(--atelier-bg-hover);
+  background: var(--atelier-bg-active);
+  box-shadow: inset 0 0 0 1px var(--atelier-border);
 }
 .segment {
   @apply inline-flex h-7 items-center gap-1.5 rounded-full px-3;

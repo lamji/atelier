@@ -1,5 +1,6 @@
 /**
- * Verifies the session scope lock and multi-repo git routing against a
+ * Verifies the session working set (anchors, named paths — and that NO
+ * project lock is produced any more) and multi-repo git routing against a
  * REAL container folder — one that is not itself a git repo but holds
  * several checkouts side by side, which is the shape both bugs needed.
  *
@@ -94,8 +95,10 @@ async function main(): Promise<void> {
     parseMentions("@no-such-project/src", CONTAINER).length === 0
   );
 
-  // ── lock, stickiness, anchors ────────────────────────────────────────
-  console.log("\nscope lock");
+  // ── no lock, anchors only ────────────────────────────────────────────
+  // Project locking was removed on 2026-08-29: a mention is a subject and
+  // an anchor, never a boundary. These pin that nothing produces roots.
+  console.log("\nno scope lock");
   const db = memoryDb();
   const store = new SessionScopeStore(db, CONTAINER);
   const profile = await detectWorkspaceProfile(CONTAINER);
@@ -107,20 +110,15 @@ async function main(): Promise<void> {
 
   const first = store.resolve("conv1", prompt, profile);
   check(
-    "mention locks the session",
-    first.roots.length === 1 && first.roots[0] === project,
+    "a folder mention never locks",
+    first.roots.length === 0,
     JSON.stringify(first.roots)
   );
-  check("lock is reported as a mention", first.source === "mention");
 
   // The follow-up from the screenshot: no path named at all.
   const followUp = store.resolve("conv1", "add bg to each badge", profile);
-  check(
-    "follow-up inherits the lock",
-    followUp.roots.length === 1 && followUp.roots[0] === project,
-    JSON.stringify(followUp.roots)
-  );
-  check("inherited lock is labelled", followUp.source === "inherited");
+  check("a follow-up inherits no lock", followUp.roots.length === 0);
+  check("nothing is labelled inherited", followUp.source !== "inherited");
 
   store.noteTouched("conv1", `${project}/src/components/ui/badge.tsx`);
   const anchored = store.resolve("conv1", "now make it bold", profile);
@@ -134,13 +132,17 @@ async function main(): Promise<void> {
     store.resolve("conv2", "hello", profile).roots.length === 0
   );
   check(
-    "glob confines retrieval",
-    scopeGlob(anchored) === `${project}/**`,
+    "retrieval is never clamped by a glob",
+    scopeGlob(anchored) === undefined,
     String(scopeGlob(anchored))
   );
   check(
-    "lock renders a prompt block",
-    renderScope(anchored, workingSet(anchored, [])).includes("LOCKED")
+    "no LOCKED block is rendered",
+    !renderScope(anchored, workingSet(anchored, [])).includes("LOCKED")
+  );
+  check(
+    "every path is in scope",
+    inScope(anchored, "some-other-project/src/x.ts")
   );
 
   // ── anchors expire unless the turn re-earns them ─────────────────────
@@ -190,85 +192,50 @@ async function main(): Promise<void> {
     JSON.stringify(set)
   );
 
-  // ── explicit lock (the git wizard's fix agent) ───────────────────────
-  // Its prompt is command output: no folder to mention, so the caller
-  // hands over the checkout it already knows.
+  // ── explicit lock requests (the git wizard's fix agent) are no-ops ───
   const explicit = store.lock("conv3", [project]);
   check(
-    "an explicit lock confines the conversation",
-    explicit.roots.length === 1 && explicit.roots[0] === project,
+    "an explicit lock request confines nothing",
+    explicit.roots.length === 0,
     JSON.stringify(explicit.roots)
   );
-  check("explicit lock is labelled", explicit.source === "explicit");
   check(
-    "the explicit lock sticks for follow-ups",
-    store.resolve("conv3", "still failing, try again", profile).roots[0] ===
-      project
+    "and nothing sticks for follow-ups",
+    store.resolve("conv3", "still failing, try again", profile).roots.length === 0
   );
   check(
-    "a sibling checkout is out of scope",
-    !inScope(explicit, `${pickSecondProject(CONTAINER, project) ?? "other"}/.git/config`)
-  );
-  check(
-    "the locked repo's own files stay in scope",
-    inScope(explicit, `${project}/.git/config`)
-  );
-  check(
-    "a repo AT the workspace root does not lock",
-    store.lock("conv4", ["."]).roots.length === 0
-  );
-  check(
-    "a root that does not exist is dropped",
-    store.lock("conv5", ["no-such-project"]).roots.length === 0
+    "a sibling checkout stays in scope",
+    inScope(explicit, `${pickSecondProject(CONTAINER, project) ?? "other"}/.git/config`)
   );
 
-  // ── tool boundary ────────────────────────────────────────────────────
+  // ── tool boundary: nothing is bound, nothing is refused ──────────────
   console.log("\ntool guard");
   const guard = new ScopeGuard();
   guard.bind("task1", anchored);
   const inside = `${project}/src/components/ui/badge.tsx`;
   const outside = "some-other-project/src/components/ui/badge.tsx";
 
-  let allowed = true;
-  try {
-    guard.check("read_file", { path: inside }, "task1");
-  } catch {
-    allowed = false;
-  }
-  check("in-scope read is allowed", allowed);
-
-  let blocked = false;
-  let reason = "";
-  try {
-    guard.check("read_file", { path: outside }, "task1");
-  } catch (error) {
-    blocked = true;
-    reason = String(error);
-  }
-  check("out-of-scope read is blocked", blocked);
+  const refused = (tool: string, input: unknown): boolean => {
+    try {
+      guard.check(tool, input, "task1");
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  check("a read inside the project is allowed", !refused("read_file", { path: inside }));
+  check("a read in another project is allowed", !refused("read_file", { path: outside }));
   check(
-    "denial names the lock",
-    reason.includes(project),
-    reason.slice(0, 90)
+    "a write in another project is allowed",
+    !refused("write_file", { path: outside, content: "x" })
   );
-
-  let writeBlocked = false;
-  try {
-    guard.check("write_file", { path: outside, content: "x" }, "task1");
-  } catch {
-    writeBlocked = true;
-  }
-  check("out-of-scope write is blocked", writeBlocked);
-
   const clamped = guard.check("search_workspace", { query: "badge" }, "task1");
   check(
-    "search is clamped to the lock",
-    (clamped as { glob?: string }).glob === `${project}/**`,
+    "search is not clamped",
+    (clamped as { glob?: string }).glob === undefined,
     String((clamped as { glob?: string }).glob)
   );
 
-  // Two folders at once: no glob can express it, so the guard must fall
-  // back to blocking rather than clamping to a glob that matches nothing.
   const second = pickSecondProject(CONTAINER, project);
   if (second) {
     const both = store.resolve(
@@ -277,65 +244,18 @@ async function main(): Promise<void> {
       profile
     );
     check(
-      "two mentions lock both",
-      both.roots.length === 2,
+      "two mentions lock nothing either",
+      both.roots.length === 0,
       JSON.stringify(both.roots)
     );
-    check("multi-root has no glob", scopeGlob(both) === undefined);
     check(
-      "both roots are in scope",
+      "every project is in scope",
       inScope(both, `${project}/src/x.ts`) &&
-        inScope(both, `${second}/src/x.ts`)
+        inScope(both, `${second}/src/x.ts`) &&
+        inScope(both, "some-other-project/src/x.ts")
     );
-    check(
-      "a third project is still out",
-      !inScope(both, "some-other-project/src/x.ts")
-    );
-    guard.bind("task2", both);
-    const untouched = guard.check(
-      "search_workspace",
-      { query: "badge", glob: "**/*.tsx" },
-      "task2"
-    );
-    check(
-      "multi-root search is left wide, not broken",
-      (untouched as { glob?: string }).glob === "**/*.tsx"
-    );
-    // A folder the profile does not recognise as a project — no manifest of
-    // its own — must still land inside the lock its siblings create, or the
-    // agent refuses to read a folder the user just pointed at.
-    const partial = {
-      ...profile,
-      projects: profile.projects.filter(
-        (entry) => path.basename(entry.path) !== second
-      ),
-    };
-    const mixed = store.resolve(
-      "conv6",
-      `compare @${project}/ with @${second}/`,
-      partial
-    );
-    check(
-      "an unrecognised mentioned folder is still locked",
-      mixed.roots.includes(second),
-      JSON.stringify(mixed.roots)
-    );
-    check(
-      "and it is readable under that lock",
-      inScope(mixed, `${second}/src/x.ts`)
-    );
-
-    guard.release("task2");
   }
-
   guard.release("task1");
-  let afterRelease = true;
-  try {
-    guard.check("read_file", { path: outside }, "task1");
-  } catch {
-    afterRelease = false;
-  }
-  check("release drops the binding", afterRelease);
 
   // ── git routing ──────────────────────────────────────────────────────
   console.log("\ngit routing");

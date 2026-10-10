@@ -18,6 +18,14 @@ export type {
 
 export type ConnectionState = "disconnected" | "connecting" | "connected";
 
+/** A rectangle normalized to an image: 0..1 on both axes, from the top-left. */
+export interface NormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** Image staged in the composer, including screenshots captured in preview. */
 export interface PendingImage {
   id: string;
@@ -30,6 +38,18 @@ export interface PendingImage {
   path?: string;
   /** Live preview URL captured with the image, including its current route. */
   sourceUrl?: string;
+  /**
+   * Regions the user drew on a preview screenshot. They are burned into the
+   * pixels too, but the model cannot grep pixels: the composer maps these
+   * onto the live iframe and asks the DOM what text sits under each one.
+   */
+  highlights?: NormalizedRect[];
+  /**
+   * The area the screenshot covers, in the preview iframe's own CSS pixels
+   * (the pane scales the iframe to fit, so this is not the image size).
+   * highlight × captureSize = iframe viewport coordinates.
+   */
+  captureSize?: { width: number; height: number };
 }
 
 export interface TimelineEntryVm {

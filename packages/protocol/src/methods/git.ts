@@ -1,11 +1,15 @@
 import { z } from "zod";
 import {
   GitBranch,
+  GitBlameLine,
+  GitBranchState,
   GitCommit,
+  GitCommitFile,
   GitConflictFile,
   GitFlowInfo,
   GitForge,
   GitForgeAuthSource,
+  GitForgeCredential,
   GitForgeStatus,
   GitOpResult,
   GitPullMode,
@@ -31,6 +35,8 @@ const GitPullRequestList = z.object({
   status: GitForgeStatus,
   /** Which credential answered; absent when none did. */
   source: GitForgeAuthSource.optional(),
+  /** API-capable credentials discovered from CLI, env and git helper. */
+  credentials: z.array(GitForgeCredential),
   /** "owner/name" on the forge, for the pane's status strip. */
   repo: z.string().optional(),
   /** Account the answering credential belongs to, when it named one. */
@@ -67,8 +73,42 @@ export const gitMethods = {
     result: z.object({ status: GitStatus }),
   },
   "git.log": {
-    params: z.object({ maxCount: z.number().optional() }).optional(),
+    params: z
+      .object({
+        maxCount: z.number().optional(),
+        /** Every branch, tag and remote ref, not just HEAD's ancestry. */
+        all: z.boolean().optional(),
+        /** One local or remote branch ref to walk without checking it out. */
+        ref: z.string().optional(),
+        /** Repo-relative file: that file's history, following renames. */
+        path: z.string().optional(),
+      })
+      .optional(),
     result: z.object({ commits: z.array(GitCommit) }),
+  },
+  // Files a commit changed against its first parent (the empty tree for a
+  // root commit). Paths are repo-relative to the active checkout.
+  "git.commitFiles": {
+    params: z.object({ hash: z.string() }),
+    result: z.object({
+      files: z.array(GitCommitFile),
+      parents: z.array(z.string()),
+    }),
+  },
+  // Full contents of one file on both sides of a commit, for a diff view.
+  "git.commitFileDiff": {
+    params: z.object({
+      hash: z.string(),
+      path: z.string(),
+      oldPath: z.string().optional(),
+    }),
+    result: z.object({ before: z.string(), after: z.string() }),
+  },
+  // `git blame` of a repo-relative file at a revision (working tree when
+  // `ref` is absent).
+  "git.blame": {
+    params: z.object({ path: z.string(), ref: z.string().optional() }),
+    result: z.object({ lines: z.array(GitBlameLine) }),
   },
   "git.diff": {
     params: z.object({
@@ -97,8 +137,35 @@ export const gitMethods = {
     result: z.object({}),
   },
   "git.commit": {
-    params: z.object({ message: z.string() }),
+    params: z.object({
+      message: z.string(),
+      /**
+       * Rewrite HEAD instead of adding a commit. The commit box defaults
+       * it on once the branch owns exactly one commit, so a branch stays
+       * one dated changelog entry rather than a trail of fixups.
+       */
+      amend: z.boolean().optional(),
+    }),
     result: z.object({ hash: z.string() }),
+  },
+  /**
+   * Adds a second forge account from a token the user pastes, after
+   * verifying with the forge which account it belongs to. Handed to gh so
+   * it persists; Atelier never writes credentials to disk itself.
+   */
+  "git.addForgeAccount": {
+    params: z.object({ token: z.string() }),
+    result: z.object({
+      ok: z.boolean(),
+      login: z.string().optional(),
+      persisted: z.boolean(),
+      reason: z.string().optional(),
+    }),
+  },
+  // Facts the commit box needs to choose amend vs new commit.
+  "git.branchState": {
+    params: z.object({}).optional(),
+    result: z.object({ state: GitBranchState }),
   },
   "git.branches": {
     params: z.object({}).optional(),
@@ -117,7 +184,12 @@ export const gitMethods = {
   // Drafts a commit message from the current changes with Claude Haiku.
   // The UI puts it in the commit box where the user can edit it.
   "git.generateCommitMessage": {
-    params: z.object({}).optional(),
+    params: z
+      .object({
+        /** Model id the draft runs on; absent means the app's selected model. */
+        model: z.string().optional(),
+      })
+      .optional(),
     result: z.object({ message: z.string() }),
   },
 
@@ -131,7 +203,12 @@ export const gitMethods = {
   },
   // Haiku-suggested feature-branch name for the auto-branch step.
   "git.suggestBranchName": {
-    params: z.object({}).optional(),
+    params: z
+      .object({
+        /** Model id the suggestion runs on; absent means the app's selected model. */
+        model: z.string().optional(),
+      })
+      .optional(),
     result: z.object({ name: z.string() }),
   },
   // stageAll re-stages everything first (used after AI fixes touch files).
@@ -139,6 +216,8 @@ export const gitMethods = {
     params: z.object({
       message: z.string(),
       stageAll: z.boolean().optional(),
+      /** Rewrite the branch's existing commit instead of adding one. */
+      amend: z.boolean().optional(),
     }),
     result: z.object({ result: GitOpResult }),
   },
@@ -191,19 +270,61 @@ export const gitMethods = {
     params: z.object({ base: z.string() }),
     result: z.object({ result: GitOpResult }),
   },
-  // Haiku-drafted PR title/body from commits vs the base branch.
+  // AI-drafted PR title/body from commits vs the base branch.
   "git.generatePrDescription": {
-    params: z.object({ base: z.string() }),
+    params: z.object({
+      base: z.string(),
+      /** Branch to describe. Absent means the current checkout. */
+      head: z.string().optional(),
+      /**
+       * Model id the draft runs on (any provider the picker lists). Absent
+       * means the app's selected model, which used to be the only option.
+       */
+      model: z.string().optional(),
+    }),
     result: z.object({ title: z.string(), body: z.string() }),
   },
-  // gh pr create; head is the current branch. result.url on success.
+  // gh pr create. result.url on success.
   "git.createPr": {
     params: z.object({
       base: z.string(),
+      /**
+       * Branch to merge FROM. Absent means the current checkout, which is
+       * what the wizard sends; the compare screen names it explicitly so a
+       * request can be opened for a branch you are not standing on.
+       */
+      head: z.string().optional(),
       title: z.string(),
       body: z.string(),
+      /**
+       * Which forge account opens the PR — an opaque id from
+       * `git.prCredentials`. Omit to let Atelier match the account this
+       * checkout pushes as, which is the right answer on a machine with
+       * more than one GitHub login.
+       */
+      credentialId: z.string().optional(),
     }),
     result: z.object({ result: GitOpResult }),
+  },
+
+  /**
+   * Forge accounts that could open a pull request for `origin`, best
+   * first, plus the one the checkout's own git identity points at.
+   *
+   * Read by the describe screen's account picker. Tokens never leave the
+   * agent; the browser only ever sees the opaque ids.
+   */
+  "git.prCredentials": {
+    params: z.object({}).optional(),
+    result: z.object({
+      credentials: z.array(GitForgeCredential),
+      /** Credential matching the account git pushes as, when there is one. */
+      suggestedId: z.string().optional(),
+      /** Login git authenticates as on this checkout. */
+      identity: z.string().optional(),
+      host: z.string().optional(),
+      repo: z.string().optional(),
+    }),
   },
 
   /**
@@ -214,7 +335,12 @@ export const gitMethods = {
    * empty and the pane picks its next action from that.
    */
   "git.pullRequests": {
-    params: z.object({}).optional(),
+    params: z
+      .object({
+        /** Opaque id from result.credentials; omit to try credentials automatically. */
+        credentialId: z.string().optional(),
+      })
+      .optional(),
     result: GitPullRequestList,
   },
 
@@ -224,7 +350,7 @@ export const gitMethods = {
    * signed-out pane is a login that happened after the agent started.
    */
   "git.forgeConnect": {
-    params: z.object({}).optional(),
+    params: z.object({ credentialId: z.string().optional() }).optional(),
     result: GitPullRequestList,
   },
 

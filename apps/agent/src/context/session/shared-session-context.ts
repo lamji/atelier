@@ -1,10 +1,15 @@
 import { approxTokens, clipToTokens } from "@atelier/shared";
 import type { ChatMessage } from "@atelier/protocol";
+import { clipKeepingRefs } from "./clip-keeping-refs.js";
 import type { ConversationRepo } from "../../storage/repositories/conversations.js";
 import type {
   TaskSummary,
   TaskSummaryStore,
 } from "../summaries/index.js";
+import type {
+  CommandMeta,
+  TaskActions,
+} from "../working-memory/working-memory-store.js";
 
 export interface SharedSessionContextInput {
   conversationId: string;
@@ -32,23 +37,36 @@ export interface SharedSessionContext {
   summaries: number;
   /** Verbatim prior turns included in the block. */
   turns: number;
+  /** Earlier tasks whose edits/commands/reads are listed in the block. */
+  actions: number;
   tokens: number;
   /** Short labels for what was recalled, newest first. */
   labels: string[];
 }
 
-const DEFAULT_MAX_TOKENS = 900;
+const DEFAULT_MAX_TOKENS = 1600;
 /**
  * Share of the block reserved for verbatim turns. They are the only record of
  * what was actually SAID — summaries can be recovered from RAG, an exchange
  * cannot — so they are budgeted first and the summaries take what is left.
  */
-const TURNS_SHARE = 0.6;
+const TURNS_SHARE = 0.65;
+/**
+ * Ceiling for the record of what earlier turns DID. It is addresses and
+ * exit codes, so it rarely gets near this; the cap only stops a turn that
+ * ran forty commands from eating the exchange.
+ */
+const ACTIONS_SHARE = 0.15;
+/** Prior messages considered for the turns section. */
+const TURN_WINDOW = 16;
+/** Earlier tasks whose actions are listed. */
+const ACTION_TASKS = 2;
 
 export const EMPTY_SHARED_SESSION: SharedSessionContext = {
   text: "",
   summaries: 0,
   turns: 0,
+  actions: 0,
   tokens: 0,
   labels: [],
 };
@@ -56,6 +74,12 @@ export const EMPTY_SHARED_SESSION: SharedSessionContext = {
 /**
  * Provider-neutral conversation memory. Claude, Codex and Ollama cannot share
  * each other's native session ids, so Atelier owns continuity here.
+ *
+ * The native transcript a CLI replays carries three things: what was said,
+ * what was done (tool calls and their output), and what was read. This block
+ * carries the same three — the exchange verbatim, the work as addresses and
+ * outcomes, the reading as paths — at a small fraction of the tokens,
+ * because it never replays a tool result the model can re-fetch.
  *
  * This block is complementary to retrieved session-memory chunks, never
  * replaced by them: RAG finds the relevant OLD work, this carries the RECENT
@@ -67,6 +91,14 @@ export class SharedSessionContextBuilder {
     private deps: {
       conversations: ConversationRepo;
       summaries: TaskSummaryStore;
+      /** What earlier turns did; absent in offline harnesses. */
+      workingMemory?: {
+        actions(
+          conversationId: string,
+          excludeTaskId: string,
+          maxTasks?: number
+        ): TaskActions[];
+      };
     }
   ) {}
 
@@ -86,20 +118,29 @@ export class SharedSessionContextBuilder {
           message.taskId !== input.currentTaskId &&
           (message.role === "user" || message.role === "assistant")
       )
-      .slice(-10);
+      .slice(-TURN_WINDOW);
     // Drop the tail the provider is sending verbatim, keep the older turns
-    // it is not. Trimming the whole block instead would lose turns 5-10,
-    // which nothing else in the turn carries.
+    // it is not. Trimming the whole block instead would lose the older
+    // turns, which nothing else in the turn carries.
     const carried = Math.max(0, input.verbatimTurns ?? 0);
     const messages =
       carried > 0 ? recent.slice(0, Math.max(0, recent.length - carried)) : recent;
 
+    const actions = this.deps.workingMemory
+      ? safeActions(this.deps.workingMemory, input.conversationId, input.currentTaskId)
+      : [];
+    const renderedActions =
+      actions.length > 0
+        ? renderActions(actions, Math.floor(maxTokens * ACTIONS_SHARE))
+        : EMPTY_RENDERED;
+    const afterActions = maxTokens - approxTokens(renderedActions.text);
+
     const renderedTurns =
       messages.length > 0
-        ? renderTurns(messages, maxTokens * TURNS_SHARE)
+        ? renderTurns(messages, Math.floor(afterActions * TURNS_SHARE))
         : EMPTY_RENDERED;
     // Whatever the turns did not spend stays available to the summaries.
-    const summaryBudget = maxTokens - approxTokens(renderedTurns.text);
+    const summaryBudget = afterActions - approxTokens(renderedTurns.text);
     const renderedSummaries =
       summaries.length > 0 && summaryBudget > 0
         ? renderSummaries(summaries, summaryBudget)
@@ -107,9 +148,10 @@ export class SharedSessionContextBuilder {
 
     const parts: string[] = [];
     if (renderedSummaries.text) {
-      parts.push("Task summaries:", renderedSummaries.text);
+      parts.push("Earlier work in this conversation (compressed):", renderedSummaries.text);
     }
-    if (renderedTurns.text) parts.push("Recent turns:", renderedTurns.text);
+    if (renderedActions.text) parts.push(renderedActions.text);
+    if (renderedTurns.text) parts.push("Recent turns (verbatim):", renderedTurns.text);
     if (parts.length === 0) return EMPTY_SHARED_SESSION;
 
     const text =
@@ -120,16 +162,37 @@ export class SharedSessionContextBuilder {
       "project/location, working area, decisions, and constraints unless the " +
       "latest message changes them. Prior requests are context, not queued " +
       "work; never execute one instead of the latest request.\n" +
+      "A terse reply (\"do it\", \"you should have\", \"why X\") refers to the " +
+      "CLOSING part of your previous answer — the offer, recommendation or " +
+      "question it ended with — not to a new subject. What earlier turns " +
+      "already did is listed as addresses: re-open a file only when you need " +
+      "its current text, and do not repeat a command just to see it again.\n" +
       parts.join("\n");
     return {
       text,
       summaries: renderedSummaries.count,
       turns: renderedTurns.count,
+      actions: renderedActions.count,
       tokens: approxTokens(text),
       labels: renderedSummaries.items
         .slice(0, 3)
         .map((summary) => label(summary.text)),
     };
+  }
+}
+
+/** Memory is a side effect of the turn, never a way to fail it. */
+function safeActions(
+  store: NonNullable<
+    ConstructorParameters<typeof SharedSessionContextBuilder>[0]["workingMemory"]
+  >,
+  conversationId: string,
+  currentTaskId: string
+): TaskActions[] {
+  try {
+    return store.actions(conversationId, currentTaskId, ACTION_TASKS);
+  } catch {
+    return [];
   }
 }
 
@@ -159,6 +222,12 @@ function renderTurns(
   const newestFirst = [...messages].reverse();
   const selected: Array<{ message: ChatMessage; line: string }> = [];
   let remaining = Math.max(0, Math.floor(budget));
+  // Per-turn ceilings grow with the budget: a 480-token block once cut the
+  // newest answer to 190 tokens, and the recommendation at its end — the
+  // thing the user's next message was about — fell off. With room to
+  // spare, the previous answer rides whole.
+  const assistantCap = Math.max(900, Math.floor(budget * 0.65));
+  const userCap = Math.max(500, Math.floor(budget * 0.35));
 
   for (let index = 0; index < newestFirst.length && remaining > 0; index++) {
     // Always give the latest user/assistant exchange a fair share. Older turns
@@ -167,13 +236,22 @@ function renderTurns(
     const message = newestFirst[index]!;
     const role = message.role === "assistant" ? "assistant" : "user";
     const prefix = `- ${role}: `;
-    const roleLimit = role === "assistant" ? 900 : 500;
+    const roleLimit = role === "assistant" ? assistantCap : userCap;
+    // The newest exchange is split unevenly: the assistant's answer is what
+    // a terse follow-up ("implement") points at, the user's own message the
+    // model already has in front of it. An even split once cut a plan
+    // answer to 100 tokens and dropped the two file:line findings in it.
     const newestExchangeShare =
-      index < 2 ? Math.max(1, Math.floor(budget / 2)) : remaining;
+      index < 2
+        ? Math.max(1, Math.floor(budget * (role === "assistant" ? 0.65 : 0.35)))
+        : remaining;
     const lineBudget = Math.min(roleLimit, remaining, newestExchangeShare);
     const bodyBudget = lineBudget - approxTokens(prefix);
     if (bodyBudget <= 0) break;
-    const line = `${prefix}${clipTurnText(message.text, bodyBudget)}`;
+    // The newest assistant answer keeps more of its TAIL: offers,
+    // recommendations and open questions live in the closing paragraph.
+    const headShare = index < 2 && role === "assistant" ? 0.3 : 0.4;
+    const line = `${prefix}${clipTurnText(message.text, bodyBudget, headShare)}`;
     const cost = approxTokens(line);
     if (cost > remaining) break;
     selected.push({ message, line });
@@ -212,16 +290,103 @@ function renderSummaries(
   };
 }
 
+const MAX_EDITS = 8;
+const MAX_COMMANDS = 6;
+const MAX_READS = 10;
+const MAX_SEARCHES = 5;
+
+/**
+ * What the previous task (and the one before) did, newest first. Each
+ * task is one short list; a list that would overrun the budget is cut
+ * from the least valuable end — reads and searches go before edits and
+ * commands, because an edit or a failed command is what "still broken"
+ * is about.
+ */
+function renderActions(
+  actions: TaskActions[],
+  budget: number
+): Rendered<TaskActions> {
+  const selected: Array<{ actions: TaskActions; text: string }> = [];
+  let remaining = Math.max(0, Math.floor(budget));
+  actions.forEach((task, index) => {
+    if (remaining <= 20) return;
+    const heading =
+      index === 0 ? "What your previous turn did:" : "What the turn before that did:";
+    const lines = actionLines(task);
+    if (lines.length === 0) return;
+    let text = `${heading}\n${lines.join("\n")}`;
+    // Cut trailing lines (reads/searches come last) until it fits.
+    while (approxTokens(text) > remaining && lines.length > 1) {
+      lines.pop();
+      text = `${heading}\n${lines.join("\n")}`;
+    }
+    if (approxTokens(text) > remaining) {
+      text = clipToTokens(text, remaining);
+    }
+    if (!text.trim()) return;
+    selected.push({ actions: task, text });
+    remaining -= approxTokens(text);
+  });
+  return {
+    text: selected.map(({ text }) => text).join("\n"),
+    count: selected.length,
+    items: selected.map(({ actions: task }) => task),
+  };
+}
+
+function actionLines(task: TaskActions): string[] {
+  const lines: string[] = [];
+  if (task.edits.length > 0) {
+    lines.push(`- edited: ${listOf(task.edits, MAX_EDITS)}`);
+  }
+  for (const command of task.commands.slice(0, MAX_COMMANDS)) {
+    lines.push(`- ran ${commandLine(command)}`);
+  }
+  if (task.reads.length > 0) {
+    lines.push(`- read: ${listOf(task.reads, MAX_READS)}`);
+  }
+  for (const search of task.searches.slice(0, MAX_SEARCHES)) {
+    const hits = search.paths.length > 0 ? listOf(search.paths, 4) : "no hits";
+    lines.push(`- searched "${clipChars(search.query, 60)}" → ${hits}`);
+  }
+  return lines;
+}
+
+function commandLine(command: CommandMeta): string {
+  const outcome = command.timedOut
+    ? "timed out"
+    : command.exitCode === null
+      ? "no exit code"
+      : `exit ${command.exitCode}`;
+  // A clean run's last line is noise ("done"); a failure's last line is
+  // the error, and the error is the whole point of remembering it.
+  const tail =
+    command.tail && (command.exitCode !== 0 || command.timedOut)
+      ? `: ${clipChars(command.tail, 120)}`
+      : "";
+  return `\`${clipChars(command.command, 120)}\` → ${outcome}${tail}`;
+}
+
+function listOf(items: string[], cap: number): string {
+  const shown = items.slice(0, cap).join(", ");
+  const more = items.length - cap;
+  return more > 0 ? `${shown} (+${more} more)` : shown;
+}
+
+function clipChars(text: string, max: number): string {
+  const single = text.replace(/\s+/g, " ").trim();
+  return single.length > max ? `${single.slice(0, max - 1)}…` : single;
+}
+
 /**
  * Keep both the start and end of a long turn. The start carries the subject;
- * the end commonly carries the actual recommendation or unresolved gap.
+ * the end commonly carries the actual recommendation or unresolved gap —
+ * and the file references in the omitted middle are re-attached, because
+ * they are the part a follow-up implements.
  */
-function clipTurnText(text: string, maxTokens: number): string {
+function clipTurnText(text: string, maxTokens: number, headShare = 0.4): string {
   if (approxTokens(text) <= maxTokens) return text;
   const maxChars = Math.max(0, maxTokens * 4 - 1);
-  const marker = " … [middle omitted] … ";
-  if (maxChars <= marker.length) return clipToTokens(text, maxTokens);
-  const available = maxChars - marker.length;
-  const head = Math.floor(available * 0.4);
-  return `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`;
+  if (maxChars < 40) return clipToTokens(text, maxTokens);
+  return clipKeepingRefs(text, maxChars, headShare);
 }

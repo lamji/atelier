@@ -1,8 +1,6 @@
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
-  ChevronDown,
-  ChevronRight,
   CircleAlert,
   GitPullRequestArrow,
   Loader2,
@@ -10,10 +8,8 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { MergeConflictViewModel } from "@/hooks/useMergeConflictViewModel";
-import type { SyncKind } from "@/state/git-merge.store";
 
 /**
  * Fetch / Pull / Rebase under the branch line, with the ahead/behind
@@ -154,63 +150,15 @@ export function SyncBar({
         </p>
       )}
 
-      {merge.syncKind && merge.syncOutput && !merge.syncModal && (
-        <SyncOutput
-          kind={merge.syncKind}
-          output={merge.syncOutput}
-          running={merge.syncRunning}
-          open={merge.outputOpen}
-          onToggle={vm.toggleOutput}
-        />
-      )}
-    </div>
-  );
-}
-
-const KIND_LABEL: Record<SyncKind, string> = {
-  fetch: "fetch",
-  pull: "pull",
-  push: "push",
-  continue: "complete merge",
-  checkout: "checkout",
-  rebase: "rebase",
-};
-
-/** Terminal-style fold-out of the last sync run; follows the stream. */
-function SyncOutput(props: {
-  kind: SyncKind;
-  output: string;
-  running: boolean;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const { ref, onScroll } = useStickToBottom<HTMLPreElement>([props.output]);
-  return (
-    <div className="rounded-lg bg-black/25">
-      <button
-        onClick={props.onToggle}
-        className="flex w-full items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
-      >
-        {props.open ? (
-          <ChevronDown className="h-3 w-3" />
-        ) : (
-          <ChevronRight className="h-3 w-3" />
-        )}
-        <span className="font-mono">git {KIND_LABEL[props.kind]}</span>
-        {props.running && <Loader2 className="ml-1 h-3 w-3 animate-spin" />}
-        <span className="ml-auto text-[10px] opacity-70">
-          {props.open ? "hide output" : "show output"}
-        </span>
-      </button>
-      {props.open && (
-        <pre
-          ref={ref}
-          onScroll={onScroll}
-          className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words px-2 pb-2 font-mono text-[10.5px] leading-relaxed text-neutral-300"
-        >
-          {props.output}
-        </pre>
-      )}
+      {/* The command console that used to sit here is gone.
+          A finished `git checkout` leaves nothing worth reading: the
+          branch row above already says which branch you are on, and the
+          counts below already say what changed. It sat there afterwards
+          taking a third of the rail — the panel's scarcest space — to
+          repeat, in monospace, something the panel had already said.
+          Failures still surface: the error banner above shows them, and a
+          run that needs its output (a conflicted pull, a rejected push)
+          opens the sync modal, which streams it in full. */}
     </div>
   );
 }

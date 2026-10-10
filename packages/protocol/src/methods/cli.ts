@@ -14,11 +14,17 @@ export const cliMethods = {
       .object({
         /** Omit for every known provider. */
         providerId: z.string().optional(),
-        /** Most recent N per provider. Defaults to 20. */
+        /** Transcript files inspected per provider in one page. Defaults to 30. */
         limit: z.number().optional(),
+        /** Raw transcript page offset, advanced by `limit` after each page. */
+        offset: z.number().int().min(0).optional(),
       })
       .optional(),
-    result: z.object({ entries: z.array(CliHistoryEntry) }),
+    result: z.object({ entries: z.array(CliHistoryEntry), hasMore: z.boolean() }),
+  },
+  "cli.title.autoRename": {
+    params: z.object({ providerId: z.string(), sessionId: z.string() }),
+    result: z.object({ title: z.string() }),
   },
   "cli.diff.get": {
     params: z.object({ providerId: z.string(), sessionId: z.string() }),

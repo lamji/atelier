@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useGitStore } from "@/state/git.store";
 import { useThemeStore } from "@/state/theme.store";
+import { confirmDialog } from "@/state/confirm.store";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import { DiffStat, statOf } from "./DiffStat";
 
@@ -154,11 +155,17 @@ export function FileDiffDrawer({ vm }: { vm: GitViewModel }) {
                           variant="ghost"
                           className="text-destructive/80 hover:text-destructive"
                           onClick={() => {
-                            const ok = window.confirm(
-                              `Discard changes in ${diff.path}?\n\n` +
-                                "This cannot be undone."
-                            );
-                            if (ok) act(() => vm.discard([diff.path]));
+                            const path = diff.path;
+                            void confirmDialog({
+                              title: "Discard changes",
+                              message:
+                                `Discard changes in ${path}?\n\n` +
+                                "This cannot be undone.",
+                              confirmLabel: "Discard",
+                              destructive: true,
+                            }).then((ok) => {
+                              if (ok) act(() => vm.discard([path]));
+                            });
                           }}
                         >
                           <Undo2 className="mr-1.5 h-3.5 w-3.5" />

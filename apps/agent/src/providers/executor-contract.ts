@@ -10,7 +10,12 @@ export const ATELIER_EXECUTOR_CONTRACT =
   "ATELIER EXECUTION CONTRACT: Atelier has already resolved the task scope, " +
   "selected the workflow, and assembled the conversation and knowledge " +
   "context for this turn. Treat the assembled prompt as the complete source " +
-  "of task instructions; do not seek another instruction source or start a " +
+  "of task instructions. Evidence already included in that prompt counts as " +
+  "completed investigation for the facts and exact source ranges it contains. " +
+  "Do not retrieve, search, list, or read again for that same evidence. Use " +
+  "tools only to fill a concrete gap, inspect a source marked changed or stale, " +
+  "open lines that were not included, or verify after an edit. Do not seek " +
+  "another instruction source or start a " +
   "second planning or debugging workflow. CONVERSATION ALIGNMENT: treat the " +
   "newest request as the next turn in one human conversation. Carry forward " +
   "the subject, referents, project or location, working area, decisions, and " +

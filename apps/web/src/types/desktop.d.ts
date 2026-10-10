@@ -60,6 +60,34 @@ declare global {
     frameUrl: string | null;
   }
 
+  type AtelierDesktopPreviewActStep =
+    | { action: "navigate"; target: string }
+    | { action: "click"; selector?: string; text?: string }
+    | { action: "fill"; selector: string; value: string }
+    | { action: "press"; key: string; selector?: string }
+    | {
+        action: "waitFor";
+        selector?: string;
+        text?: string;
+        state?: "visible" | "hidden";
+        timeoutMs?: number;
+      }
+    | {
+        action: "assert";
+        description: string;
+        selector?: string;
+        text?: string;
+        notText?: string;
+        visible?: boolean;
+        absent?: boolean;
+      };
+
+  interface AtelierDesktopPreviewActResult {
+    ok: boolean;
+    detail: string;
+    error?: string;
+  }
+
   interface AtelierDesktopPreviewConsoleEntry {
     level: "warning" | "error";
     message: string;
@@ -85,6 +113,29 @@ declare global {
     };
   }
 
+  interface AtelierDesktopPreviewFocusRect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
+
+  interface AtelierDesktopPreviewFocusedElement {
+    /** 1-based index of the highlight rect the element sits under. */
+    region: number;
+    selector: string;
+    tag: string;
+    text: string;
+    ariaLabel: string | null;
+    rect: AtelierDesktopPreviewFocusRect;
+  }
+
+  interface AtelierDesktopPreviewActiveElement {
+    selector: string;
+    tag: string;
+    text: string;
+  }
+
   interface AtelierDesktopPreviewContextResult {
     url: string;
     title: string;
@@ -92,6 +143,40 @@ declare global {
     css: string;
     interactive: AtelierDesktopPreviewInteractiveElement[];
     console: AtelierDesktopPreviewConsoleEntry[];
+    capturedAt: number;
+    /** Elements under the requested focus rects; absent when none were asked for. */
+    focused?: AtelierDesktopPreviewFocusedElement[];
+    /** Null when focus sits on body/html, i.e. nothing is really focused. */
+    activeElement?: AtelierDesktopPreviewActiveElement | null;
+    /** window.getSelection() of the preview document, <= 300 chars. */
+    selectionText?: string;
+    /** document.body.innerText, whitespace-collapsed, <= 4000 chars. */
+    visibleText?: string;
+  }
+
+  interface AtelierDesktopPreviewSessionCookie {
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    expires: number;
+    httpOnly: boolean;
+    secure: boolean;
+    sameSite: "Strict" | "Lax" | "None";
+  }
+
+  interface AtelierDesktopPreviewStorageEntry {
+    name: string;
+    value: string;
+  }
+
+  /** Credential material — never render it, log it, or put it in a prompt. */
+  interface AtelierDesktopPreviewSessionResult {
+    url: string;
+    origin: string;
+    cookies: AtelierDesktopPreviewSessionCookie[];
+    localStorage: AtelierDesktopPreviewStorageEntry[];
+    sessionStorage: AtelierDesktopPreviewStorageEntry[];
     capturedAt: number;
   }
 
@@ -143,8 +228,18 @@ declare global {
     ): Promise<AtelierDesktopCaptureResult | null>;
     /** Reads runtime evidence from the exact iframe displayed in Page preview. */
     getPreviewContext(
-      previewUrl: string
+      previewUrl: string,
+      options?: { focus?: AtelierDesktopPreviewFocusRect[] }
     ): Promise<AtelierDesktopPreviewContextResult | null>;
+    /** Reads cookies + web storage of the signed-in preview iframe. */
+    getPreviewSession(
+      previewUrl: string
+    ): Promise<AtelierDesktopPreviewSessionResult | null>;
+    /** Drives one test-case interaction into the live preview iframe. */
+    previewAct(
+      previewUrl: string,
+      step: AtelierDesktopPreviewActStep
+    ): Promise<AtelierDesktopPreviewActResult | null>;
     /** Filesystem path of a dropped File (null if unavailable). */
     pathForFile(file: File): string | null;
     openExternal(url: string): Promise<void>;

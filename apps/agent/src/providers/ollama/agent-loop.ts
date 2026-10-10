@@ -29,11 +29,6 @@ import { recordCloudUsage } from "./usage.js";
  * on a large cloud model was most substantial turns.
  */
 const IDLE_TIMEOUT_MS = 120_000;
-const MAX_TOOL_ROUNDS = 30;
-const TOOL_BUDGET_FINAL_INSTRUCTION =
-  "The tool budget for this user turn is exhausted. Do not call any more " +
-  "tools. Give the user a concise final response stating what you completed, " +
-  "what remains, and any blocker.";
 
 /**
  * Verbatim chat turns seeded into a task's first Ollama call.
@@ -169,7 +164,7 @@ export interface OllamaAgentLoopOptions {
    * report. The pipeline owns the evidence; the provider loop only enforces
    * the verdict while it still has the same transcript and tool results.
    */
-  completionGate?: () => string;
+  completionGate?: (report?: string) => string;
   /** Announces a refused report on the shared hook rail. */
   onCompletionBlocked?: (reason: string) => void;
   /** Thinking deltas, for the same live surface Claude's thinking uses. */
@@ -306,7 +301,8 @@ async function toolLoop(
     ? ["high", "xhigh", "max", "ultra"].includes(opts.effort ?? "")
     : undefined;
 
-  for (let turn = 0; turn < MAX_TOOL_ROUNDS; turn++) {
+  for (let turn = 0; ; turn++) {
+    opts.signal.throwIfAborted();
     // Buffer visible text until the response boundary reveals whether this
     // is a tool call, an incomplete report the completion hook must refuse,
     // or the one final report that is safe to render.
@@ -335,17 +331,14 @@ async function toolLoop(
 
     const calls = message.tool_calls?.filter((call) => call.function?.name) ?? [];
     if (calls.length === 0) {
-      const outstanding = opts.completionGate?.() ?? "";
+      const outstanding = opts.completionGate?.(message.content ?? roundText) ?? "";
       if (outstanding) {
         // Ollama has no native Stop hook. Treat a no-tool answer as its Stop
         // boundary, keep the candidate report off chat, and feed the live
         // reason back into this SAME transcript so the model can still use
         // every read and tool result it already paid for.
         opts.onCompletionBlocked?.(outstanding);
-        // Kept, not shown. If the rounds run out before the gate clears, this
-        // is the only account of what the model believed it had done, and a
-        // turn that reports nothing at all is worse than one that reports
-        // unfinished work with the verdict attached.
+        // Keep the candidate for diagnostics while the model continues.
         if (roundText.trim()) refused = roundText;
         messages.push({ role: "user", content: outstanding });
         continue;
@@ -387,45 +380,6 @@ async function toolLoop(
     });
   }
 
-  // This budget belongs only to this invocation; the pipeline's next pass
-  // starts at round zero (with the transcript, not the rounds, carried over).
-  // Never spend the forced tool-free handoff on an incomplete implementation:
-  // the pipeline can start another bounded pass, but it cannot retract a
-  // partial report once chat has rendered it.
-  const outstanding = opts.completionGate?.() ?? "";
-  if (outstanding) {
-    opts.onCompletionBlocked?.(outstanding);
-    return endOfTurn(opts, text, {
-      rounds: MAX_TOOL_ROUNDS,
-      toolCalls,
-      refused,
-      outstanding,
-    });
-  }
-  messages.push({ role: "system", content: TOOL_BUDGET_FINAL_INSTRUCTION });
-  let finalText = "";
-  announceRound(opts, MAX_TOOL_ROUNDS, messages, [], numCtx, fitToWindow(messages, numCtx, 0));
-  await ollamaChatStreaming(
-    opts.model,
-    target,
-    messages,
-    [],
-    numCtx,
-    think,
-    opts.signal,
-    (delta) => {
-      finalText += delta;
-    },
-    opts.emitThinking
-  );
-  text += finalText;
-  if (finalText) opts.emitText(finalText);
-  return endOfTurn(opts, text, {
-    rounds: MAX_TOOL_ROUNDS,
-    toolCalls,
-    refused,
-    outstanding: "",
-  });
 }
 
 /**
@@ -614,6 +568,7 @@ export interface ToolCallDeps {
   files: EditFileReader;
   taskId: string;
   signal: AbortSignal;
+  toolNames?: string[];
   /** Present only on Ollama turns; Grok keeps its existing tool behavior. */
   grounding?: EditGrounding;
 }
@@ -636,6 +591,10 @@ export async function runCall(
   input: unknown,
   opts: ToolCallDeps
 ): Promise<string> {
+  opts.signal.throwIfAborted();
+  if (opts.toolNames && !opts.toolNames.includes(name)) {
+    return `Error: tool ${name} is unavailable for this turn. Use the offered filesystem tools.`;
+  }
   if (!isEditTool(name)) {
     const repeatedRead = repeatedReadFailure(opts.grounding, name, input);
     if (repeatedRead) return repeatedRead;
@@ -893,7 +852,7 @@ async function runEdit(
 /**
  * Counts repeats of the same failing call and, from the second one on,
  * says so. A local model that gets an identical error twice will happily
- * send it a third and a fourth time until MAX_TOOL_ROUNDS runs out; naming the
+ * send it a third and a fourth time; naming the
  * repetition is what breaks the cycle, because the transcript otherwise
  * looks to the model like a fresh attempt every time.
  */
@@ -1257,10 +1216,11 @@ const ATELIER_TOOLS = [
       required: ["path", "oldString", "newString"],
     }),
   }, ["edits"]),
-  tool("search_workspace", "Find files relevant to a query using the live knowledge index.", {
-    query: stringSchema("Natural-language or symbol query"),
+  tool("search_workspace", "Search current workspace text. Copy terms from the request, context, or tool results. No index is used.", {
+    query: stringSchema("Literal text or regex using observed terms"),
     glob: stringSchema("Optional glob filter"),
     maxResults: numberSchema("Max results"),
+    regex: booleanSchema("Use a regex built from observed terms"),
   }, ["query"]),
   tool("search_text", "Fast literal or regex text search over non-ignored workspace files.", {
     query: stringSchema("Literal text or regex pattern"),
@@ -1349,13 +1309,58 @@ const ATELIER_TOOLS = [
     symbols: arraySchema(stringSchema("Symbol name")),
     files: arraySchema(stringSchema("Workspace-relative file path")),
   }, ["title", "lesson"]),
-  tool("preview_review", "Debug a local Page preview in headless Chromium. Returns " +
+  tool("preview_review", "Debug a local Page preview in headless Chromium, reusing " +
+    "the signed-in in-app Page preview session when one was published. Returns " +
     "status/decision, chronological DevTools console, page errors, failed HTTP " +
-    "requests, DOM/layout, and screenshots. Obey decision: unavailable = ask user " +
-    "to start/reopen preview and stop without retrying or starting a server; " +
-    "issues = report evidence then fix if allowed or skip; failed = report and skip.", {
+    "requests, DOM/layout, screenshots, routeReached and previewSession.applied. " +
+    "Obey decision: unavailable = ask user to start/reopen preview and stop without " +
+    "retrying or starting a server; off-route = the app redirected away from the " +
+    "requested route (usually a signed-out login redirect), so report it and fail " +
+    "the review; issues = report evidence then fix if allowed or skip; failed = " +
+    "report and skip.", {
     url: stringSchema("The local http(s) URL shown in Page preview"),
   }, ["url"]),
+  tool("preview_console", "Read the live in-app Page preview's own DevTools console, " +
+    "signed in as the user — the cheapest way to OBSERVE a front-end failure, no " +
+    "headless browser and no login redirect. Prefer this over preview_review as the " +
+    "first observation of a reported UI bug. Returns status (issues | clean | " +
+    "unavailable), recent console lines and the errors among them. unavailable = " +
+    "Page preview is not open; observe the failure another way. A clean console is " +
+    "not proof of a fix unless the failure was a console error.", {
+    url: stringSchema("Route to read; omit for the displayed page"),
+  }, []),
+  tool("preview_test", "Run an authored frontend test case against the LIVE in-app " +
+    "Page preview — the browser the user already sees, signed in and loaded, driven " +
+    "through the bridge with no external browser and no login redirect. For a frontend " +
+    "review: FIRST write the test case for the requested change, THEN run it. Steps run " +
+    "in order and stop at the first failure; the verdict is the assertions, not a " +
+    "screenshot. Include at least one assert. Returns status passed|failed|unavailable, " +
+    "per-step results, console errors and screenshot paths.", {
+    title: stringSchema("One line naming the behaviour under test"),
+    url: stringSchema("Route to open first; path or full localhost URL"),
+    steps: arraySchema({
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["navigate", "click", "fill", "press", "waitFor", "assert", "screenshot"],
+        },
+        target: { type: "string", description: "navigate: route or URL" },
+        selector: { type: "string", description: "CSS selector" },
+        text: { type: "string", description: "click text; assert/waitFor text present" },
+        value: { type: "string", description: "fill: value to type" },
+        key: { type: "string", description: "press: key name e.g. Enter" },
+        state: { type: "string", enum: ["visible", "hidden"] },
+        timeoutMs: { type: "number" },
+        description: { type: "string", description: "assert: what this checks" },
+        notText: { type: "string", description: "assert: text must be absent" },
+        visible: { type: "boolean", description: "assert: selector visible" },
+        absent: { type: "boolean", description: "assert: selector absent" },
+        label: { type: "string", description: "screenshot: label" },
+      },
+      required: ["action"],
+    }),
+  }, ["title", "steps"]),
   tool("run_terminal", "Run a shell command in the workspace.", {
     command: stringSchema("PowerShell command line"),
     cwd: stringSchema("Workspace-relative working directory"),

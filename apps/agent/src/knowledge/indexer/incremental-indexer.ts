@@ -91,7 +91,9 @@ export class IncrementalIndexer {
     await this.pool.init().catch((error) => {
       this.log.error({ err: error }, "tree-sitter init failed");
     });
+    if (this.stopped) return;
     void this.embedder.init().then(() => {
+      if (this.stopped) return;
       if (!this.embedder.available) {
         this.log.warn(
           { reason: this.embedder.failureReason },
@@ -101,6 +103,7 @@ export class IncrementalIndexer {
       this.kick();
     });
     await this.indexWorkspace(parserChanged);
+    if (this.stopped) return;
     // Stamp only AFTER the forced scan enqueued its jobs — jobs persist
     // in index_jobs, so a restart mid-migration resumes instead of
     // silently skipping the re-parse.
@@ -144,6 +147,11 @@ export class IncrementalIndexer {
 
   stop(): void {
     this.stopped = true;
+    void this.pool.shutdown();
+    for (const waiter of this.drainWaiters) waiter.resolve();
+    this.drainWaiters = [];
+    this.pendingEmbeds = [];
+    this.flushFiles = [];
   }
 
   /** If the embedding model changed, all stored vectors are invalid. */
@@ -165,12 +173,14 @@ export class IncrementalIndexer {
   /** Scan the workspace, enqueue dirty files, drop deleted ones. */
   async indexWorkspace(force = false): Promise<string> {
     const jobId = newId("idx");
+    if (this.stopped) return jobId;
     if (force) {
       // Invalidate content hashes so processFile actually re-parses.
       this.db.exec("UPDATE files SET content_hash = NULL");
     }
     const scanned: Array<{ rel: string; mtime: number; size: number }> = [];
     await this.scanDir(this.guard.toAbsolute("."), scanned);
+    if (this.stopped) return jobId;
     this.bus.publish("knowledge.indexing.progress", {
       phase: "scan",
       done: scanned.length,
@@ -231,6 +241,7 @@ export class IncrementalIndexer {
       return;
     }
     for (const entry of entries) {
+      if (this.stopped) return;
       const abs = path.join(absDir, entry.name);
       const isDir = entry.isDirectory();
       if (this.ig.ignoresAbsolute(abs, isDir)) continue;
@@ -253,6 +264,7 @@ export class IncrementalIndexer {
 
   /** Watcher entry point; higher priority than scan backfill. */
   enqueueFile(relPath: string, priority = 10, kickNow = true): void {
+    if (this.stopped) return;
     if (!isIndexable(relPath)) return;
     this.db
       .prepare("DELETE FROM index_jobs WHERE path = ? AND status = 'queued'")
@@ -268,6 +280,7 @@ export class IncrementalIndexer {
 
   /** Awaited by pipeline stage 8 so knowledge is current before summary. */
   async drainFor(paths: string[]): Promise<void> {
+    if (this.stopped) return;
     const wanted =
       paths.length > 0 ? new Set(paths.map((p) => p.toLowerCase())) : null;
     // A running loop may have consumed every job and still owe the flush
@@ -291,6 +304,7 @@ export class IncrementalIndexer {
   }
 
   private settleDrainWaiters(): void {
+    if (this.stopped) return;
     if (this.embeddingsPending()) return;
     this.drainWaiters = this.drainWaiters.filter((w) => {
       if (this.hasPendingJobs(w.paths)) return true;
@@ -342,6 +356,7 @@ export class IncrementalIndexer {
         .run(Date.now(), job.id);
       try {
         const delta = await this.processFile(job.path);
+        if (this.stopped) return;
         if (delta) {
           this.flushFiles.push(job.path);
           this.flushSymbols += delta.symbols;
@@ -350,6 +365,7 @@ export class IncrementalIndexer {
         }
         this.db.prepare("DELETE FROM index_jobs WHERE id=?").run(job.id);
       } catch (error) {
+        if (this.stopped) return;
         this.log.error({ err: error, path: job.path }, "index job failed");
         this.db
           .prepare(
@@ -382,8 +398,11 @@ export class IncrementalIndexer {
       await new Promise((r) => setImmediate(r));
     }
 
+    if (this.stopped) return;
     await this.flush();
+    if (this.stopped) return;
     await this.backfillEmbeddings();
+    if (this.stopped) return;
     this.db
       .prepare(
         "INSERT INTO meta(key, value) VALUES('last_indexed_at', ?) " +
@@ -413,10 +432,12 @@ export class IncrementalIndexer {
     // init resolves, and skipping here leaves chunks unembedded — the
     // vector arm of retrieval then silently degrades to keyword+graph.
     if (embeds.length > 0) await this.embedder.init();
+    if (this.stopped) return;
     if (embeds.length > 0 && this.embedder.available) {
       for (let i = 0; i < embeds.length; i += EMBED_BATCH) {
         const batch = embeds.slice(i, i + EMBED_BATCH);
         const vectors = await this.embedder.embed(batch.map((b) => b.text));
+        if (this.stopped) return;
         for (let j = 0; j < vectors.length; j++) {
           this.vectors.upsert(batch[j]!.id, vectors[j]!);
           embedded += 1;
@@ -444,7 +465,7 @@ export class IncrementalIndexer {
   /** Chunks that missed embedding earlier (offline start, version bump). */
   private async backfillEmbeddings(): Promise<void> {
     await this.embedder.init();
-    if (!this.embedder.available) return;
+    if (this.stopped || !this.embedder.available) return;
     const missing = this.db
       .prepare(
         "SELECT c.id, c.text FROM chunks c " +
@@ -458,6 +479,7 @@ export class IncrementalIndexer {
       if (this.stopped) return;
       const batch = missing.slice(i, i + EMBED_BATCH);
       const vectors = await this.embedder.embed(batch.map((b) => b.text));
+      if (this.stopped) return;
       for (let j = 0; j < vectors.length; j++) {
         this.vectors.upsert(batch[j]!.id, vectors[j]!);
       }
@@ -604,10 +626,12 @@ export class IncrementalIndexer {
       source = await fs.readFile(abs, "utf8");
       stat = { mtimeMs: s.mtimeMs, size: s.size };
     } catch {
+      if (this.stopped) return null;
       this.removeFile(relPath);
       return { symbols: 0, edges: 0, newChunks: [] };
     }
 
+    if (this.stopped) return null;
     const hash = sha1(source);
     const existing = this.db
       .prepare("SELECT id, content_hash, parse_status FROM files WHERE path = ?")
@@ -623,6 +647,7 @@ export class IncrementalIndexer {
     }
 
     const parsed = await this.pool.parseFile(relPath, source);
+    if (this.stopped) return null;
     const fileId = this.upsertFileRow(relPath, parsed, hash, stat);
     if (!parsed) return null;
 

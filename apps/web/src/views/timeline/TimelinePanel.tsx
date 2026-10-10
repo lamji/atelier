@@ -227,7 +227,11 @@ function summarize(entry: TimelineEntryVm): string {
       return `${String(p.goal ?? "").slice(0, 100)} · ${steps} steps`;
     }
     case "plan.step.updated":
-      return `${String(p.status)}${p.note ? ` — ${String(p.note)}` : ""}`;
+      return (
+        `${String(p.status)}` +
+        (p.verification ? ` · verified: ${String(p.verification)}` : "") +
+        (p.note ? ` — ${String(p.note)}` : "")
+      );
     case "validation.result": {
       const findings = Array.isArray(p.findings) ? p.findings.length : 0;
       return `${String(p.kind)}: ${p.ok ? "green" : `${findings} finding(s)`} (${Number(p.durationMs)}ms)`;

@@ -23,7 +23,15 @@ import {
   buildTaskSummary,
   TaskSummaryStore,
 } from "../src/context/summaries/index.js";
-import { SharedSessionContextBuilder } from "../src/context/session/index.js";
+import {
+  continuityBudgetFor,
+  SharedSessionContextBuilder,
+} from "../src/context/session/index.js";
+import { WorkingMemoryStore } from "../src/context/working-memory/working-memory-store.js";
+import {
+  LIGHT_APPEND_CHARS,
+  renderPriorTurns,
+} from "../src/orchestrator/direct-mode.js";
 import { ConversationRepo } from "../src/storage/repositories/conversations.js";
 import { openDb } from "../src/storage/db.js";
 import { EventBus } from "../src/events/event-bus.js";
@@ -87,6 +95,19 @@ check("terminal shaper keeps error lines and the tail", () => {
   assert.ok(shaped.includes("ERROR: something exploded"));
   assert.ok(shaped.includes("line 499"), "tail lost");
   assert.ok(shaped.length < payload.output.length / 3, "not compressed");
+});
+
+check("a huge tool result is capped and says how to get the rest", () => {
+  const big = Array.from(
+    { length: 6000 },
+    (_, i) => `line ${i + 1}: ${"x".repeat(40)}`
+  ).join("\n");
+  const shaped = shapeToolOutput("read_file", { content: big, totalLines: 6000 });
+  assert.ok(approxTokens(shaped) <= 8_000 + 60, `still ${approxTokens(shaped)} tokens`);
+  assert.ok(shaped.includes("result capped at ~8k tokens"));
+  assert.match(shaped, /call read_file again with offset=\d+/);
+  const small = shapeToolOutput("read_file", { content: "tiny" });
+  assert.equal(small, "tiny");
 });
 
 check("read_file shaper returns raw text, not JSON", () => {
@@ -529,9 +550,195 @@ void (async () => {
     conversationId: "conv-s",
     currentTaskId: "task-4",
   });
-  assert.ok(afterCancel.text.includes("INTERRUPTED"), "cancelled task forgotten");
+  // …and says what the stop MEANS: the next turn must not read a stopped
+  // task's edits as progress to complete.
+  assert.ok(
+    afterCancel.text.includes("STOPPED by the user"),
+    "cancelled task forgotten"
+  );
+  assert.ok(
+    afterCancel.text.includes("unconfirmed"),
+    "a stopped task's work must be marked unconfirmed"
+  );
+  console.log("  ok  shared session recall, dedup, detail chunks, interruptions");
+
+  // ---- The field failure this fixes (conv_01M1AWY8MMFZEDHH4JPK, 2026-08-31).
+  // A light-mode turn answered "no icon" with a ~2.5k-char finding whose LAST
+  // paragraph held the recommendation and an offer. The next message, "you
+  // should run npm by default not me", reached the model with the first 360
+  // chars of that answer — the offer was cut — and it guessed the wrong npm
+  // command. The user then pasted the assistant's own suggestion back.
+  conversations.create({
+    id: "conv-icon",
+    title: "icon",
+    sdkSessionId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const iconAnswer =
+    "I read the annotation as: the boxed Windows taskbar button for the " +
+    "running app shows a generic document icon instead of the Brain-X logo.\n\n" +
+    "**Finding: the icon source is fine — the packaged app is stale.**\n\n" +
+    "- **`resources/win32/code.ico` is valid and complete.** Parsed the ICO " +
+    "directly: 7 images (16, 24, 32, 48, 64, 128, 256 px), 19,655 bytes, " +
+    "correct `00 00 01 00` header. Nothing wrong with the asset.\n" +
+    "- **The build config is correct.** `build/lib/electron.ts:239` sets " +
+    "`winIcon: 'resources/win32/code.ico'` (and `darwinIcon` at :148). " +
+    "No change needed there.\n" +
+    "- **Root cause is the aborted packaging step.** The earlier " +
+    "`npm run gulp vscode-win32-x64-min` compiled cleanly but died at " +
+    "`clean-vscode-win32-x64-min`. The icon is applied during that packaging " +
+    "stage, so the output folder still holds the pre-change build.\n" +
+    `${"- Checked one more place; nothing relevant there. ".repeat(24)}\n\n` +
+    "**To fix it** the running portable app has to be closed and the package " +
+    "task re-run. I did not do either: killing 10 running editor processes is " +
+    "destructive and is your call.\n\n" +
+    "Close the portable build, then re-run `npm run gulp vscode-win32-x64-min` " +
+    "— say the word and I'll kick it off.";
+  [
+    { id: "i1", taskId: "icon-1", role: "user" as const, text: "no icon" },
+    { id: "i2", taskId: "icon-1", role: "assistant" as const, text: iconAnswer },
+    {
+      id: "i3",
+      taskId: "icon-2",
+      role: "user" as const,
+      text: "you should run npm by default not me",
+    },
+  ].forEach((message, index) =>
+    conversations.addMessage({
+      ...message,
+      conversationId: "conv-icon",
+      createdAt: now + index,
+    })
+  );
+  const lightBudget = continuityBudgetFor({ model: "opus[1m]" });
+  const light = builder.build({
+    conversationId: "conv-icon",
+    currentTaskId: "icon-2",
+    maxTokens: lightBudget,
+  });
+  assert.ok(
+    light.text.includes("npm run gulp vscode-win32-x64-min") &&
+      light.text.includes("say the word"),
+    "the previous answer's closing offer was clipped out"
+  );
+  assert.ok(light.text.includes("no icon"), "the request that led to it was lost");
+  assert.ok(light.tokens <= lightBudget, `block over budget: ${light.tokens}`);
+  assert.ok(
+    light.text.length <= LIGHT_APPEND_CHARS,
+    "light mode's hard cap would cut the block the builder just fitted"
+  );
+  // What the old light-mode transcript did with the same exchange.
+  const old = renderPriorTurns([
+    { role: "user", text: "no icon" },
+    { role: "assistant", text: iconAnswer },
+  ]);
+  assert.ok(
+    !old.includes("npm run gulp"),
+    "renderPriorTurns is expected to lose the offer — that WAS the bug"
+  );
+  // The block is still small next to what the same turn read from cache
+  // (68k tokens on the recorded turn): under 3% of it.
+  assert.ok(light.tokens < 2000, `block unexpectedly large: ${light.tokens}`);
+  console.log(
+    `  ok  field replay: previous answer carried whole (${light.tokens} tok, ` +
+      `budget ${lightBudget})`
+  );
+
+  // ---- What the previous turn DID, beside what it said.
+  const workingMemory = new WorkingMemoryStore(db);
+  const acting = new SharedSessionContextBuilder({
+    conversations,
+    summaries,
+    workingMemory,
+  });
+  workingMemory.noteTool({
+    conversationId: "conv-icon",
+    taskId: "icon-1",
+    name: "run_terminal",
+    input: { command: "npm run gulp vscode-win32-x64-min" },
+    result: {
+      exitCode: 1,
+      output:
+        "[build] compiling…\n[build] clean-vscode-win32-x64-min\n" +
+        "Error: EBUSY: resource busy or locked, rmdir 'C:/Users/x/VSCode-win32-x64'",
+      timedOut: false,
+      truncated: false,
+    },
+  });
+  workingMemory.noteTool({
+    conversationId: "conv-icon",
+    taskId: "icon-1",
+    name: "run_terminal",
+    input: { command: "Get-Process Code*" },
+    result: { exitCode: 0, output: "14 processes", timedOut: false, truncated: false },
+  });
+  workingMemory.noteTool({
+    conversationId: "conv-icon",
+    taskId: "icon-1",
+    name: "read_file",
+    input: { path: "build/lib/electron.ts", offset: 230, limit: 20 },
+    result: { content: "winIcon: 'resources/win32/code.ico'" },
+  });
+  workingMemory.noteEdit({
+    conversationId: "conv-icon",
+    taskId: "icon-1",
+    path: "resources/win32/code.ico",
+  });
+  const acted = acting.build({
+    conversationId: "conv-icon",
+    currentTaskId: "icon-2",
+    maxTokens: lightBudget,
+  });
+  assert.equal(acted.actions, 1, "the previous task's actions were not listed");
+  assert.ok(acted.text.includes("What your previous turn did:"));
+  assert.ok(
+    acted.text.includes("`npm run gulp vscode-win32-x64-min` → exit 1: Error: EBUSY"),
+    "a failed command must carry its exit code and last line"
+  );
+  assert.ok(
+    acted.text.includes("`Get-Process Code*` → exit 0") &&
+      !acted.text.includes("14 processes"),
+    "a clean command's output line is noise and must not ride"
+  );
+  assert.ok(acted.text.includes("edited: resources/win32/code.ico"));
+  assert.ok(
+    acted.text.includes("read: build/lib/electron.ts (lines 230-249)"),
+    "reads are listed with their range"
+  );
+  // The current task's own actions never come back to it.
+  workingMemory.noteEdit({
+    conversationId: "conv-icon",
+    taskId: "icon-2",
+    path: "src/current.ts",
+  });
+  assert.ok(
+    !acting
+      .build({ conversationId: "conv-icon", currentTaskId: "icon-2" })
+      .text.includes("src/current.ts")
+  );
+  // Commands and edits are not reads: the inlining recall ignores them.
+  const gathered = await workingMemory.recall({
+    conversationId: "conv-icon",
+    currentTaskId: "icon-2",
+    files: { readFile: async () => ({ content: "winIcon", totalLines: 1 }) },
+    maxTokens: 600,
+  });
+  assert.ok(gathered.text.includes("build/lib/electron.ts"));
+  assert.ok(!gathered.text.includes("Get-Process"), "a command leaked into reads");
+  // The recorded actions are a sliver of the block.
+  assert.ok(acted.tokens - light.tokens < 120, "actions section too heavy");
+  console.log(`  ok  actions section (${acted.tokens - light.tokens} tok)`);
+
+  // ---- Budget sized to the window, not to a 480-token constant.
+  assert.equal(continuityBudgetFor({}), 6000);
+  assert.equal(continuityBudgetFor({ model: "opus[1m]" }), 8000);
+  assert.equal(continuityBudgetFor({ afterAnswer: true }), 7500);
+  assert.equal(continuityBudgetFor({ model: "ollama:small", window: 8000 }), 640);
+  assert.equal(continuityBudgetFor({ trivial: true }), 600);
+  console.log("  ok  continuity budget");
+
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
-  console.log("  ok  shared session recall, dedup, detail chunks, interruptions");
   console.log("context-smoke: all checks passed");
 })();

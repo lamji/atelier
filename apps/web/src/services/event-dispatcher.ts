@@ -12,6 +12,9 @@ import type {
   UsageSnapshot,
 } from "@atelier/protocol";
 import { bridge } from "./bridge-client.js";
+import { captureActivePreviewConsole } from "./preview-context.js";
+import { runPreviewTest } from "./preview-test-runner.js";
+import type { PreviewTestStep } from "@atelier/protocol";
 import { actionDetail, actionLabel, actionResult } from "@/lib/tool-labels";
 import { isImagePath } from "@/lib/image-file";
 import {
@@ -75,6 +78,23 @@ const PROCESS_REPLAY_TOPICS = new Set([
 
 /** One page of timeline per round trip; a long run pages until it is drained. */
 const REPLAY_PAGE = 200;
+
+/**
+ * The reason a tool REFUSED, when its call completed with `ok: false`.
+ *
+ * The plan tools answer a rejected transition that way — the call ran, so
+ * the agent publishes tool.completed — and the feed drew it as a green
+ * "Plan step done" over a step the tracker had just refused to check. A
+ * refusal is a failed action to the user: red, with the reason.
+ */
+function toolRefusal(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const value = result as Record<string, unknown>;
+  if (value.ok !== false) return undefined;
+  return typeof value.error === "string" && value.error
+    ? value.error
+    : "The tool refused the call.";
+}
 
 /**
  * Rebuild the process rail for a task from the agent's persisted timeline.
@@ -164,6 +184,9 @@ function buildExecutionTimeline(
                 ...step,
                 status,
                 note: payload.note ? String(payload.note) : step.note,
+                verification: payload.verification
+                  ? String(payload.verification)
+                  : step.verification,
               }
             : step
         ),
@@ -192,8 +215,10 @@ function buildExecutionTimeline(
     if (frame.topic === "tool.completed" || frame.topic === "tool.failed") {
       const action = actions.find((item) => item.id === String(payload.toolCallId));
       if (action) {
-        action.status = frame.topic === "tool.failed" ? "failed" : "done";
-        action.error = payload.error ? String(payload.error) : undefined;
+        const refused = toolRefusal(payload.result);
+        const failed = frame.topic === "tool.failed" || refused !== undefined;
+        action.status = failed ? "failed" : "done";
+        action.error = payload.error ? String(payload.error) : refused;
         action.durationMs = numberOrUndefined(payload.durationMs);
         if (frame.topic === "tool.completed") {
           action.result = actionResult(action.name, payload.result);
@@ -480,6 +505,71 @@ function numberOrUndefined(value: unknown): number | undefined {
  * Session-scoped events resolve their conversation via the payload or the
  * taskId -> conversationId map so parallel agents never cross streams.
  */
+/**
+ * Answers the agent's on-demand preview-console request: read the displayed
+ * iframe through the desktop bridge and post it back over RPC. Console text
+ * is diagnostic output, so it may travel to the agent; failures resolve with
+ * a reason and never throw.
+ */
+async function answerPreviewCapture(request: {
+  id: string;
+  url: string | null;
+}): Promise<void> {
+  try {
+    const result = await captureActivePreviewConsole(request.url);
+    if ("capture" in result) {
+      await bridge.rpc("preview.capture.resolve", {
+        id: request.id,
+        capture: result.capture,
+      });
+    } else {
+      await bridge.rpc("preview.capture.resolve", {
+        id: request.id,
+        capture: null,
+        reason: result.reason,
+      });
+    }
+  } catch {
+    await bridge
+      .rpc("preview.capture.resolve", {
+        id: request.id,
+        capture: null,
+        reason: "The preview console could not be read.",
+      })
+      .catch(() => undefined);
+  }
+}
+
+/**
+ * Runs the agent's authored frontend test case against the live in-app
+ * preview and posts the result back over RPC. Never throws; a failure to run
+ * resolves with a reason so the agent can fall back to another observation.
+ */
+async function answerPreviewTest(request: {
+  id: string;
+  title: string;
+  url: string | null;
+  steps: PreviewTestStep[];
+}): Promise<void> {
+  try {
+    const result = await runPreviewTest(request);
+    await bridge.rpc("preview.test.resolve", {
+      id: request.id,
+      report: "report" in result ? result.report : null,
+      ...("reason" in result ? { reason: result.reason } : {}),
+    });
+  } catch (error) {
+    await bridge
+      .rpc("preview.test.resolve", {
+        id: request.id,
+        report: null,
+        reason:
+          error instanceof Error ? error.message : "The preview test could not run.",
+      })
+      .catch(() => undefined);
+  }
+}
+
 export function startEventDispatcher(): void {
   if (started) return;
   started = true;
@@ -598,11 +688,12 @@ function dispatch(frame: EventFrame): void {
       break;
     case "tool.completed":
       if (convId) {
+        const refused = toolRefusal(payload.result);
         sessions.actionFinished(
           convId,
           String(payload.toolCallId),
-          "done",
-          undefined,
+          refused === undefined ? "done" : "failed",
+          refused,
           numberOrUndefined(payload.durationMs),
           actionResult(String(payload.name), payload.result)
         );
@@ -711,6 +802,23 @@ function dispatch(frame: EventFrame): void {
       });
       useGitStore.getState().bumpStateVersion();
       break;
+    case "preview.capture.requested":
+      // The agent asked for the live preview console mid-turn. No user
+      // interaction: read the displayed iframe and answer straight back.
+      void answerPreviewCapture(payload as { id: string; url: string | null });
+      break;
+    case "preview.test.requested":
+      // The agent authored a frontend test case; run it against the live
+      // in-app preview and answer with the per-step results.
+      void answerPreviewTest(
+        frame.payload as {
+          id: string;
+          title: string;
+          url: string | null;
+          steps: PreviewTestStep[];
+        }
+      );
+      break;
     case "db.approval.requested":
       // The agent is parked on a DB command until the user answers.
       useDbApprovalStore.getState().add(frame.payload as DbApprovalRequest);
@@ -810,7 +918,8 @@ function dispatch(frame: EventFrame): void {
           convId,
           String(payload.stepId),
           payload.status as never,
-          payload.note as string | undefined
+          payload.note as string | undefined,
+          payload.verification as string | undefined
         );
       }
       break;

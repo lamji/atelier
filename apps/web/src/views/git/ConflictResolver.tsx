@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Editor, { type Monaco } from "@monaco-editor/react";
+import type { Monaco } from "@monaco-editor/react";
+import Editor from "@/components/LazyMonaco";
 import type {
   editor as MonacoEditor,
   languages as MonacoLanguages,

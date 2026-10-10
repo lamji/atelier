@@ -8,6 +8,7 @@ import { openDb } from "./storage/db.js";
 import { ConversationRepo } from "./storage/repositories/conversations.js";
 import { SettingsRepo } from "./storage/repositories/settings.js";
 import { CliSessionDiffRepo } from "./storage/repositories/cli-session-diffs.js";
+import { CliSessionHistoryRepo } from "./storage/repositories/cli-session-history.js";
 import { Router } from "./bridge/router.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
 import { UsageMonitor } from "./orchestrator/usage-monitor.js";
@@ -28,9 +29,38 @@ import { ToolRegistry } from "./tools/registry.js";
 import { registerFsTools } from "./tools/fs-tools.js";
 import { registerGitTools } from "./tools/git-tools.js";
 import { registerTerminalTools } from "./tools/terminal-tools.js";
-import { registerPreviewReviewTools } from "./tools/preview-review-tools.js";
+import {
+  registerPreviewReviewTools,
+  shutdownPreviewReviewBrowser,
+} from "./tools/preview-review-tools.js";
+import { PreviewSessionStore } from "./preview/preview-session-store.js";
+import { PreviewCaptureBroker } from "./preview/preview-capture-broker.js";
+import { PreviewTestBroker } from "./preview/preview-test-broker.js";
+import { registerPreviewHandlers } from "./preview/register-preview-handlers.js";
+import { registerPreviewConsoleTools } from "./tools/preview-console-tools.js";
+import { registerPreviewTestTools } from "./tools/preview-test-tools.js";
+import {
+  DebugProtocolGuard,
+  DEBUG_PROTOCOL_HOOK_ID,
+  DEBUG_PROTOCOL_HOOK_NAME,
+  DEBUG_PROTOCOL_MATCHER,
+} from "./hooks/debug-protocol-guard.js";
+import {
+  NamedTargetGuard,
+  NAMED_TARGET_HOOK_ID,
+  NAMED_TARGET_HOOK_NAME,
+  NAMED_TARGET_MATCHER,
+} from "./hooks/named-target-guard.js";
+import {
+  ChangeScaleGuard,
+  CHANGE_SCALE_HOOK_ID,
+  CHANGE_SCALE_HOOK_NAME,
+  CHANGE_SCALE_MATCHER,
+} from "./hooks/change-scale-guard.js";
+import { PreviewBaselines } from "./context/preview/preview-baselines.js";
 import { GitService } from "./git/git-service.js";
 import { registerGitHandlers } from "./git/register-git-handlers.js";
+import { setForgeTokenStore } from "./git/forge-auth.js";
 import { TerminalManager } from "./terminal/terminal-manager.js";
 import { registerTerminalHandlers } from "./terminal/register-terminal-handlers.js";
 import { PathGuard } from "./workspace/path-guard.js";
@@ -65,6 +95,12 @@ import {
   ANSWER_ONLY_HOOK_NAME,
 } from "./hooks/answer-only-guard.js";
 import {
+  RepeatCallGuard,
+  REPEAT_CALL_HOOK_ID,
+  REPEAT_CALL_HOOK_NAME,
+  REPEAT_CALL_MATCHER,
+} from "./hooks/repeat-call-guard.js";
+import {
   PlanEditGuard,
   PLAN_EDIT_HOOK_ID,
   PLAN_EDIT_HOOK_NAME,
@@ -84,6 +120,12 @@ import {
   GIT_FLOW_HOOK_ID,
   GIT_FLOW_HOOK_NAME,
 } from "./hooks/git-flow-guard.js";
+import {
+  ProtectedBranchGuard,
+  PROTECTED_BRANCH_HOOK_ID,
+  PROTECTED_BRANCH_HOOK_NAME,
+  PROTECTED_BRANCH_MATCHER,
+} from "./hooks/protected-branch-guard.js";
 import {
   DbApprovalGuard,
   DB_APPROVAL_HOOK_ID,
@@ -129,7 +171,6 @@ import { WorkingMemoryStore } from "./context/working-memory/index.js";
 import { WikiCompiler, WikiStore } from "./knowledge/wiki/index.js";
 import { runOneShot } from "./providers/one-shot.js";
 import { TaskSummaryStore } from "./context/summaries/index.js";
-import { SharedSessionContextBuilder } from "./context/session/index.js";
 import { SkillLoader } from "./orchestrator/skill-loader.js";
 import { PlanCheckpointStore } from "./orchestrator/plan-checkpoint-store.js";
 
@@ -181,10 +222,15 @@ export function createAgentRuntime(
     );
   }
   const cliSessionDiffs = new CliSessionDiffRepo(db);
+  const cliSessionHistory = new CliSessionHistoryRepo(db);
   const settings = new SettingsRepo(db, {
     workspaceRoot: config.workspaceRoot,
     ignoreGlobs: [],
     disabledSkills: [],
+    // Empty by default: protection is a choice the user makes per
+    // workspace, and guessing "main" for them would refuse edits on a
+    // solo project where main is the only branch there is.
+    protectedBranches: [],
     globalSessionKnowledge: false,
     // No auto-repair rounds. Each retry re-runs the WHOLE validator set and
     // spends another full model turn, and measured across real tasks the
@@ -206,6 +252,12 @@ export function createAgentRuntime(
   // the rest of the user's home directory or widening writes.
   for (const provider of [".agents", ".codex", ".claude"]) {
     guard.allowRead(path.join(os.homedir(), provider, "skills"));
+    // A project's own skill folders too. Codex lists them by absolute path
+    // and the model was refused 2-3 reads of them on EVERY turn of a locked
+    // conversation; the scope guard now folds in-workspace absolute paths
+    // and lets skill files through, and this keeps the read reference
+    // explicit for the path guard as well.
+    guard.allowRead(path.join(config.workspaceRoot, provider, "skills"));
   }
   const ig = new WorkspaceIgnore(config.workspaceRoot, settings.get().ignoreGlobs);
   const files = new FileService(guard, ig, bus);
@@ -214,7 +266,23 @@ export function createAgentRuntime(
   registerFsTools(tools, files);
   registerGitTools(tools, git);
   registerTerminalTools(tools, guard, config.workspaceRoot, log);
-  registerPreviewReviewTools(tools, config.workspaceRoot);
+  // The signed-in Page preview session, republished by the renderer before
+  // each review so preview_review audits the user's actual screen instead of
+  // a logged-out redirect.
+  const previewSessions = new PreviewSessionStore();
+  registerPreviewReviewTools(tools, config.workspaceRoot, previewSessions);
+  // On-demand access to the in-app preview's own console, so a bug fix can
+  // observe the failure signed in as the user instead of driving a headless
+  // browser into the login wall.
+  const previewCaptures = new PreviewCaptureBroker(bus);
+  registerPreviewConsoleTools(tools, previewCaptures);
+  // The frontend-review test runner: the agent writes a test case and it runs
+  // against the live in-app preview through the bridge — no external browser.
+  const previewTests = new PreviewTestBroker(bus);
+  // What the page showed when each turn was sent, so a preview assertion on
+  // text that was already there is reported as proving nothing.
+  const previewBaselines = new PreviewBaselines();
+  registerPreviewTestTools(tools, previewTests, { baselines: previewBaselines });
   const codexTools = new CodexToolBridge(tools);
   const terminals = new TerminalManager(db, bus, config.workspaceRoot);
   const hooks = new HooksEngine(db, bus, config.workspaceRoot);
@@ -372,18 +440,11 @@ export function createAgentRuntime(
   // action — leaving the row would refuse EVERY write on an existing
   // install instead of none.
   hooks.delete(LEGACY_IMPACT_HOOK_ID);
-  // Built-in targeted-edit hook: write_file may not restate a file that
-  // was mostly already correct. Refused once per file per task, so a
-  // genuine full rewrite costs one extra tool call and never the task.
-  hooks.ensureBuiltin({
-    id: REWRITE_HOOK_ID,
-    name: REWRITE_HOOK_NAME,
-    enabled: true,
-    event: "preTool",
-    matcher: "write_file",
-    action: "block",
-    argument: "Patch with replace_code instead of rewriting the whole file",
-  });
+  // The targeted-edit hook (write_file refused when most lines survive)
+  // is gone with the other process guards — see the note below the
+  // approval hooks. The guard object stays for the smoke that exercises
+  // the bypass mechanics, nothing registers it.
+  hooks.delete(REWRITE_HOOK_ID);
   const rewriteGuard = new TargetedEditGuard(
     (relPath) =>
       files
@@ -392,11 +453,7 @@ export function createAgentRuntime(
         .catch(() => null),
     bus
   );
-  hooks.registerGuard(REWRITE_HOOK_ID, (ctx) =>
-    directTasks.has(ctx.taskId)
-      ? Promise.resolve(undefined)
-      : rewriteGuard.check(ctx)
-  );
+  void rewriteGuard;
   const knowledge = new KnowledgeQuery(db);
   const embedder = new Embedder(config.dataDir);
   const vectors = new VectorStore(db, EMBEDDING_DIMS);
@@ -450,20 +507,12 @@ export function createAgentRuntime(
   const planCheckpoints = new PlanCheckpointStore(config.workspaceRoot, log);
   const planTracker = new PlanTracker(bus, planCheckpoints);
   registerPlanTools(tools, planTracker);
-  // A completion gate can catch a missing plan only after the damage is done.
-  // Refuse the mutation at its source so every emitted diff already owns the
-  // active step that the timeline renders it beneath.
-  hooks.ensureBuiltin({
-    id: PLAN_EDIT_HOOK_ID,
-    name: PLAN_EDIT_HOOK_NAME,
-    enabled: true,
-    event: "preTool",
-    matcher: "write_file|replace_code|replace_many",
-    action: "block",
-    argument: "Publish and start the ordered plan before editing",
-  });
+  // plan-before-edit (every edit refused until set_plan had been called and
+  // a step started) is gone: the plan rail still follows the edits the
+  // model makes, it no longer gates them.
+  hooks.delete(PLAN_EDIT_HOOK_ID);
   const planEditGuard = new PlanEditGuard(planTracker, bus);
-  hooks.registerGuard(PLAN_EDIT_HOOK_ID, (ctx) => planEditGuard.check(ctx));
+  void planEditGuard;
   // A question is answered, never implemented. The pipeline says so in the
   // prompt; this is what makes it true when the model decides otherwise —
   // and it is the same task's only edit gate, since an answer-only turn
@@ -514,23 +563,91 @@ export function createAgentRuntime(
     action: "block",
     argument: "Search for words from the turn, not invented ones",
   });
-  // Existing workspaces persist built-in hook configs. Upgrade only the
-  // previous default matcher so user-customized matchers stay untouched.
-  const storedSearchGrounding = hooks
-    .list()
-    .find((hook) => hook.id === SEARCH_GROUNDING_HOOK_ID);
-  if (storedSearchGrounding?.matcher === "search_text|search_workspace") {
-    hooks.save({
-      ...storedSearchGrounding,
-      matcher: SEARCH_GROUNDING_MATCHER,
-    });
-  }
-  const searchGrounding = new SearchGroundingGuard(bus);
-  hooks.registerGuard(SEARCH_GROUNDING_HOOK_ID, (ctx) =>
-    directTasks.has(ctx.taskId)
-      ? Promise.resolve(undefined)
-      : searchGrounding.check(ctx)
+  // Protected-branch editing restrictions remain disabled.
+  // Commits, pushes and PRs still go through the git-flow confirmation
+  // above, which is where the branch actually matters.
+  hooks.delete(PROTECTED_BRANCH_HOOK_ID);
+  const protectedBranches = new ProtectedBranchGuard(
+    bus,
+    () => settings.get().protectedBranches,
+    async () => (await git.status().catch(() => null))?.branch ?? null
   );
+  void protectedBranches;
+  const searchGrounding = new SearchGroundingGuard(bus);
+  hooks.registerGuard(SEARCH_GROUNDING_HOOK_ID, (ctx) => searchGrounding.check(ctx));
+  // The investigation guards — repeat-call, observe-before-fix, named-target
+  // — are no longer registered. Each refused a tool call the model wanted to
+  // make: a re-read, a search, an edit "before the failure was observed".
+  // One conversation logged 58 such refusals; its "fix this" task made 147
+  // tool calls and zero edits because every replace_code was refused while
+  // the preview iframe the guard demanded was unavailable. The model is
+  // free to read, search and edit; its work is judged by the result. The
+  // recorders stay (they feed working memory, blocker notes and summaries),
+  // only the refusals are gone. Existing hook rows are removed so the
+  // hooks panel stops listing them.
+  hooks.delete(REPEAT_CALL_HOOK_ID);
+  hooks.delete(DEBUG_PROTOCOL_HOOK_ID);
+  hooks.delete(NAMED_TARGET_HOOK_ID);
+  const repeatCalls = new RepeatCallGuard(bus);
+  const debugProtocol = new DebugProtocolGuard(bus);
+  const namedTargets = new NamedTargetGuard(bus);
+  // change-scale (a build or a new test file refused after a copy-only
+  // change) is gone as well. The scale is still computed and shown; it no
+  // longer refuses anything.
+  hooks.delete(CHANGE_SCALE_HOOK_ID);
+  const changeScale = new ChangeScaleGuard(bus, {
+    scaleOf: (taskId) => orchestrator.changeScaleOf(taskId),
+    fileExists: (relPath) =>
+      files
+        .readFile(relPath, { offset: 1, limit: 1 })
+        .then(() => true)
+        .catch(() => false),
+  });
+  void changeScale;
+  // Forge tokens the user adds in the Requests pane live in the settings
+  // table, beside the provider credentials already kept there — so an
+  // account added once survives a restart even when gh refuses the token.
+  setForgeTokenStore({
+    read: (host) => {
+      const raw = settings.getRaw(forgeTokenKey(host));
+      if (!raw) return [];
+      try {
+        const parsed = JSON.parse(raw) as Array<{
+          token?: unknown;
+          login?: unknown;
+        }>;
+        return (Array.isArray(parsed) ? parsed : [])
+          .filter((entry) => typeof entry?.token === "string" && entry.token)
+          .map((entry) => ({
+            token: entry.token as string,
+            source: "stored" as const,
+            ...(typeof entry.login === "string" ? { login: entry.login } : {}),
+          }));
+      } catch {
+        return [];
+      }
+    },
+    write: (host, auth) => {
+      const key = forgeTokenKey(host);
+      const existing = readStoredTokens(settings, key).filter(
+        (entry) => entry.token !== auth.token
+      );
+      settings.setRaw(
+        key,
+        JSON.stringify([...existing, { token: auth.token, login: auth.login }])
+      );
+    },
+    remove: (host, token) => {
+      const key = forgeTokenKey(host);
+      settings.setRaw(
+        key,
+        JSON.stringify(
+          readStoredTokens(settings, key).filter((e) => e.token !== token)
+        )
+      );
+    },
+  });
+
   const validators = new ValidationRunners(config.workspaceRoot);
   // Every tool call — model- or UI-invoked — is gated by user hooks.
   tools.setGate(hooks);
@@ -585,10 +702,6 @@ export function createAgentRuntime(
   // /context materializes a bounded call/import closure from the same
   // tree-sitter tables the knowledge tools use, then binds it to one chat.
   const featureContexts = new FeatureContextStore(db);
-  const sharedSessions = new SharedSessionContextBuilder({
-    conversations,
-    summaries: taskSummaries,
-  });
   const assembler = new PromptAssembler({ db, ledger, sent: sentChunks });
   const skillLoader = new SkillLoader(config.workspaceRoot, settings);
   // Keeps a markdown note picked in the composer in step with its task:
@@ -643,6 +756,7 @@ export function createAgentRuntime(
     wiki,
     wikiCompiler,
     scopeGuard,
+    previewSessions,
     ignore: ig,
     git,
     retriever: cachedRetriever,
@@ -652,6 +766,18 @@ export function createAgentRuntime(
     // Seeded with each turn's prompt and context, and topped up with every
     // tool result, so the guard knows what this turn has actually seen.
     searchGrounding,
+    // Armed when a turn reports a failure, and fed the same tool.completed
+    // events, so the observe-before-fix gate refuses edits until this turn
+    // has seen the failure it is about to fix.
+    debugProtocol,
+    // Fed from the same tool.completed events, so the ledger the guard
+    // refuses against is the one this turn actually filled.
+    repeatCalls,
+    // Armed with the files and strings the user named, and fed the same
+    // tool.completed events, so planning and editing wait until the named
+    // thing has been read or searched.
+    namedTargets,
+    previewBaselines,
     indexer,
     hooks,
     directTasks,
@@ -663,7 +789,6 @@ export function createAgentRuntime(
     ledger,
     assembler,
     summaries: taskSummaries,
-    sharedSessions,
     globalSessions,
     featureContexts,
     codexTools,
@@ -691,11 +816,13 @@ export function createAgentRuntime(
   const selectedModel = () => settings.get().model;
   registerGitHandlers(router, git, selectedModel);
   registerProviderHandlers(router, settings, config.workspaceRoot);
+  registerPreviewHandlers(router, previewSessions, previewCaptures, previewTests);
   registerTerminalHandlers(
     router,
     terminals,
     config.workspaceRoot,
-    cliSessionDiffs
+    cliSessionDiffs,
+    cliSessionHistory
   );
   registerHookHandlers(router, hooks, dbApprovalGuard);
   router.register("usage.get", async (params) => ({
@@ -773,12 +900,39 @@ export function createAgentRuntime(
     usage.stop();
     features.stop();
     indexer.stop();
+    void embedder.shutdown();
     codexTools.stop();
     watcher.stop();
     git.stop();
     terminals.shutdown();
+    previewSessions.clear();
+    void shutdownPreviewReviewBrowser();
     db.close();
   };
 
   return { router, bus, timeline, orchestrator, shutdown };
+}
+
+/** One settings row per forge host, so hosts never overwrite each other. */
+function forgeTokenKey(host: string): string {
+  return `forgeToken:${host.toLowerCase()}`;
+}
+
+function readStoredTokens(
+  settings: SettingsRepo,
+  key: string
+): Array<{ token: string; login?: string }> {
+  const raw = settings.getRaw(key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as Array<{ token?: unknown; login?: unknown }>;
+    return (Array.isArray(parsed) ? parsed : [])
+      .filter((entry) => typeof entry?.token === "string" && entry.token)
+      .map((entry) => ({
+        token: entry.token as string,
+        ...(typeof entry.login === "string" ? { login: entry.login } : {}),
+      }));
+  } catch {
+    return [];
+  }
 }

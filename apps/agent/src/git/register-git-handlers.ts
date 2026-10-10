@@ -28,7 +28,23 @@ export function registerGitHandlers(
   router.register("git.status", async () => ({ status: await git.status() }));
 
   router.register("git.log", async (params) => ({
-    commits: await git.log(params?.maxCount),
+    commits: await git.log(params?.maxCount, undefined, {
+      all: params?.all,
+      ref: params?.ref,
+      path: params?.path,
+    }),
+  }));
+
+  router.register("git.commitFiles", (params) =>
+    git.commitFiles(params.hash)
+  );
+
+  router.register("git.commitFileDiff", (params) =>
+    git.commitFileDiff(params.hash, params.path, params.oldPath)
+  );
+
+  router.register("git.blame", async (params) => ({
+    lines: await git.blame(params.path, params.ref),
   }));
 
   router.register("git.diff", (params) =>
@@ -51,8 +67,19 @@ export function registerGitHandlers(
   });
 
   router.register("git.commit", async (params) => ({
-    hash: await git.commit(params.message),
+    hash: await git.commit(params.message, undefined, {
+      amend: params.amend === true,
+    }),
   }));
+
+  router.register("git.branchState", async () => ({
+    state: await ops.branchState(git),
+  }));
+
+  router.register("git.addForgeAccount", async (params) => {
+    const remote = await ops.originHost(git.root).catch(() => "github.com");
+    return ops.addForgeAccount(git.root, remote, params.token);
+  });
 
   router.register("git.branches", async () => ({
     branches: await git.branches(),
@@ -67,8 +94,10 @@ export function registerGitHandlers(
     url: await git.connectToGitHub(),
   }));
 
-  router.register("git.generateCommitMessage", async () => ({
-    message: await generateCommitMessage(git, selectedModel()),
+  // The git screen carries its own provider/model pick; the app-wide
+  // selection is only the fallback for a caller that sends none.
+  router.register("git.generateCommitMessage", async (params) => ({
+    message: await generateCommitMessage(git, params?.model || selectedModel()),
   }));
 
   // ── Commit → push → PR wizard ──────────────────────────────────────────
@@ -78,8 +107,8 @@ export function registerGitHandlers(
     info: await ops.flowInfo(git),
   }));
 
-  router.register("git.suggestBranchName", async () => ({
-    name: await suggestBranchName(git, selectedModel()),
+  router.register("git.suggestBranchName", async (params) => ({
+    name: await suggestBranchName(git, params?.model || selectedModel()),
   }));
 
   router.register("git.commitRun", async (params, ctx) => {
@@ -87,7 +116,8 @@ export function registerGitHandlers(
       git.root,
       params.message,
       params.stageAll ?? false,
-      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal }
+      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal },
+      { amend: params.amend === true }
     );
     await git.refresh();
     return { result };
@@ -127,14 +157,16 @@ export function registerGitHandlers(
 
   // Polled by the Requests pane: never throws on a missing/signed-out CLI,
   // it comes back with a status and a reason to show instead.
-  router.register("git.pullRequests", () => ops.pullRequests(git.root));
+  router.register("git.pullRequests", (params) =>
+    ops.pullRequests(git.root, params?.credentialId)
+  );
 
   // The pane's Connect button. Forgetting the cached tokens is the whole
   // point: the usual cause of a signed-out pane is a `gh auth login` that
   // happened after this agent started, which nothing else would notice.
-  router.register("git.forgeConnect", () => {
+  router.register("git.forgeConnect", (params) => {
     clearForgeAuth();
-    return ops.pullRequests(git.root);
+    return ops.pullRequests(git.root, params?.credentialId);
   });
 
   router.register("git.checkConflicts", (params) =>
@@ -151,8 +183,15 @@ export function registerGitHandlers(
   });
 
   router.register("git.generatePrDescription", (params) =>
-    generatePrDescription(git, params.base, selectedModel())
+    generatePrDescription(
+      git,
+      params.base,
+      params.model || selectedModel(),
+      params.head
+    )
   );
+
+  router.register("git.prCredentials", () => ops.prCredentials(git.root));
 
   router.register("git.createPr", async (params, ctx) => {
     const result = await ops.createPr(
@@ -160,7 +199,9 @@ export function registerGitHandlers(
       params.base,
       params.title,
       params.body,
-      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal }
+      { onChunk: (chunk) => ctx.progress({ chunk }), signal: ctx.signal },
+      params.head,
+      params.credentialId
     );
     return { result };
   });

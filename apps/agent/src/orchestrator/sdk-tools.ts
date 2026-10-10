@@ -35,7 +35,8 @@ export function createAtelierMcpServer(
   registry: ToolRegistry,
   getContext: () => SdkToolContext,
   /** Reads back an image this conversation attached, for `view_image`. */
-  loadImage?: (path: string) => ImageAttachment | null
+  loadImage?: (path: string) => ImageAttachment | null,
+  toolNames?: string[]
 ): McpSdkServerConfigWithInstance {
   const run = async (name: string, input: unknown) => {
     const ctx = getContext();
@@ -144,14 +145,14 @@ export function createAtelierMcpServer(
     ),
     tool(
       "search_workspace",
-      "Find the files relevant to a query using the live knowledge index " +
-        "(synced to the latest tree) — e.g. 'login' returns the files that " +
-        "implement login, ranked by relevance, each with a line and a " +
-        "one-line preview. Optional glob filter like src/**/*.ts.",
+      "Search literal text in current workspace files. Copy terms from the " +
+        "request, context, or tool results; list directories first if no term " +
+        "is known. Returns paths, lines and matching text. No index is used.",
       {
         query: z.string(),
         glob: z.string().optional(),
         maxResults: z.number().optional(),
+        regex: z.boolean().optional(),
       },
       (input) => run("search_workspace", input),
       { annotations: { readOnlyHint: true } }
@@ -159,8 +160,7 @@ export function createAtelierMcpServer(
     tool(
       "search_text",
       "Fast literal or regex text search over non-ignored workspace files. " +
-        "Use this when you need exact text matches; use search_workspace or " +
-        "retrieve_knowledge for semantic/conceptual lookup.",
+        "Copy terms from the request, context, or tool results. Literal by default.",
       {
         query: z.string(),
         glob: z.string().optional(),
@@ -345,6 +345,16 @@ export function createAtelierMcpServer(
             })
           )
           .describe("The steps, in the order you will do them (max 12)"),
+        notCovered: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Items the request listed that this plan deliberately will NOT " +
+              "deliver, each with the reason. A plan that names none of a " +
+              "listed item's words is refused until the item has a step or " +
+              "appears here; what appears here is shown to the user as not " +
+              "delivered. Never narrow the request silently."
+          ),
       },
       (input) => run("set_plan", input)
     ),
@@ -352,10 +362,20 @@ export function createAtelierMcpServer(
       "update_plan_step",
       "Execute the timeline in order. Mark the current step in-progress " +
         "when it starts and done only after it is complete. Later steps are " +
-        "blocked until earlier ones are done; failed/cancelled/skipped do " +
-        "not clear the final-report gate. Step ids come from set_plan.",
+        "blocked until earlier ones are done; failed/cancelled do not clear " +
+        "the final-report gate. A step that targets the wrong file or text " +
+        "may be marked skipped from pending WITH a note saying why, and the " +
+        "timeline moves on. Step ids come from set_plan.",
       {
-        stepId: z.string().describe("The [step_...] id from the plan"),
+        stepId: z
+          .string()
+          .optional()
+          .describe(
+            "The [step_...] id from set_plan. Its exact title also works. " +
+              "Omit it to mean the step the timeline is waiting on — do " +
+              "that rather than guessing an id, and never call set_plan " +
+              "again to recover an id: on an existing plan set_plan APPENDS."
+          ),
         status: z.enum([
           "pending",
           "in-progress",
@@ -364,7 +384,13 @@ export function createAtelierMcpServer(
           "cancelled",
           "skipped",
         ]),
-        note: z.string().optional().describe("Optional short note"),
+        note: z
+          .string()
+          .optional()
+          .describe(
+            "Short outcome note. Required when skipping a step that never " +
+              "started: say why (e.g. targets the wrong file)."
+          ),
       },
       (input) => run("update_plan_step", input)
     ),
@@ -398,17 +424,104 @@ export function createAtelierMcpServer(
     tool(
       "preview_review",
       "Debug the live local Page preview in headless Chromium at desktop and " +
-        "mobile sizes. Returns a status and decision plus the chronological " +
-        "DevTools console, console/page errors, failed HTTP requests, DOM audit, " +
-        "and screenshots. Obey the decision: unavailable means ask the user to " +
-        "start or reopen Page preview and stop without retrying or starting a " +
-        "server; issues means report the exact diagnostics, then fix when the " +
-        "task allows edits or skip; failed means report the tool error and skip.",
+        "mobile sizes, reusing the signed-in session from the in-app Page " +
+        "preview when the app has published one. Returns a status and decision " +
+        "plus the chronological DevTools console, console/page errors, failed " +
+        "HTTP requests, DOM audit, screenshots, routeReached, and " +
+        "previewSession.applied. Obey the decision: unavailable means ask the " +
+        "user to start or reopen Page preview and stop without retrying or " +
+        "starting a server; off-route means the app redirected away from the " +
+        "requested route (usually a signed-out login redirect) — report it and " +
+        "fail the review, since no evidence about the change was collected; " +
+        "issues means report the exact diagnostics, then fix when the task " +
+        "allows edits or skip; failed means report the tool error and skip.",
       {
         url: z.string().describe("The local http(s) URL shown in Page preview"),
       },
       (input) => run("preview_review", input),
       { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "preview_console",
+      "Read the live in-app Page preview's own DevTools console, signed in as " +
+        "the user — the cheapest way to OBSERVE a front-end failure, with no " +
+        "headless browser and no login redirect. Prefer this over " +
+        "preview_review as the first observation of a reported UI bug. Returns " +
+        "status (issues | clean | unavailable), the recent console lines and " +
+        "the errors among them. unavailable means Page preview is not open (or " +
+        "this is not the desktop app) — observe the failure another way " +
+        "instead. A clean console is not proof the bug is fixed unless the " +
+        "failure was a console error.",
+      {
+        url: z
+          .string()
+          .optional()
+          .describe("Route to read; omit for the displayed page"),
+      },
+      (input) => run("preview_console", input),
+      { annotations: { readOnlyHint: true } }
+    ),
+    tool(
+      "preview_test",
+      "Run an authored frontend test case against the LIVE in-app Page preview " +
+        "— the browser the user is already looking at, signed in and loaded, " +
+        "driven through the bridge with no external browser and no login " +
+        "redirect. Use this for a frontend review: FIRST write the test case " +
+        "for the requested change, THEN run it. Steps run in order and stop at " +
+        "the first failure; the verdict is the assertions, not a screenshot. " +
+        "Each step is one of: navigate {target}, click {selector|text}, fill " +
+        "{selector,value}, press {key,selector?}, waitFor {selector|text," +
+        "state?,timeoutMs?}, assert {description,selector?,text?,notText?," +
+        "visible?,absent?}, screenshot {label?}. Include at least one assert " +
+        "that checks the requested outcome. Returns status passed|failed|" +
+        "unavailable, per-step results, console errors, and screenshot paths.",
+      {
+        title: z.string().describe("One line naming the behaviour under test"),
+        url: z
+          .string()
+          .optional()
+          .describe("Route to open first (path or full localhost URL)"),
+        steps: z
+          .array(
+            z.object({
+              action: z
+                .enum([
+                  "navigate",
+                  "click",
+                  "fill",
+                  "press",
+                  "waitFor",
+                  "assert",
+                  "screenshot",
+                ])
+                .describe("The step kind"),
+              target: z.string().optional().describe("navigate: route or URL"),
+              selector: z.string().optional().describe("CSS selector"),
+              text: z
+                .string()
+                .optional()
+                .describe("click: visible text; assert/waitFor: text present"),
+              value: z.string().optional().describe("fill: value to type"),
+              key: z.string().optional().describe("press: key name, e.g. Enter"),
+              state: z
+                .enum(["visible", "hidden"])
+                .optional()
+                .describe("waitFor: target state"),
+              timeoutMs: z.number().optional().describe("waitFor: deadline"),
+              description: z
+                .string()
+                .optional()
+                .describe("assert: what this checks"),
+              notText: z.string().optional().describe("assert: text must be absent"),
+              visible: z.boolean().optional().describe("assert: selector visible"),
+              absent: z.boolean().optional().describe("assert: selector absent"),
+              label: z.string().optional().describe("screenshot: label"),
+            })
+          )
+          .describe("Ordered test steps; include at least one assert"),
+      },
+      (input) => run("preview_test", input),
+      { annotations: { readOnlyHint: false } }
     ),
     tool(
       "run_terminal",
@@ -464,5 +577,11 @@ export function createAtelierMcpServer(
     ),
   ];
 
-  return createSdkMcpServer({ name: MCP_SERVER_NAME, version: "0.1.0", tools });
+  return createSdkMcpServer({
+    name: MCP_SERVER_NAME,
+    version: "0.1.0",
+    tools: toolNames === undefined ? tools : tools.filter((entry) =>
+      toolNames.includes(entry.name) || (entry.name === "view_image" && toolNames.length > 0)
+    ),
+  });
 }

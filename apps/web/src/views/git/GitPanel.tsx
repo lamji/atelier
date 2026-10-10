@@ -1,8 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import type { GitBranchState } from "@atelier/protocol";
 import {
   Check,
   ChevronDown,
   ChevronRight,
+  Cpu,
   FileDiff,
   GitBranch,
   GitCommitHorizontal,
@@ -12,6 +14,7 @@ import {
   Minus,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Undo2,
 } from "lucide-react";
@@ -33,9 +36,13 @@ import { SyncBar } from "./SyncBar";
 import { MergeBanner } from "./MergeBanner";
 import { ConflictResolver } from "./ConflictResolver";
 import { AiResolveModal } from "./AiResolveModal";
+import { GitModelSelect } from "./GitModelSelect";
 import { HistoryPanel } from "./HistoryPanel";
 import { RequestsPanel } from "./RequestsPanel";
+import { ProtectedPanel } from "./ProtectedPanel";
+import { GitErrorModal, type GitError } from "./GitErrorModal";
 import { usePullRequestsViewModel } from "@/hooks/usePullRequestsViewModel";
+import { confirmDialog } from "@/state/confirm.store";
 import type { GitViewModel } from "@/hooks/useGitViewModel";
 import type { GitFileStatus } from "@atelier/protocol";
 
@@ -50,7 +57,7 @@ const MAX_RENDERED_FILES_PER_SECTION = 200;
  * The right column's panes: the working tree, the commit log, or the open
  * pull/merge requests for this checkout.
  */
-type GitPane = "changes" | "history" | "requests";
+type GitPane = "changes" | "history" | "requests" | "protected";
 
 /**
  * Shell around the repo view. The switcher lives here rather than inside
@@ -105,6 +112,34 @@ export function GitPanel({ vm }: GitPanelProps) {
       </WorkspacePageBody>
     </div>
   );
+}
+
+/**
+ * How stale the remote comparison is, in words. Deliberately coarse: the
+ * point is "is this current?", never a stopwatch.
+ */
+function freshness(at: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 90) return "just fetched";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `fetched ${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `fetched ${hours}h ago`;
+  return `fetched ${Math.round(hours / 24)}d ago`;
+}
+
+/** Mirror of the agent's matcher — for the tab's warning mark only. */
+function branchMatches(branch: string, pattern: string): boolean {
+  const name = branch.trim().toLowerCase();
+  const rule = pattern.trim().toLowerCase();
+  if (!name || !rule) return false;
+  if (rule === name) return true;
+  if (!rule.includes("*")) return false;
+  const escaped = rule
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[^/]*");
+  return new RegExp(`^${escaped}$`).test(name);
 }
 
 function EmptyState({
@@ -180,6 +215,28 @@ function GitRepoView({
   // merge: the conflict count rides on the tab, so the user is told without
   // having the log yanked out from under them.
   const [pane, setPane] = useState<GitPane>("changes");
+  // What the branch owns of its own, so the button can say whether it is
+  // about to add a commit or rewrite the branch's one commit. Re-read
+  // whenever the working tree changes, since committing changes the answer.
+  const [branch, setBranch] = useState<GitBranchState | null>(null);
+  // The checkout is on a protected branch right now: the tab says so, so
+  // the refusal is never the first the user hears of it.
+  const protectedBy = vm.protectionOnBranch(vm.status?.branch ?? "");
+  const onProtected = protectedBy !== null;
+  // Every git failure and refusal in this panel surfaces here, as an
+  // interruption. A toast is the wrong shape for "your commit was refused".
+  const [gitError, setGitError] = useState<GitError | null>(null);
+  const readBranchState = vm.branchState;
+  const statusKey = `${vm.status?.branch ?? ""}:${vm.commits.length}`;
+  useEffect(() => {
+    let live = true;
+    void readBranchState().then((state) => {
+      if (live) setBranch(state);
+    });
+    return () => {
+      live = false;
+    };
+  }, [readBranchState, statusKey]);
   // Same store as the shell-mounted modal (GitFlowHost) — this instance
   // only starts the flow; the host renders it.
   const flowVm = useGitFlowViewModel();
@@ -229,7 +286,13 @@ function GitRepoView({
     setBusy(true);
     setActionError(null);
     void fn()
-      .catch((err: unknown) => setActionError(shortError(errorText(err))))
+      .catch((err: unknown) =>
+        setGitError({
+          title: "Git operation failed",
+          detail: errorText(err),
+          kind: "error",
+        })
+      )
       .finally(() => setBusy(false));
   };
 
@@ -241,6 +304,21 @@ function GitRepoView({
   const doCommit = () => {
     const msg = message.trim();
     if (!msg) return;
+    // The same rule the agent is held to. Refusing the agent while the
+    // app's own button commits to main would not be a protection.
+    if (protectedBy) {
+      setGitError({
+        kind: "blocked",
+        title: `${vm.status?.branch ?? "This branch"} is protected`,
+        detail:
+          `Commit and push are blocked on this branch (rule "${protectedBy}").
+
+` +
+          "Create a working branch for this change, or remove the " +
+          "protection in the Protected tab.",
+      });
+      return;
+    }
     void flowVm.startFlow(msg, staged.length === 0);
     setMessage("");
   };
@@ -261,12 +339,17 @@ function GitRepoView({
   const doDiscard = (paths: string[]) => {
     const what =
       paths.length === 1 ? paths[0] : `${paths.length} files`;
-    const ok = window.confirm(
-      `Discard changes in ${what}?\n\n` +
+    void confirmDialog({
+      title: "Discard changes",
+      message:
+        `Discard changes in ${what}?\n\n` +
         "Tracked files are restored; untracked files are DELETED. " +
-        "This cannot be undone."
-    );
-    if (ok) act(() => vm.discard(paths));
+        "This cannot be undone.",
+      confirmLabel: "Discard",
+      destructive: true,
+    }).then((ok) => {
+      if (ok) act(() => vm.discard(paths));
+    });
   };
 
   return (
@@ -278,6 +361,7 @@ function GitRepoView({
           busy={busy}
           onOpenCheckout={() => mergeVm.openSync("checkout")}
           onRefresh={vm.refresh}
+          fetchedAt={vm.fetchedAt}
         />
 
         <SyncBar
@@ -309,6 +393,11 @@ function GitRepoView({
             busy={busy}
             stagedCount={staged.length}
             unstagedCount={unstaged.length}
+            amending={Boolean(
+              branch && branch.ahead === 1 && !branch.onBase
+            )}
+            amendPushed={Boolean(branch?.hasUpstream)}
+            protectedBy={protectedBy}
             onCommit={doCommit}
             onGenerate={doGenerate}
           />
@@ -319,7 +408,8 @@ function GitRepoView({
           <ConflictResolver vm={mergeVm} />
         </div>
       ) : (
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/30 p-2">
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/30 p-2">
+        <GitErrorModal error={gitError} onDismiss={() => setGitError(null)} />
         <PaneTabs
           tab={pane}
           onSelect={setPane}
@@ -329,11 +419,33 @@ function GitRepoView({
           requestCount={prVm.requests.length}
           unseenRequests={prVm.unseen.size}
           requestsAvailable={prVm.available}
+          protectedCount={vm.protectedBranches.length}
+          onProtectedBranch={onProtected}
         />
-        {pane === "requests" ? (
-          <RequestsPanel vm={prVm} branch={vm.status.branch} />
+        {pane === "protected" ? (
+          <ProtectedPanel
+            branches={vm.protectedBranches}
+            currentBranch={vm.status.branch}
+            known={vm.knownBranches}
+            busy={vm.protecting}
+            onAdd={(pattern) => void vm.protectBranch(pattern)}
+            onRemove={(pattern) => void vm.unprotectBranch(pattern)}
+          />
+        ) : pane === "requests" ? (
+          <RequestsPanel
+            vm={prVm}
+            branch={vm.status.branch}
+            onNewRequest={() => void flowVm.startPr()}
+            // branchState, not the flow's info: the flow only learns the
+            // default branch once it has run, so on a fresh panel that
+            // check silently answered "no" for every branch.
+            onBaseBranch={branch?.onBase ?? false}
+          />
         ) : pane === "history" ? (
-          <HistoryPanel commits={vm.commits} />
+          <HistoryPanel
+            changedCount={staged.length + unstaged.length}
+            onShowChanges={() => setPane("changes")}
+          />
         ) : (
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
         {(inMerge || conflictSet.size > 0) && (
@@ -654,36 +766,75 @@ function CommitBox(props: {
   busy: boolean;
   stagedCount: number;
   unstagedCount: number;
+  /** Set once the branch owns exactly one commit — this one rewrites it. */
+  amending: boolean;
+  amendPushed: boolean;
+  /** Rule protecting the current branch, or null — disables the button. */
+  protectedBy: string | null;
   onCommit: () => void;
   onGenerate: () => void;
 }) {
   return (
     <>
-    <div className="relative">
+    {/* One composer card: the message on top, the draft controls in a
+        footer strip — the model pick and the Draft action read as one
+        tool, and the textarea is bordered like an input rather than a
+        bare grey block with a floating icon. */}
+    <div
+      className={cn(
+        "overflow-hidden rounded-lg border border-border bg-card",
+        "focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/30"
+      )}
+    >
+      {/* The field is its own, lighter surface inside the card: with the
+          same colour as the card it read as an empty box with a footer. */}
       <Textarea
         value={props.message}
         onChange={(e) => props.onMessageChange(e.target.value)}
-        placeholder={props.generating ? "Drafting a message…" : "Commit message"}
-        rows={2}
+        placeholder={
+          props.generating ? "Drafting a message…" : "Write a commit message…"
+        }
+        rows={3}
         disabled={props.generating}
-        className="max-h-52 min-h-12 resize-y pr-8 text-xs"
+        className={cn(
+          "max-h-52 min-h-[76px] resize-y rounded-none bg-background/70",
+          "px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/80",
+          "focus-visible:bg-background"
+        )}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) props.onCommit();
         }}
       />
-      <Tooltip content="Generate commit message from changes (AI)">
-        <button
-          onClick={props.onGenerate}
-          disabled={props.generating || props.busy}
-          className="absolute right-1.5 top-1.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-primary disabled:opacity-50"
-        >
-          {props.generating ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Sparkles className="h-3.5 w-3.5" />
-          )}
-        </button>
-      </Tooltip>
+      <div className="flex items-center gap-1.5 border-t border-border bg-muted/50 px-2 py-1.5">
+        {/* Which provider/model drafts the message — the same pick the PR
+            description uses. It sits with the Draft button, not in
+            Settings, because the choice is made at the moment of drafting. */}
+        <Cpu className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <GitModelSelect
+          disabled={props.generating}
+          direction="up"
+          className="h-6 w-40 rounded-md border border-border/70 bg-background/70 px-2"
+        />
+        <Tooltip content="Draft a commit message from the changes with the model on the left">
+          <button
+            type="button"
+            onClick={props.onGenerate}
+            disabled={props.generating || props.busy}
+            className={cn(
+              "ml-auto flex h-6 shrink-0 items-center gap-1 rounded-md border border-primary/40",
+              "bg-primary/10 px-2 text-[11px] font-medium text-primary",
+              "hover:bg-primary/20 disabled:cursor-default disabled:opacity-50"
+            )}
+          >
+            {props.generating ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Sparkles className="h-3 w-3" />
+            )}
+            {props.generating ? "Drafting…" : "Draft"}
+          </button>
+        </Tooltip>
+      </div>
     </div>
     <Tooltip
       content={
@@ -699,13 +850,18 @@ function CommitBox(props: {
         disabled={
           props.busy ||
           props.generating ||
+          props.protectedBy !== null ||
           props.message.trim() === "" ||
           (props.stagedCount === 0 && props.unstagedCount === 0)
         }
         onClick={props.onCommit}
       >
         <Check className="mr-1.5 h-3.5 w-3.5" />
-        Commit{" "}
+        {props.protectedBy
+          ? "Protected branch"
+          : props.amending
+            ? "Update commit"
+            : "Commit"}{" "}
         {props.stagedCount > 0
           ? `(${props.stagedCount})`
           : props.unstagedCount > 0
@@ -713,6 +869,22 @@ function CommitBox(props: {
             : ""}
       </Button>
     </Tooltip>
+    {props.protectedBy && (
+      <p className="px-0.5 text-[10px] leading-tight text-warning">
+        Commit and push are blocked here by the rule
+        {" "}<span className="font-mono">{props.protectedBy}</span>. Switch to a
+        working branch, or remove it in the Protected tab.
+      </p>
+    )}
+    {!props.protectedBy && props.amending && (
+      <p className="px-0.5 text-[10px] leading-tight text-muted-foreground">
+        This branch keeps one commit — this rewrites it rather than adding
+        another.
+        {props.amendPushed
+          ? " It is already pushed, so the push will need --force-with-lease."
+          : ""}
+      </p>
+    )}
     </>
   );
 }
@@ -769,6 +941,8 @@ function BranchSection(props: {
   /** Opens the checkout picker (local + remote branches, or a new one). */
   onOpenCheckout: () => void;
   onRefresh: () => void;
+  /** When the remote refs were last refreshed, or null before the first. */
+  fetchedAt: number | null;
 }) {
   const { status } = props;
   const drifted = status.ahead > 0 || status.behind > 0;
@@ -807,6 +981,15 @@ function BranchSection(props: {
                 </>
               ) : (
                 <span>in sync</span>
+              )}
+              {/* Ahead/behind is measured against the LAST fetch, so the
+                  age of that fetch is part of the claim. Without it "in
+                  sync" reads as "checked just now" when it can mean
+                  "checked yesterday". */}
+              {props.fetchedAt !== null && (
+                <span className="text-muted-foreground/50">
+                  · {freshness(props.fetchedAt)}
+                </span>
               )}
             </span>
           </span>
@@ -851,12 +1034,14 @@ function TreePulse(props: {
     },
   ];
   return (
-    <div className="flex flex-col gap-1.5 rounded-xl bg-black/20 p-1.5">
+    // Surfaces come from the theme tokens, not a black wash: on light the
+    // wash resolved to a grey slab belonging to no layer of the ramp.
+    <div className="flex flex-col gap-1.5 rounded-xl border border-border/70 bg-card p-1.5 shadow-[var(--atelier-shadow-sm)]">
       <div className="flex items-stretch gap-1.5">
         {tiles.map((t) => (
           <div
             key={t.label}
-            className="flex min-w-0 flex-1 flex-col items-center justify-center rounded-lg bg-white/[0.03] py-1"
+            className="flex min-w-0 flex-1 flex-col items-center justify-center rounded-lg bg-muted/50 py-1"
           >
             <span
               className={cn(
@@ -873,7 +1058,7 @@ function TreePulse(props: {
         ))}
       </div>
       <div className="flex items-center gap-1.5 px-0.5">
-        <span className="flex h-1 min-w-0 flex-1 items-stretch overflow-hidden rounded-full bg-white/5">
+        <span className="flex h-1 min-w-0 flex-1 items-stretch overflow-hidden rounded-full bg-muted-foreground/20">
           {churn > 0 && (
             <>
               <span
@@ -1051,6 +1236,9 @@ function PaneTabs(props: {
   /** Requests that showed up since this pane was last looked at. */
   unseenRequests: number;
   requestsAvailable: boolean;
+  protectedCount: number;
+  /** The checkout is ON a protected branch — the count turns to a warning. */
+  onProtectedBranch: boolean;
 }) {
   // Conflicts outrank the change count on the badge, the way the dock tile
   // does it: a red number is the one that has to be acted on.
@@ -1069,6 +1257,14 @@ function PaneTabs(props: {
       label: "History",
       count: props.commitCount,
       danger: false,
+      dot: false,
+    },
+    {
+      id: "protected" as const,
+      icon: ShieldCheck,
+      label: "Protected",
+      count: props.protectedCount,
+      danger: props.onProtectedBranch,
       dot: false,
     },
     {

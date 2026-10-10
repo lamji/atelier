@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { MarkdownFile, ModelOption, SlashCommand } from "@atelier/protocol";
+import type {
+  MarkdownFile,
+  ModelOption,
+  SlashCommand,
+  TurnMode,
+} from "@atelier/protocol";
 import {
   composePromptFilePrompt,
   conversationTitle,
   newId,
+  wrapHiddenContext,
 } from "@atelier/shared";
 import { bridge } from "@/services/bridge-client";
-import { captureActivePreviewContext } from "@/services/preview-context";
+import {
+  captureActivePreviewContext,
+  type PreviewFocusRequest,
+} from "@/services/preview-context";
+import { publishActivePreviewSession } from "@/services/preview-session";
 import { useConnectionStore } from "@/state/connection.store";
 import { useSessionsStore, type SessionVm } from "@/state/sessions.store";
 import { useMarkdownStore } from "@/state/markdown.store";
@@ -28,6 +38,32 @@ import { useMentionBrowser, type MentionBrowser } from "./useMentionBrowser";
 import type { PendingImage } from "@/types";
 
 export type { EffortChoice, ModelChoice, PendingImage };
+
+/**
+ * The highlights of the newest annotated screenshot, mapped from normalized
+ * image space into the preview iframe's CSS pixels. The newest one wins:
+ * a second screenshot is a correction of the first, not an addition to it.
+ * Without the capture size there is no honest mapping, so no focus is sent.
+ */
+export function previewFocusFromImages(
+  images: PendingImage[]
+): PreviewFocusRequest | undefined {
+  const annotated = [...images]
+    .reverse()
+    .find((image) => (image.highlights?.length ?? 0) > 0 && image.captureSize);
+  const size = annotated?.captureSize;
+  if (!annotated?.highlights || !size) return undefined;
+  const round = (value: number) => Math.round(value * 10) / 10;
+  return {
+    rects: annotated.highlights.map((h) => ({
+      x: round(h.x * size.width),
+      y: round(h.y * size.height),
+      width: round(h.width * size.width),
+      height: round(h.height * size.height),
+    })),
+    sourceUrl: annotated.sourceUrl,
+  };
+}
 
 /** Re-reads of a model roster that failed, and the first delay. */
 const MODELS_RETRIES = 4;
@@ -224,8 +260,9 @@ export interface ComposerViewModel {
   changeModel: (value: ModelChoice) => void;
   effort: EffortChoice;
   changeEffort: (value: EffortChoice) => void;
-  planMode: boolean;
-  setPlanMode: (value: boolean) => void;
+  /** Ask / Plan / Code for the next turn. */
+  turnMode: TurnMode;
+  setTurnMode: (value: TurnMode) => void;
   /** Ticked: the full pipeline. Unticked: a plain Claude/Codex turn. */
   systemKnowledge: boolean;
   setSystemKnowledge: (value: boolean) => void;
@@ -487,23 +524,40 @@ export function useComposerViewModel(): ComposerViewModel {
         body = composePromptFilePrompt(clipPromptFile(content), text, note);
       }
 
-      const activePreviewContext = await captureActivePreviewContext();
+      // Two captures from the same open preview, taken together on purpose.
+      // The DOM block rides into the prompt as hidden context; the session
+      // goes over its own RPC and never touches the prompt, so a command
+      // like /context_mock_api can call the API as the signed-in user
+      // instead of getting the anonymous 401.
+      // The user's own words gate what the DOM block carries, and the
+      // screenshot highlights tell the capture which elements to name.
+      const [activePreviewContext] = await Promise.all([
+        captureActivePreviewContext(text, previewFocusFromImages(images)),
+        publishActivePreviewSession(),
+      ]);
       const previewUrls = Array.from(
         new Set(
           images.flatMap((image) => (image.sourceUrl ? [image.sourceUrl] : []))
         )
       );
+      // Hidden like the DOM block: the URL is evidence for the agent (its
+      // screen commands parse "Current page preview URL:"), not something
+      // the intent reader, the summary or the title should treat as typed.
+      const screenshotContext =
+        previewUrls.length > 0
+          ? wrapHiddenContext(
+              `Screenshot context:\n${previewUrls
+                .map((url) => `- Current page preview URL: ${url}`)
+                .join("\n")}`
+            )
+          : "";
       const prompt = [
         body || (images.length > 0 ? "(see attached image)" : ""),
         attachments.length > 0
           ? `Attached files:\n${attachments.map((path) => `- ${path}`).join("\n")}`
           : "",
         activePreviewContext ?? "",
-        previewUrls.length > 0
-          ? `Screenshot context:\n${previewUrls
-              .map((url) => `- Current page preview URL: ${url}`)
-              .join("\n")}`
-          : "",
+        screenshotContext,
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -548,7 +602,9 @@ export function useComposerViewModel(): ComposerViewModel {
             pick.effort === "default"
               ? resolveAgentEffort(pick.model, models)
               : pick.effort,
-          planMode: pick.planMode || undefined,
+          turnMode: pick.turnMode,
+          // Still sent, and still the only flag an older agent understands.
+          planMode: pick.turnMode === "plan" || undefined,
           // Only ever sent when OFF: absent means the normal pipeline, so
           // an older agent that ignores the flag still behaves correctly.
           systemKnowledge: pick.systemKnowledge === false ? false : undefined,
@@ -712,8 +768,8 @@ export function useComposerViewModel(): ComposerViewModel {
     [setComposer, selectedId]
   );
 
-  const setPlanMode = useCallback(
-    (value: boolean) => setComposer(selectedId, { planMode: value }),
+  const setTurnMode = useCallback(
+    (value: TurnMode) => setComposer(selectedId, { turnMode: value }),
     [setComposer, selectedId]
   );
 
@@ -749,8 +805,8 @@ export function useComposerViewModel(): ComposerViewModel {
     changeModel,
     effort: own?.effort ?? defaults.effort,
     changeEffort,
-    planMode: own?.planMode ?? false,
-    setPlanMode,
+    turnMode: own?.turnMode ?? "code",
+    setTurnMode,
     systemKnowledge: own?.systemKnowledge ?? defaults.systemKnowledge,
     setSystemKnowledge,
     vibe,

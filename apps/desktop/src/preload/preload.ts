@@ -3,6 +3,8 @@ import { IPC_CHANNELS, PORT_MESSAGE_TYPE } from "../shared/ipc-contract";
 import type {
   AtelierDesktopApi,
   DesktopCaptureRequest,
+  DesktopPreviewActStep,
+  DesktopPreviewContextOptions,
   DesktopProjectInfo,
   DesktopUpdateProgress,
 } from "../shared/ipc-contract";
@@ -82,8 +84,14 @@ const api: AtelierDesktopApi = {
   captureRegion: (request: DesktopCaptureRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.captureRegion, request),
 
-  getPreviewContext: (previewUrl: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.previewContext, previewUrl),
+  getPreviewContext: (previewUrl: string, options?: DesktopPreviewContextOptions) =>
+    ipcRenderer.invoke(IPC_CHANNELS.previewContext, previewUrl, options),
+
+  getPreviewSession: (previewUrl: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.previewSession, previewUrl),
+
+  previewAct: (previewUrl: string, step: DesktopPreviewActStep) =>
+    ipcRenderer.invoke(IPC_CHANNELS.previewAct, previewUrl, step),
 
   // File.path was removed in Electron 32; webUtils is the only way to turn
   // a dropped File back into a filesystem path.

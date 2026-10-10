@@ -294,12 +294,13 @@ CREATE TABLE IF NOT EXISTS context_sent_chunks (
 -- start by re-reading what the last turn already gathered.
 CREATE TABLE IF NOT EXISTS conversation_working_memory (
   conversation_id TEXT NOT NULL,
-  -- 'read' | 'search'
+  -- 'read' | 'search' | 'edit' | 'command'
   kind TEXT NOT NULL,
   -- read: "<path>#<offset>-<limit>"; search: "<tool>:<query>"
   key TEXT NOT NULL,
   task_id TEXT NOT NULL,
-  -- JSON: read {path, offset, limit, hash, chars}; search {tool, query, paths}
+  -- JSON: read {path, offset, limit, hash, chars}; search {tool, query, paths};
+  -- edit {path}; command {command, exitCode, timedOut, tail}
   meta TEXT NOT NULL,
   noted_at INTEGER NOT NULL,
   PRIMARY KEY (conversation_id, kind, key)
@@ -316,6 +317,9 @@ CREATE TABLE IF NOT EXISTS task_summaries (
   changed_files TEXT NOT NULL DEFAULT '[]',
   outcome TEXT,
   status TEXT NOT NULL DEFAULT 'completed',
+  -- 'answer' (told the user something) or 'change' (edited); NULL on rows
+  -- written before the column existed.
+  kind TEXT,
   chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL
 );
@@ -407,3 +411,18 @@ CREATE TABLE IF NOT EXISTS cli_session_diffs (
 );
 CREATE INDEX IF NOT EXISTS idx_cli_session_diffs_session
   ON cli_session_diffs(provider_id, session_id, last_touched_at DESC);
+
+-- Provider transcript IDs indexed locally so cleared or closed CLI sessions
+-- remain resumable even after they fall outside the transcript scan window.
+CREATE TABLE IF NOT EXISTS cli_session_history (
+  provider_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
+  title TEXT NOT NULL,
+  custom_title TEXT,
+  started_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (provider_id, session_id, workspace_root)
+);
+CREATE INDEX IF NOT EXISTS idx_cli_session_history_workspace
+  ON cli_session_history(workspace_root, updated_at DESC);

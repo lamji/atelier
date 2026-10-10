@@ -15,6 +15,11 @@ export interface SelectOption {
   label: string;
   /** Secondary line in the menu (e.g. the model's version blurb). */
   hint?: string;
+  /** Optional action rendered separately from selecting this option. */
+  action?: {
+    label: string;
+    onClick: () => void | Promise<void>;
+  };
   separator?: false;
 }
 
@@ -35,6 +40,26 @@ export interface SelectProps {
   menuClassName?: string;
   /** Optional right-click action for non-separator options. */
   onOptionContextMenu?: (option: SelectOption, event: MouseEvent) => void;
+  /**
+   * Pins a filter box to the top of the menu.
+   *
+   * Opt-in rather than automatic: most menus here are a handful of models
+   * or modes, where a search box is furniture. A branch list is the other
+   * kind — a real repository has hundreds, and scrolling to `main` past
+   * forty backup branches is not a menu, it is a haystack.
+   */
+  searchable?: boolean;
+  /** Placeholder for that box; defaults to "Search…". */
+  searchPlaceholder?: string;
+  /**
+   * Trigger text when `value` matches no option — an "action" menu, where
+   * nothing is selected and picking something DOES something.
+   *
+   * Without it such a menu needs a fake first option to carry its own
+   * label, which then sits in the list as a row that means nothing and
+   * cannot be picked.
+   */
+  placeholder?: string;
 }
 
 /**
@@ -50,8 +75,12 @@ export function Select({
   className,
   menuClassName,
   onOptionContextMenu,
+  searchable = false,
+  searchPlaceholder = "Search…",
+  placeholder,
 }: SelectProps) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLUListElement>(null);
   const selected = options.find((o) => !o.separator && o.value === value);
@@ -104,6 +133,12 @@ export function Select({
     };
   }, [open, measure]);
 
+  // A filter is about THIS visit to the menu; carrying it to the next one
+  // would reopen onto a list that looks mysteriously short.
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
   // Click-outside / Escape both close the menu.
   useEffect(() => {
     if (!open) return;
@@ -124,6 +159,18 @@ export function Select({
     };
   }, [open]);
 
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? options.filter(
+        (option) =>
+          !option.separator &&
+          (option.label.toLowerCase().includes(needle) ||
+            option.value.toLowerCase().includes(needle)),
+      )
+    : options;
+  // The first real option, so Enter picks what the user is looking at.
+  const firstMatch = visible.find((option) => !option.separator && option.value);
+
   return (
     <div ref={rootRef} className="relative">
       <button
@@ -137,7 +184,9 @@ export function Select({
           className,
         )}
       >
-        <span className="truncate">{selected?.label ?? value}</span>
+        <span className={cn("truncate", !selected && placeholder && "text-muted-foreground/70")}>
+          {selected?.label ?? (value ? value : (placeholder ?? value))}
+        </span>
         <ChevronDown
           className={cn(
             "h-3 w-3 shrink-0 transition-transform",
@@ -177,45 +226,99 @@ export function Select({
                 menuClassName,
               )}
             >
-              {options.map((option) => (
+              {searchable && (
+                // Sticky, not merely first: the list scrolls under it, and a
+                // filter box that scrolls away is one you have to scroll back
+                // to in order to correct a typo.
+                <li className="sticky top-0 z-10 -mx-1 -mt-1 mb-1 bg-card px-1 pb-1 pt-1">
+                  <input
+                    autoFocus
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && firstMatch) {
+                        event.preventDefault();
+                        onChange(firstMatch.value);
+                        setOpen(false);
+                      }
+                      // Escape clears a filter first and closes second, so a
+                      // mistyped query does not cost the whole menu.
+                      if (event.key === "Escape" && query) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setQuery("");
+                      }
+                    }}
+                    placeholder={searchPlaceholder}
+                    className={cn(
+                      "w-full rounded-md bg-muted/60 px-2 py-1 text-[11px]",
+                      "text-foreground outline-none",
+                      "placeholder:text-muted-foreground/60",
+                      "focus:ring-1 focus:ring-primary/40",
+                    )}
+                  />
+                </li>
+              )}
+              {visible.length === 0 && (
+                <li className="px-2 py-3 text-center text-[11px] text-muted-foreground/60">
+                  Nothing matches &ldquo;{query.trim()}&rdquo;.
+                </li>
+              )}
+              {visible.map((option) => (
                 <li key={option.value}>
                   {option.separator ? (
                     <div className="px-2 pb-1 pt-1.5 text-[9px] font-medium text-muted-foreground/50">
                       {option.label}
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onChange(option.value);
-                        setOpen(false);
-                      }}
-                      onContextMenu={(event) => {
-                        if (!onOptionContextMenu) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        onOptionContextMenu(option, event.nativeEvent);
-                      }}
-                      className={cn(
-                        "flex w-full items-start gap-2 rounded-md",
-                        "px-2 py-1 text-left text-[11px]",
-                        option.value === value
-                          ? "text-primary"
-                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-                      )}
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate">{option.label}</span>
-                        {option.hint && (
-                          <span className="mt-0.5 block text-[10px] leading-snug opacity-60">
-                            {option.hint}
-                          </span>
+                    <div className="flex items-stretch gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onChange(option.value);
+                          setOpen(false);
+                        }}
+                        onContextMenu={(event) => {
+                          if (!onOptionContextMenu) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onOptionContextMenu(option, event.nativeEvent);
+                        }}
+                        className={cn(
+                          "flex min-w-0 flex-1 items-start gap-2 rounded-md",
+                          "px-2 py-1 text-left text-[11px]",
+                          option.value === value
+                            ? "text-primary"
+                            : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
                         )}
-                      </span>
-                      {option.value === value && (
-                        <Check className="mt-0.5 h-3 w-3 shrink-0" />
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">{option.label}</span>
+                          {option.hint && (
+                            <span className="mt-0.5 block text-[10px] leading-snug opacity-60">
+                              {option.hint}
+                            </span>
+                          )}
+                        </span>
+                        {option.value === value && (
+                          <Check className="mt-0.5 h-3 w-3 shrink-0" />
+                        )}
+                      </button>
+                      {option.action && (
+                        <button
+                          type="button"
+                          aria-label={option.action.label}
+                          title={option.action.label}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void option.action?.onClick();
+                          }}
+                          className="flex shrink-0 items-center justify-center rounded-md px-2 text-[10px] font-medium text-destructive hover:bg-destructive/10"
+                        >
+                          {option.action.label}
+                        </button>
                       )}
-                    </button>
+                    </div>
                   )}
                 </li>
               ))}

@@ -142,7 +142,10 @@ export function registerSessionHandlers(
     return orchestrator.startTask(params.conversationId, params.prompt, {
       model: params.model,
       effort: params.effort,
-      planMode: params.planMode,
+      // One answer at the boundary: whichever way the client says "plan",
+      // everything downstream reads the same flag it always read.
+      planMode: params.planMode || params.turnMode === "plan",
+      turnMode: params.turnMode,
       vibe: params.vibe,
       autoReview: params.autoReview,
       autoValidate: params.autoValidate,

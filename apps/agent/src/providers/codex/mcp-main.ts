@@ -18,7 +18,7 @@ if (!url || !token) {
  * all of them; direct mode (system knowledge off) passes the subset without
  * retrieval, the knowledge graph, or impact analysis.
  */
-const allowed = process.env.ATELIER_CODEX_TOOLS
+const allowed = process.env.ATELIER_CODEX_TOOLS !== undefined
   ? new Set(
       process.env.ATELIER_CODEX_TOOLS.split(",")
         .map((name) => name.trim())
@@ -82,11 +82,12 @@ tool("replace_many", "Apply exact replacements across one or more files in one c
 });
 tool(
   "search_workspace",
-  "Find files relevant to a query using Atelier's live knowledge index. Prefer this over rg.",
+  "Search current workspace text. Copy terms from the request, context, or tool results. No index is used.",
   {
     query: z.string(),
     glob: z.string().optional(),
     maxResults: z.number().optional(),
+    regex: z.boolean().optional(),
   }
 );
 tool("search_text", "Fast literal or regex text search over non-ignored workspace files.", {
@@ -152,10 +153,16 @@ tool("set_plan", "Create the execution timeline before editing. Later calls " +
       files: z.array(z.string()).optional(),
     })
   ),
+  // Requested items the plan deliberately leaves out, with the reason;
+  // shown to the user as not delivered. Mirrors sdk-tools.
+  notCovered: z.array(z.string()).optional(),
 });
 tool("update_plan_step", "Start and explicitly finish the current timeline " +
-  "step. Order is enforced and only done clears the final-report gate.", {
-  stepId: z.string(),
+  "step. Order is enforced and only done clears the final-report gate. A " +
+  "pending step that targets the wrong file may be skipped with a note.", {
+  // Optional to match sdk-tools: omitted means the step the timeline is
+  // waiting on, which beats a model guessing an id it has lost.
+  stepId: z.string().optional(),
   status: z.enum([
     "pending",
     "in-progress",
@@ -168,12 +175,69 @@ tool("update_plan_step", "Start and explicitly finish the current timeline " +
 });
 tool(
   "preview_review",
-  "Debug a local Page preview in headless Chromium. Returns status/decision, " +
+  "Debug a local Page preview in headless Chromium, reusing the signed-in in-app " +
+    "Page preview session when one was published. Returns status/decision, " +
     "chronological DevTools console, page errors, failed HTTP requests, DOM/layout, " +
-    "and screenshots. Obey decision: unavailable = ask user to start/reopen preview " +
-    "and stop without retrying or starting a server; issues = report evidence then " +
-    "fix if allowed or skip; failed = report and skip. Localhost only.",
+    "screenshots, routeReached and previewSession.applied. Obey decision: " +
+    "unavailable = ask user to start/reopen preview and stop without retrying or " +
+    "starting a server; off-route = the app redirected away from the requested route " +
+    "(usually a signed-out login redirect), so report it and fail the review; " +
+    "issues = report evidence then fix if allowed or skip; failed = report and skip. " +
+    "Localhost only.",
   { url: z.string() }
+);
+tool(
+  "preview_console",
+  "Read the live in-app Page preview's own DevTools console, signed in as the user " +
+    "— the cheapest way to OBSERVE a front-end failure, no headless browser and no " +
+    "login redirect. Prefer this over preview_review as the first observation of a " +
+    "reported UI bug. Returns status (issues | clean | unavailable), recent console " +
+    "lines and the errors among them. unavailable = Page preview is not open; observe " +
+    "the failure another way. A clean console is not proof of a fix unless the failure " +
+    "was a console error.",
+  { url: z.string().optional() }
+);
+tool(
+  "preview_test",
+  "Run an authored frontend test case against the LIVE in-app Page preview — the " +
+    "browser the user is already looking at, signed in and loaded, driven through the " +
+    "bridge with no external browser and no login redirect. For a frontend review: " +
+    "FIRST write the test case for the requested change, THEN run it. Steps run in " +
+    "order and stop at the first failure; the verdict is the assertions, not a " +
+    "screenshot. Each step's action is navigate {target}, click {selector|text}, fill " +
+    "{selector,value}, press {key,selector?}, waitFor {selector|text,state?,timeoutMs?}, " +
+    "assert {description,selector?,text?,notText?,visible?,absent?}, or screenshot " +
+    "{label?}. Include at least one assert. Returns status passed|failed|unavailable, " +
+    "per-step results, console errors and screenshot paths.",
+  {
+    title: z.string(),
+    url: z.string().optional(),
+    steps: z.array(
+      z.object({
+        action: z.enum([
+          "navigate",
+          "click",
+          "fill",
+          "press",
+          "waitFor",
+          "assert",
+          "screenshot",
+        ]),
+        target: z.string().optional(),
+        selector: z.string().optional(),
+        text: z.string().optional(),
+        value: z.string().optional(),
+        key: z.string().optional(),
+        state: z.enum(["visible", "hidden"]).optional(),
+        timeoutMs: z.number().optional(),
+        description: z.string().optional(),
+        notText: z.string().optional(),
+        visible: z.boolean().optional(),
+        absent: z.boolean().optional(),
+        label: z.string().optional(),
+      })
+    ),
+  }
 );
 tool("run_terminal", "Run a shell command only when no semantic Atelier tool fits.", {
   command: z.string(),

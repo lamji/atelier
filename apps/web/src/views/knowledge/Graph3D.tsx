@@ -71,6 +71,13 @@ export const Graph3D = memo(function Graph3D({
   const fgRef = useRef<ForceGraphMethods<GNode, GLink> | undefined>(undefined);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [selected, setSelected] = useState<string | null>(null);
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState === "visible");
+
+  useEffect(() => {
+    const update = () => setPageVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -134,18 +141,18 @@ export const Graph3D = memo(function Graph3D({
       | { autoRotate: boolean; autoRotateSpeed: number }
       | undefined;
     if (controls) {
-      controls.autoRotate = active && selected === null;
+      controls.autoRotate = active && pageVisible && selected === null;
       controls.autoRotateSpeed = 0.7;
     }
-  }, [active, selected, size]);
+  }, [active, pageVisible, selected, size]);
 
   // Park the render loop while the pane is hidden; pick it back up on return.
   useEffect(() => {
     const fg = fgRef.current;
-    if (!fg || size.w === 0) return;
-    if (active) fg.resumeAnimation();
+    if (!fg) return;
+    if (active && pageVisible) fg.resumeAnimation();
     else fg.pauseAnimation();
-  }, [active, size.w]);
+  }, [active, pageVisible, size.w]);
 
   const dark = theme === "dark";
 
@@ -160,9 +167,11 @@ export const Graph3D = memo(function Graph3D({
       0.7, // radius
       0.05 // threshold
     );
-    fg.postProcessingComposer().addPass(bloom);
+    const composer = fg.postProcessingComposer();
+    composer.addPass(bloom);
     return () => {
-      fg.postProcessingComposer().removePass(bloom);
+      composer.removePass(bloom);
+      bloom.dispose();
     };
   }, [size.w > 0, dark]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -236,7 +236,8 @@ interface SessionsStore {
     conversationId: string,
     stepId: string,
     status: PlanStepStatus,
-    note?: string
+    note?: string,
+    verification?: string
   ) => void;
 }
 
@@ -532,25 +533,35 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     })),
 
   actionStarted: (conversationId, id, label, name, detail) =>
-    set((s) => ({
-      sessions: patch(s.sessions, conversationId, (session) => ({
-        actions: [
-          // A busy turn now reports the SDK's own searches too, so 20 rows
-          // covered barely the tail of one. This is a per-conversation
-          // in-memory list of small objects; the render decides what to show.
-          ...session.actions.slice(-(MAX_ACTIONS - 1)),
-          {
-            id,
-            label,
-            name,
-            detail,
-            status: "running",
-            seq: feedSeq++,
-            stepId: activePlanStepId(session.plan),
-          },
-        ],
-      })),
-    })),
+    set((s) => {
+      const session = s.sessions[conversationId];
+      // Rebuilding an active task replays persisted tool events into the
+      // same store that may already hold their live copies. toolCallId is
+      // stable across both paths, so accepting it once keeps the rail
+      // idempotent without hiding genuinely separate tool calls.
+      if (!session || session.actions.some((action) => action.id === id)) {
+        return s;
+      }
+      return {
+        sessions: patch(s.sessions, conversationId, () => ({
+          actions: [
+            // A busy turn now reports the SDK's own searches too, so 20 rows
+            // covered barely the tail of one. This is a per-conversation
+            // in-memory list of small objects; the render decides what to show.
+            ...session.actions.slice(-(MAX_ACTIONS - 1)),
+            {
+              id,
+              label,
+              name,
+              detail,
+              status: "running",
+              seq: feedSeq++,
+              stepId: activePlanStepId(session.plan),
+            },
+          ],
+        })),
+      };
+    }),
 
   actionOutput: (conversationId, id, chunk) =>
     set((s) => ({
@@ -657,7 +668,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions: patch(s.sessions, conversationId, () => ({ plan })),
     })),
 
-  updatePlanStep: (conversationId, stepId, status, note) =>
+  updatePlanStep: (conversationId, stepId, status, note, verification) =>
     set((s) => ({
       sessions: patch(s.sessions, conversationId, (session) => ({
         plan: session.plan
@@ -665,7 +676,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
               ...session.plan,
               steps: session.plan.steps.map((step) =>
                 step.id === stepId
-                  ? { ...step, status, note: note ?? step.note }
+                  ? {
+                      ...step,
+                      status,
+                      note: note ?? step.note,
+                      // Proof never un-happens: a later status-only event
+                      // keeps the verification an earlier one recorded.
+                      verification: verification ?? step.verification,
+                    }
                   : step
               ),
             }

@@ -87,8 +87,15 @@ export class ScopeGuard {
    * the lock, reached from retrieval or from an earlier turn's memory. That
    * refusal is how a session locked to one app answered a request about
    * another with "cannot read or edit the target file" and gave up. Such a
-   * path is let through and reported; a path with a twin, or one that does
-   * not exist yet (a create outside the lock), is still refused.
+   * path is let through and reported.
+   *
+   * A READ of an existing file is let through even when a twin exists
+   * inside the lock. Reading the wrong twin costs a tool call and is
+   * visible in the timeline; refusing the right one stranded a turn on
+   * "package.json is outside this session's scope" when the lock itself
+   * was inherited from an earlier, unrelated request. Only a WRITE to a
+   * twinned path, or a path that does not exist yet (a create outside
+   * the lock), is still refused — that is the hazard the lock is for.
    */
   private mayEscape(
     taskId: string,
@@ -99,7 +106,10 @@ export class ScopeGuard {
     const rel = toPosix(target).replace(/^\.\//, "");
     if (this.granted.get(taskId)?.has(rel)) return true;
     if (!this.existsInWorkspace(rel)) return false;
-    if (this.deps.twinExists(scope.roots, path.posix.basename(rel))) {
+    if (
+      !isReadTool(tool) &&
+      this.deps.twinExists(scope.roots, path.posix.basename(rel))
+    ) {
       return false;
     }
     let paths = this.granted.get(taskId);
@@ -132,36 +142,27 @@ export class ScopeGuard {
     const field = PATH_FIELD[name];
     if (field) {
       const value = input[field];
-      if (
-        typeof value === "string" &&
-        !inScope(scope, value) &&
-        !this.isRegisteredRead(name, value) &&
-        !this.mayEscape(taskId, scope, name, value)
-      ) {
-        throw new Error(denial(name, value, scope, this.hasTwin(scope, value)));
-      }
-      return input;
+      if (typeof value !== "string") return input;
+      const target = this.admit(taskId, scope, name, value);
+      // Rewritten like the glob branch: the tool runs on the relative path,
+      // so what it records (memory, anchors, diffs) is the wire form too.
+      return target === value ? input : { ...input, [field]: target };
     }
 
     const listField = PATH_LIST[name];
     if (listField) {
       const entries = input[listField];
-      if (Array.isArray(entries)) {
-        for (const entry of entries) {
-          const entryPath = isRecord(entry) ? entry.path : undefined;
-          if (
-            typeof entryPath === "string" &&
-            !inScope(scope, entryPath) &&
-            !this.isRegisteredRead(name, entryPath) &&
-            !this.mayEscape(taskId, scope, name, entryPath)
-          ) {
-            throw new Error(
-              denial(name, entryPath, scope, this.hasTwin(scope, entryPath))
-            );
-          }
-        }
-      }
-      return input;
+      if (!Array.isArray(entries)) return input;
+      let rewritten = false;
+      const admitted = entries.map((entry) => {
+        const entryPath = isRecord(entry) ? entry.path : undefined;
+        if (typeof entryPath !== "string") return entry;
+        const target = this.admit(taskId, scope, name, entryPath);
+        if (target === entryPath) return entry;
+        rewritten = true;
+        return { ...(entry as Record<string, unknown>), path: target };
+      });
+      return rewritten ? { ...input, [listField]: admitted } : input;
     }
 
     const globField = GLOB_FIELD[name];
@@ -185,11 +186,54 @@ export class ScopeGuard {
     return input;
   }
 
-  private isRegisteredRead(tool: string, target: string): boolean {
-    return (
-      (tool === "read_file" || tool === "read_many_files") &&
-      this.deps.readReference?.(target) === true
+  /**
+   * The path the tool should run on, or a thrown denial.
+   *
+   * An absolute path under the workspace is folded to its relative form
+   * FIRST. Models copy absolute paths out of terminal output and error
+   * messages, and the lock used to judge those as "does not exist in the
+   * workspace" — a false statement about a file that plainly does — which
+   * then sent the model looking for the same file somewhere else.
+   */
+  private admit(
+    taskId: string,
+    scope: SessionScope,
+    tool: string,
+    value: string
+  ): string {
+    const rel = this.workspaceRelative(value);
+    const target = rel ?? value;
+    if (inScope(scope, target)) return target;
+    if (isReadTool(tool) && isSkillPath(target)) return target;
+    if (this.isRegisteredRead(tool, value)) return value;
+    if (this.mayEscape(taskId, scope, tool, target)) return target;
+    throw new Error(
+      denial(tool, target, scope, this.hasTwin(scope, target), {
+        absolute: path.isAbsolute(value),
+        rewritten: rel !== null,
+      })
     );
+  }
+
+  /**
+   * Workspace-relative posix form of an absolute path under the root, or
+   * null when the path is relative already or points elsewhere. Case-
+   * insensitive on the root, as PathGuard is: a drive letter's case is
+   * not a different file.
+   */
+  private workspaceRelative(value: string): string | null {
+    if (!path.isAbsolute(value)) return null;
+    const abs = path.resolve(value);
+    const root = path.resolve(this.deps.workspaceRoot);
+    const lower = abs.toLowerCase();
+    const rootLower = root.toLowerCase();
+    if (lower === rootLower) return "";
+    if (!lower.startsWith(rootLower + path.sep)) return null;
+    return toPosix(abs.slice(root.length + 1));
+  }
+
+  private isRegisteredRead(tool: string, target: string): boolean {
+    return isReadTool(tool) && this.deps.readReference?.(target) === true;
   }
 
   private hasTwin(scope: SessionScope, target: string): boolean {
@@ -197,18 +241,41 @@ export class ScopeGuard {
   }
 }
 
+function isReadTool(tool: string): boolean {
+  return tool === "read_file" || tool === "read_many_files";
+}
+
+/**
+ * Skill folders inside the workspace. They are runtime instructions, not
+ * project data, so the lock has no business refusing them — and it did,
+ * every turn, for the skill the runtime had just told the model to load.
+ */
+const SKILL_DIR = /(^|\/)\.(codex|claude|agents)\/skills\//;
+
+function isSkillPath(target: string): boolean {
+  return SKILL_DIR.test(toPosix(target).replace(/^\.\//, ""));
+}
+
 function denial(
   name: string,
   target: string,
   scope: SessionScope,
-  twin: boolean
+  twin: boolean,
+  form: { absolute: boolean; rewritten: boolean }
 ): string {
   const roots = scope.roots.map((root) => `${root}/`).join(", ");
   const why = twin
     ? "A file with this name also exists inside the lock; that is the one " +
       "this session is about — use it. "
-    : "The path does not exist in the workspace, so it cannot be created " +
-      "outside the lock. ";
+    : form.absolute && !form.rewritten
+      ? "Absolute paths are not accepted, and this one is not under the " +
+        "workspace root; use a workspace-relative path. "
+      : form.absolute
+        ? "Absolute paths are not accepted; use the workspace-relative " +
+          `path "${target}" — which does not exist in the workspace yet, ` +
+          "so it cannot be created outside the lock. "
+        : "The path does not exist in the workspace, so it cannot be created " +
+          "outside the lock. ";
   return (
     `"${target}" is outside this session's scope. This conversation is ` +
     `locked to ${roots} — ${name} may only touch paths under ` +

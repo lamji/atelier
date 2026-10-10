@@ -10,6 +10,14 @@ export const terminalMethods = {
     }),
     result: z.object({ port: z.number().int().min(1).max(65_535) }),
   },
+  /**
+   * Which of these commands actually resolve on the machine's PATH, so a
+   * caller can avoid offering a command whose binary is not installed.
+   */
+  "terminal.hasCommand": {
+    params: z.object({ commands: z.array(z.string().min(1)).min(1).max(32) }),
+    result: z.object({ available: z.record(z.string(), z.boolean()) }),
+  },
   "terminal.create": {
     params: z.object({
       cwd: z.string().optional(),

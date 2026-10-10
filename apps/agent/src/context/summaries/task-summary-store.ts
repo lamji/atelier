@@ -19,6 +19,12 @@ export interface TaskSummary {
   outcome: string | null;
   /** How the task ended; an interrupted task is still remembered. */
   status?: "completed" | "cancelled" | "error";
+  /**
+   * `answer` when the turn only told the user something (a question, a plan
+   * turn); `change` when it edited. The turn after an answer is very often
+   * "implement it", and it needs that answer quoted back, not summarised.
+   */
+  kind?: "answer" | "change";
   /** Finer-grained units, each stored as its own retrievable chunk. */
   details?: SessionDetail[];
   chunkId?: number | null;
@@ -42,7 +48,17 @@ export class TaskSummaryStore {
     private onWrite?: () => void
   ) {}
 
-  async save(summary: TaskSummary): Promise<void> {
+  async save(
+    summary: TaskSummary,
+    opts: {
+      /**
+       * Default true. False stores the rows without an embedding — for a
+       * turn that promised no extra model request. The text arms of
+       * retrieval still find it; only the cosine arm cannot.
+       */
+      embed?: boolean;
+    } = {}
+  ): Promise<void> {
     const existing = this.db
       .prepare("SELECT chunk_id FROM task_summaries WHERE task_id = ?")
       .get(summary.taskId) as { chunk_id: number | null } | undefined;
@@ -52,7 +68,7 @@ export class TaskSummaryStore {
       .prepare(
         "INSERT OR REPLACE INTO task_summaries(" +
           "task_id, conversation_id, text, changed_files, outcome, status, " +
-          "chunk_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+          "kind, chunk_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
         summary.taskId,
@@ -61,6 +77,7 @@ export class TaskSummaryStore {
         JSON.stringify(summary.changedFiles),
         summary.outcome,
         summary.status ?? "completed",
+        summary.kind ?? (summary.changedFiles.length === 0 ? "answer" : "change"),
         chunkId,
         summary.createdAt
       );
@@ -78,7 +95,7 @@ export class TaskSummaryStore {
     // Every await before this point is gone, so a caller that does not await
     // `save` still gets all of the SQL above executed synchronously and
     // leaves only the model work outstanding.
-    await this.embedChunks(texts);
+    if (opts.embed !== false) await this.embedChunks(texts);
   }
 
   recent(conversationId: string, n: number): TaskSummary[] {
@@ -94,19 +111,36 @@ export class TaskSummaryStore {
       changed_files: string;
       outcome: string | null;
       status: string | null;
+      kind: string | null;
       chunk_id: number | null;
       created_at: number;
     }>;
-    return rows.map((r) => ({
-      taskId: r.task_id,
-      conversationId: r.conversation_id,
-      text: r.text,
-      changedFiles: JSON.parse(r.changed_files) as string[],
-      outcome: r.outcome,
-      status: (r.status ?? "completed") as TaskSummary["status"],
-      chunkId: r.chunk_id,
-      createdAt: r.created_at,
-    }));
+    return rows.map((r) => {
+      const changedFiles = JSON.parse(r.changed_files) as string[];
+      return {
+        taskId: r.task_id,
+        conversationId: r.conversation_id,
+        text: r.text,
+        changedFiles,
+        outcome: r.outcome,
+        status: (r.status ?? "completed") as TaskSummary["status"],
+        // Rows written before the column existed: a task that changed
+        // nothing was an answer, which is what the column would have said.
+        kind: (r.kind ?? (changedFiles.length === 0 ? "answer" : "change")) as
+          TaskSummary["kind"],
+        chunkId: r.chunk_id,
+        createdAt: r.created_at,
+      };
+    });
+  }
+
+  /** The task that ran right before this one in the conversation, if any. */
+  previous(conversationId: string, currentTaskId: string): TaskSummary | null {
+    return (
+      this.recent(conversationId, 2).find(
+        (summary) => summary.taskId !== currentTaskId
+      ) ?? null
+    );
   }
 
   /**

@@ -1,11 +1,25 @@
 import {
   query,
+  type HookCallbackMatcher,
+  type HookEvent,
+  type HookInput,
+  type HookJSONOutput,
   type PermissionResult,
+  type PostToolUseHookInput,
+  type PreToolUseHookInput,
   type Query,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import path from "node:path";
+import { TurnRunner } from "./turn-runner.js";
+import { assertCommandConfined } from "../tools/terminal-tools.js";
 import type { Logger } from "pino";
-import { approxTokens, newId, stripHiddenContext } from "@atelier/shared";
+import {
+  approxTokens,
+  clipToTokens,
+  newId,
+  stripHiddenContext,
+} from "@atelier/shared";
 import type {
   ContextPurpose,
   Feature,
@@ -30,6 +44,8 @@ import type { SymbolGraph } from "../knowledge/graph/symbol-graph.js";
 import type { CloneHit, CloneScanner } from "../knowledge/impact/clone-scan.js";
 import type { ImpactAnalyzer } from "../knowledge/impact/impact-analyzer.js";
 import type { SearchGroundingGuard } from "../hooks/search-grounding-guard.js";
+import type { RepeatCallGuard } from "../hooks/repeat-call-guard.js";
+import type { DebugProtocolGuard } from "../hooks/debug-protocol-guard.js";
 import { companionFilesFor } from "../knowledge/impact/companion-files.js";
 import type { IncrementalIndexer } from "../knowledge/indexer/incremental-indexer.js";
 import type { HooksEngine } from "../hooks/hooks-engine.js";
@@ -67,7 +83,14 @@ import { buildReviewFixPrompt, buildReviewPrompt } from "./review-prompt.js";
 import {
   DIRECT_RULES,
   DIRECT_TOOLS,
+  LIGHT_APPEND_CHARS,
+  LIGHT_CONTEXT_MAX_CHARS,
+  LIGHT_LAYOUT_CHARS,
+  LIGHT_USER_RULE_CHARS,
+  LIGHT_VIBE_CHARS,
+  clipLightContext,
   isDirectMode,
+  renderExecutionCheckpoint,
   renderPriorTurns,
 } from "./direct-mode.js";
 import { trace } from "./trace.js";
@@ -83,13 +106,33 @@ import {
   buildLlmRequest,
   contextSections,
   contextText,
+  promptWithRelevantPreview,
   publishLlmRequest,
   type AppendContext,
   type ContextSection,
 } from "./llm-request.js";
 import { effortFor, isTrivialChat } from "./trivial-chat.js";
 import {
+  focusedLiterals,
+  previewVisibleText,
+} from "../context/preview/preview-evidence.js";
+import type { PreviewBaselines } from "../context/preview/preview-baselines.js";
+import {
+  clipKeepingRefs,
+  extractRefs,
+} from "../context/session/clip-keeping-refs.js";
+import {
+  EMPTY_NAMED_TARGETS,
+  describeNamedTargets,
+  namedTargets,
+  type NamedTargets,
+} from "./named-targets.js";
+import { turnStance, type TurnStance } from "./turn-stance.js";
+import type { NamedTargetGuard } from "../hooks/named-target-guard.js";
+import {
+  ATELIER_AGENTS,
   CLAUDE_FAST_BUILTINS,
+  CLAUDE_NATIVE_TOOLS,
   CLAUDE_TURN_LIMIT_CONTINUATIONS,
   claudeContinuationBudget,
   claudeEffort,
@@ -99,17 +142,17 @@ import {
 import { userRulesPrompt } from "./user-rules.js";
 import { VIBE_RULES } from "./vibe-rules.js";
 import type { UsageMonitor } from "./usage-monitor.js";
-import type { SdkUsage, TokenLedger } from "../context/ledger/index.js";
+import type {
+  SdkUsage,
+  TaskTokenUsage,
+  TokenLedger,
+} from "../context/ledger/index.js";
 import type { PromptAssembler } from "../context/assemble/index.js";
 import type { RetrieverLike } from "../context/cache/index.js";
 import {
   buildTaskSummary,
   type TaskSummaryStore,
 } from "../context/summaries/index.js";
-import type {
-  SharedSessionContext,
-  SharedSessionContextBuilder,
-} from "../context/session/index.js";
 import {
   isGlobalSessionCommand,
   parseGeneratedGlobalAlias,
@@ -122,6 +165,12 @@ import {
   parseFeatureContextCommand,
   parseFeatureContextDebugCommand,
   parseFeatureContextUpdateCommand,
+  parseEntryPointCommand,
+  parseImpactRadiusCommand,
+  readScreenEvidence,
+  screenTerms,
+  renderEntryPointReport,
+  renderImpactRadiusReport,
   renderDebugTask,
   renderFeatureContextActivationReport,
   renderFeatureContextRefreshReport,
@@ -141,6 +190,7 @@ import {
   EMPTY_SCOPE,
   inScope,
   renderScope,
+  featureFocusFiles,
   scopeGlob,
   workingSet,
   type SessionScope,
@@ -149,7 +199,20 @@ import {
 import type { WorkspaceIgnore } from "../workspace/ignore.js";
 import type { GitService } from "../git/git-service.js";
 import type { ScopeGuard } from "../tools/scope-guard.js";
-import { testOnlyPaths, touchesCode } from "./change-scale/index.js";
+import {
+  MOCK_API_USAGE,
+  parseMockApiCommand,
+  renderMockApiReport,
+  type MockApiCommand,
+} from "../preview/mock-api-command.js";
+import { runMockApi } from "../preview/mock-api.js";
+import type { PreviewSessionStore } from "../preview/preview-session-store.js";
+import {
+  classifyChange,
+  testOnlyPaths,
+  touchesCode,
+  type ChangeScale,
+} from "./change-scale/index.js";
 import type { SkillLoader } from "./skill-loader.js";
 import {
   EMPTY_RECALL,
@@ -230,7 +293,9 @@ const IMPACT_TARGETS = 6;
  * Atelier plan looks like.
  */
 const SYSTEM_PLAN_INSTRUCTIONS =
-  "Read the code you are about to change before you plan it. Then call " +
+  "Use current code already carried in the assembled context before " +
+  "planning. Read only a concrete missing range or a source marked changed " +
+  "or stale; do not reopen code the prompt already provides. Then call " +
   "ExitPlanMode with a numbered plan in which every step names the real " +
   "files it touches and says what changes in them. Plan ONLY what the " +
   "request requires — no cleanup, refactors, or follow-up work on files the " +
@@ -257,6 +322,18 @@ const PROCEED_PROMPT =
   "the work genuinely needs no code change, say why in one line and stop.";
 
 /** Exact evidence still missing when the first implementation pass returns. */
+/**
+ * Whether a call to the `git` tool changed anything.
+ *
+ * status/log/diff/branches only look; the rest move refs, the index, or
+ * HEAD. A read is not effect and must not check a step off.
+ */
+export function mutatesGit(input: unknown): boolean {
+  const action = (input as { action?: unknown } | null)?.action;
+  if (typeof action !== "string") return false;
+  return !["status", "log", "diff", "branches"].includes(action);
+}
+
 export function completionGatePrompt(
   steps: PlanStep[],
   verificationMissing: boolean,
@@ -337,15 +414,19 @@ export function completionGateRequired(opts: {
 }
 
 export function completionStopHookDecision(
-  outstanding: string,
+  _outstanding: string,
   _stopHookActive: boolean,
-  report = ""
+  _report = ""
 ):
   | { decision: "block"; reason: string }
   | { decision?: undefined; reason?: undefined } {
-  if (!outstanding) return {};
-  if (declaresHonestExit(report)) return {};
-  return { decision: "block", reason: outstanding };
+  // ADVISORY, never blocking. Blocking the Stop erased the model's report
+  // (`text = ""`), forced it on until the round ceiling, restarted it from
+  // a checkpoint, erased that report too, and the user got two rounds of
+  // ~450k tokens and an empty "task is incomplete" panel. The report is
+  // the output; what is still open is SAID under it (completionGateResultText),
+  // and the user decides whether to carry on.
+  return {};
 }
 
 /**
@@ -447,15 +528,6 @@ const TURN_LIMIT_UNSTARTED_PROMPT =
   "if the request objectively requires no workspace change may you explain " +
   "that in one line and stop.";
 
-/**
- * Appended when the ceiling is spent and no continuation is left. The user
- * keeps the answer and the edits either way; what they must not be left
- * with is a turn that looks complete when it stopped early.
- */
-const TURN_LIMIT_NOTE =
-  "\n\n_Atelier exhausted its bounded continuation budget while the live " +
-  "completion gate was still open; the task is incomplete._";
-
 /** Exact live work rides into every ceiling continuation. */
 export function turnLimitContinuationPrompt(
   outstanding: string,
@@ -478,32 +550,19 @@ export function turnLimitContinuationPrompt(
  * steps. A gate that cannot fail its own check is a formality; this is what
  * makes it verify rather than trust.
  */
-const GATE_OPEN_NOTE =
-  "\n\n_The completion gate is still open — plan steps remained unfinished " +
-  "(or the latest edit went unverified) when this turn ended, so the report " +
-  "above may describe work that is not done. Send the next message to carry " +
-  "on in the same session._";
-
-const GATE_BLOCKED_NOTE =
-  "\n\n_The completion gate is still open because of the blocker named " +
-  "above. Resolve it (for example by widening the session scope or " +
-  "approving the command) and send the next message to carry on._";
-
-/** Hide intermediate ceiling notes; surface one gate verdict only at the end. */
+/**
+ * The report is the output. Nothing is appended under it: the italic
+ * "completion gate is still open" verdict read, to the person receiving
+ * it, as the agent announcing its own failure after every long turn, and
+ * it said nothing they could not see from the plan rail. The gate state
+ * still reaches the timeline (stage detail) and the task summary.
+ */
 export function completionGateResultText(
   text: string,
-  gateStillOpen: boolean
+  _gateStillOpen: boolean
 ): string {
-  const clean = text.replaceAll(TURN_LIMIT_NOTE, "").trim();
-  if (!gateStillOpen) return clean;
-  if (reportsHardBlocker(clean)) return `${clean}${GATE_BLOCKED_NOTE}`;
-  return clean ? `${clean}${GATE_OPEN_NOTE}` : GATE_OPEN_NOTE.trim();
+  return text.trim();
 }
-
-/** Direct mode's tool surface, as MCP names. */
-const DIRECT_TOOL_NAMES = DIRECT_TOOLS.map(
-  (name) => `mcp__${MCP_SERVER_NAME}__${name}`
-);
 
 /**
  * Watches a provider stream for going silent, and ends the turn if it stays
@@ -629,6 +688,26 @@ export interface PipelineDeps {
    * build a bare deps object, and an unseeded guard stands down.
    */
   searchGrounding?: SearchGroundingGuard;
+  /**
+   * Armed when a turn reports a failure; holds edit tools until the failure
+   * has been observed in this turn, and holds "Fixed" until the fix has been
+   * re-observed. Optional so the smokes' bare deps object keeps working.
+   */
+  debugProtocol?: DebugProtocolGuard;
+  /**
+   * Holds what each turn has already LOOKED UP, so an identical rerun can
+   * be answered from the ledger instead of the filesystem. Optional for
+   * the same reason as the guard above: an unfed ledger stands down.
+   */
+  repeatCalls?: RepeatCallGuard;
+  /**
+   * Holds set_plan and the edit tools until the file or text the user
+   * named has been looked at. Optional so the smokes' bare deps object
+   * keeps working; an unarmed guard stands down.
+   */
+  namedTargets?: NamedTargetGuard;
+  /** What the previewed page showed at send time, for preview_test. */
+  previewBaselines?: PreviewBaselines;
   indexer: IncrementalIndexer;
   hooks: HooksEngine;
   /** Tasks running with system knowledge off, for the code guards to skip. */
@@ -646,7 +725,6 @@ export interface PipelineDeps {
   ledger: TokenLedger;
   assembler: PromptAssembler;
   summaries: TaskSummaryStore;
-  sharedSessions: SharedSessionContextBuilder;
   globalSessions: GlobalSessionStore;
   /** Tree-sitter feature maps explicitly pinned with /context <feature>. */
   featureContexts: FeatureContextStore;
@@ -672,6 +750,8 @@ export interface PipelineDeps {
   git: GitService;
   /** Enforces the lock at the tool boundary, where prose cannot. */
   scopeGuard: ScopeGuard;
+  /** Live Page preview session, for /context_mock_api. */
+  previewSessions: PreviewSessionStore;
   /** Attached images, addressable by path after the turn that carried them. */
   attachments: AttachmentStore;
   log: Logger;
@@ -694,6 +774,10 @@ export interface TaskRecord {
     detail?: string;
     files: string[];
     status?: string;
+    /** The model's own note on the step. */
+    note?: string;
+    /** Harness-observed verification (a green test run), when any. */
+    verification?: string;
   }>;
   validation: ValidationResult[];
   reviewVerdict: "pass" | "fail" | null;
@@ -720,7 +804,23 @@ export function newTaskRecord(): TaskRecord {
 export interface TaskContext {
   taskId: string;
   conversationId: string;
+  /** The prompt as the composer built it — hidden preview block included. */
   prompt: string;
+  /**
+   * The user's words alone, every hidden block stripped. This is what the
+   * intent, retrieval, grounding and memory read; `prompt` is only what the
+   * model is sent. The page dump riding inside `prompt` was once read as
+   * the request by all of them, and it drowned the request.
+   */
+  humanPrompt: string;
+  /** Visible strings of the previewed page at send time, one per line. */
+  previewText: string;
+  /** Files and strings the user named this turn. */
+  named: NamedTargets;
+  /** How this turn relates to the last one: continue, correct, or fresh. */
+  stance: TurnStance;
+  /** Size of the diff so far, from its content; null until the first edit. */
+  changeScale: ChangeScale | null;
   /** Persisted unfinished plan, injected only for an explicit continuation. */
   recoveryPlan: string;
   /** Prior conversation turns (oldest→newest), including assistant answers. */
@@ -793,6 +893,40 @@ export interface PipelineOutcome {
   sdkSessionId: string | null;
 }
 
+/** The text a native Read returned, whatever shape the SDK wrapped it in. */
+function readToolContent(response: unknown): string | null {
+  if (typeof response === "string") return response;
+  const file = (response as { file?: { content?: unknown } } | null)?.file;
+  if (file && typeof file.content === "string") return file.content;
+  return null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Render every provider request accounted for by the task, then its rollup. */
+export function renderTaskTokenReport(usage: TaskTokenUsage): string {
+  if (usage.turns.length === 0) return "";
+  const turns = usage.turns.map(
+    (turn, index) =>
+      `- Model turn ${index + 1} (${turn.purpose}): ` +
+      `${formatTokenCount(turn.totalTokens)} total tokens ` +
+      `(input ${formatTokenCount(turn.inputTokens)}, ` +
+      `cache read ${formatTokenCount(turn.cacheReadTokens)}, ` +
+      `cache write ${formatTokenCount(turn.cacheCreationTokens)}, ` +
+      `output ${formatTokenCount(turn.outputTokens)})`
+  );
+  turns.push(
+    `- Final token total: ${formatTokenCount(usage.totalTokens)} tokens`
+  );
+  return turns.join("\n");
+}
+
+function formatTokenCount(tokens: number): string {
+  return tokens.toLocaleString("en-US");
+}
+
 /**
  * The 9-stage pipeline: understand -> retrieve -> plan -> hooks -> execute
  * -> validate -> knowledge -> review -> summary, in order, with stage
@@ -814,6 +948,20 @@ export class PipelineExecutor {
    * cache on every turn.
    */
   private workspaceBlock?: Promise<string>;
+
+  private turnRunner?: TurnRunner;
+  /** The agent flow — see turn-runner.ts. */
+  private get turns(): TurnRunner {
+    this.turnRunner ??= new TurnRunner({
+      bus: this.deps.bus,
+      log: this.deps.log,
+      files: this.deps.files,
+      summaries: this.deps.summaries,
+      workingMemory: this.deps.workingMemory,
+      skillLoader: this.deps.skillLoader,
+    });
+    return this.turnRunner;
+  }
 
   /** Cached workspace profile — the scope lock maps mentions onto it. */
   private profile?: Promise<WorkspaceProfile>;
@@ -856,15 +1004,20 @@ export class PipelineExecutor {
       return this.projectTree("", UNSCOPED_MAX_CHARS, UNSCOPED_MAX_DEPTH);
     }
 
+    const boundary = renderScope(scope, ctx.workingSet);
+    // Once retrieval has produced concrete files, the boundary plus that
+    // working set is the useful scope. Re-sending every directory under each
+    // locked project can cost thousands of tokens without helping the model
+    // choose a target; it can retrieve or list an exact missing path on
+    // demand. Keep the deep map only for turns that have no concrete files.
+    if (ctx.workingSet.length > 0) return boundary;
+
     const trees = await Promise.all(
       scope.roots.map((root) => this.projectTree(root))
     );
-    // ctx.workingSet is filled by the retrieve stage. It is empty on the
-    // warm-up call above, which only exists to prime the tree cache and
-    // whose text is discarded.
-    return [renderScope(scope, ctx.workingSet), ...trees]
-      .filter(Boolean)
-      .join("\n");
+    // ctx.workingSet is empty on the warm-up call above, which only exists to
+    // prime the tree cache and whose text is discarded.
+    return [boundary, ...trees].filter(Boolean).join("\n");
   }
 
   /**
@@ -939,9 +1092,15 @@ export class PipelineExecutor {
     if (files.length === 0) return;
 
     const profile = await this.workspaceProfile();
+    // A workspace-wide feature table can match a project this conversation
+    // has nothing to do with. Focus only on what this session may actually
+    // be narrowed to; an ambiguous match leaves the scope exactly as it is.
+    const focusable = featureFocusFiles(files, profile, ctx.scope);
+    if (focusable.length === 0) return;
+
     const focused = this.deps.scope.focusFiles(
       ctx.conversationId,
-      files,
+      focusable,
       profile
     );
     // Keep this turn's typed-path grants; feature focus is a working-set
@@ -1005,10 +1164,13 @@ export class PipelineExecutor {
     }
 
     const profile = await this.workspaceProfile();
+    // Explicit: the user named this context, so unlike an automatic feature
+    // match it may relock the conversation and is persisted as a lock.
     const focused = this.deps.scope.focusFiles(
       ctx.conversationId,
       pinned.files,
-      profile
+      profile,
+      { explicit: true }
     );
     ctx.scope = { ...focused, allowed: ctx.scope.allowed };
     this.deps.scopeGuard.bind(ctx.taskId, ctx.scope);
@@ -1098,23 +1260,20 @@ export class PipelineExecutor {
   }
 
   /**
-   * The pre-edit blast radius for this turn's targets.
+   * The scripted investigation hand-off for this turn.
    *
-   * Targets are the paths the user NAMED, and only if they named none, the
-   * working set retrieval re-earned. Both are file-granular and concrete;
-   * running the walk over every retrieved chunk instead would compute reach
-   * from context files (generic hubs, session memory) and report the blast
-   * radius of the codebase rather than of the change.
-   *
-   * A question turn skips it: nothing is about to be edited, and the block
-   * is written as an instruction to keep callers aligned.
+   * A file named in the current prompt is the concrete entry point. A vague
+   * follow-up inherits the session's named scope, and only an unanchored turn
+   * falls back to the highest-ranked files retrieval re-earned. The local graph
+   * walk then runs before the provider starts, so both change tasks and
+   * read-only investigations begin from the returned callers, flows, tests and
+   * risks instead of spending model tool rounds rebuilding a radius.
    */
-  private editRadius(ctx: TaskContext, intent: Intent): ImpactRadius {
-    if (isReadOnly(intent)) return emptyRadius([]);
-    const named = ctx.scope.named.filter(isFilePath);
-    const targets = (named.length > 0 ? named : ctx.workingSet).slice(
-      0,
-      IMPACT_TARGETS
+  private investigationRadius(ctx: TaskContext, intent: Intent): ImpactRadius {
+    const targets = investigationTargets(
+      intent.targets,
+      ctx.scope.named,
+      ctx.workingSet
     );
     if (targets.length === 0) return emptyRadius([]);
     try {
@@ -1194,6 +1353,136 @@ export class PipelineExecutor {
    * as /context, except the feature name comes from the existing pin, so a
    * long debugging session can re-sync after edits without retyping it.
    */
+  /**
+   * `/entry_point` — which symbol renders the screen the user marked.
+   *
+   * Answered from the tree-sitter index and the preview evidence the
+   * composer already attaches, with no model call at all: that is what
+   * makes it behave the same on Codex, Claude and a local provider. The
+   * screenshot still rides in the conversation for later turns to look at;
+   * it simply is not what the mapping depends on.
+   */
+  private async runEntryPoint(
+    ctx: TaskContext,
+    hint: string
+  ): Promise<PipelineOutcome> {
+    try {
+      await this.deps.indexer.drainFor([]);
+      const evidence = readScreenEvidence(ctx.prompt);
+      const terms = screenTerms(evidence, hint);
+      const matches = this.deps.featureContexts.entryPoints(
+        terms,
+        evidence.routeTerms
+      );
+      this.deps.featureContexts.rememberEntryPoints(
+        ctx.conversationId,
+        matches.slice(0, 3).map((match) => match.id)
+      );
+      return {
+        assistantText: renderEntryPointReport({ matches, evidence, hint }),
+        sdkSessionId: null,
+      };
+    } catch (error) {
+      return {
+        assistantText: String((error as { message?: string })?.message ?? error),
+        sdkSessionId: null,
+      };
+    }
+  }
+
+  /**
+   * `/impact_radius` — everything reachable from that entry point.
+   *
+   * Takes its own screenshot when one rides along, so it can be used on its
+   * own; otherwise it walks from whatever `/entry_point` last pinned in this
+   * conversation.
+   */
+  /**
+   * `/context_mock_api` — replays one API call as the signed-in user.
+   *
+   * The call goes out from the agent with the in-app browser's own
+   * Authorization header and cookies, so the answer is the one the app
+   * gets rather than the 401 an anonymous caller gets. Nothing is written;
+   * the report is the whole result, and it stays in the conversation as
+   * context for the turns that follow.
+   */
+  private async runMockApiCommand(
+    command: MockApiCommand
+  ): Promise<PipelineOutcome> {
+    if (!command.request) {
+      const problem = command.problem ? `${command.problem}\n\n` : "";
+      return { assistantText: problem + MOCK_API_USAGE, sdkSessionId: null };
+    }
+    try {
+      const result = await runMockApi(
+        command.request,
+        this.deps.previewSessions
+      );
+      return { assistantText: renderMockApiReport(result), sdkSessionId: null };
+    } catch (error) {
+      return {
+        assistantText:
+          String((error as { message?: string })?.message ?? error) +
+          "\n\n" +
+          MOCK_API_USAGE,
+        sdkSessionId: null,
+      };
+    }
+  }
+
+  private async runImpactRadius(
+    ctx: TaskContext,
+    hint: string
+  ): Promise<PipelineOutcome> {
+    try {
+      await this.deps.indexer.drainFor([]);
+      const evidence = readScreenEvidence(ctx.prompt);
+      const terms = screenTerms(evidence, hint);
+      // Fresh evidence wins: the user marked a screen with THIS send, so
+      // that screen is the subject even if another was pinned earlier.
+      let entries =
+        terms.length > 0
+          ? this.deps.featureContexts.entryPoints(terms, evidence.routeTerms)
+          : [];
+      if (entries.length === 0) {
+        const remembered = this.deps.featureContexts.lastEntryPoints(
+          ctx.conversationId
+        );
+        if (remembered.length === 0) {
+          return {
+            assistantText:
+              "Nothing to walk from yet. Mark the screen in Page preview " +
+              "and send `/entry_point` first, or attach a screenshot to " +
+              "`/impact_radius` so it can find the entry point itself.",
+            sdkSessionId: null,
+          };
+        }
+        entries = this.deps.featureContexts.entryPointsByIds(remembered);
+      }
+      const chosen = entries.slice(0, 3);
+      const radius = this.deps.featureContexts.impactRadius(
+        chosen.map((entry) => entry.id)
+      );
+      this.deps.featureContexts.rememberEntryPoints(
+        ctx.conversationId,
+        chosen.map((entry) => entry.id)
+      );
+      return {
+        assistantText: renderImpactRadiusReport({
+          entries: chosen,
+          radius,
+          evidence,
+        }),
+        sdkSessionId: null,
+      };
+    } catch (error) {
+      return {
+        assistantText: String((error as { message?: string })?.message ?? error),
+        sdkSessionId: null,
+      };
+    }
+  }
+
   private async runFeatureContextUpdate(
     ctx: TaskContext,
     requestedFeature: string
@@ -1246,6 +1535,16 @@ export class PipelineExecutor {
     // model turn, but must not make an anchored command parser miss and fall
     // through into implementation.
     const commandPrompt = stripHiddenContext(ctx.prompt);
+    // The page's visible strings are read off the FULL block, before the
+    // markup is dropped below: the text nodes of the page are where an
+    // on-screen label the user is looking at is found.
+    ctx.previewText = previewVisibleText(ctx.prompt);
+    this.deps.previewBaselines?.set(ctx.taskId, ctx.previewText);
+    // Keep the compact label/focus/console evidence on every preview turn.
+    // Raw markup rides into the pipeline only when the visible request asks
+    // about HTML, CSS, the DOM or styling source.
+    ctx.prompt = promptWithRelevantPreview(ctx.prompt);
+    ctx.humanPrompt = humanText(commandPrompt);
     const debugBody = parseFeatureContextDebugCommand(commandPrompt);
     if (debugBody !== undefined) {
       const report = debugBody ? parseDebugReport(debugBody) : null;
@@ -1255,6 +1554,22 @@ export class PipelineExecutor {
       // pipeline run on it: the pinned feature map, retrieval, the
       // debugging skill, and any screenshots attached to the same send.
       ctx.prompt = renderDebugTask(report, ctx.opts.images?.length ?? 0);
+      ctx.humanPrompt = humanText(stripHiddenContext(ctx.prompt));
+    }
+    // The screen commands read the prompt the COMPOSER built, not the
+    // stripped command line: the route and the captured DOM ride in it,
+    // and they are the whole input. See screen-commands.ts.
+    const entryPointHint = parseEntryPointCommand(ctx.prompt);
+    if (entryPointHint !== undefined) {
+      return this.runEntryPoint(ctx, entryPointHint);
+    }
+    const radiusHint = parseImpactRadiusCommand(ctx.prompt);
+    if (radiusHint !== undefined) {
+      return this.runImpactRadius(ctx, radiusHint);
+    }
+    const mockApi = parseMockApiCommand(commandPrompt);
+    if (mockApi !== undefined) {
+      return this.runMockApiCommand(mockApi);
     }
     const updatedFeature = parseFeatureContextUpdateCommand(commandPrompt);
     if (updatedFeature !== undefined) {
@@ -1322,8 +1637,14 @@ export class PipelineExecutor {
         sdkSessionId: null,
       };
     }
-    // The user unticked "System knowledge": nothing below this line runs.
-    if (isDirectMode(ctx.opts)) return this.runDirect(ctx);
+    // Agent turns always use the CLI-style loop; legacy knowledge flags do not opt in.
+    if (isDirectMode(ctx.opts)) {
+      try {
+        return await this.runDirect(ctx);
+      } finally {
+        this.deps.previewBaselines?.release(ctx.taskId);
+      }
+    }
     // The execution-timeline contract is armed after `understand`, not here:
     // a question owes an answer, not a checklist. See below.
     //
@@ -1336,6 +1657,14 @@ export class PipelineExecutor {
     // a model that merely repeats its report without doing more work.
     let appliedEdits = 0;
     let verificationObserved = false;
+    /**
+     * Effect this turn had on the workspace that left no file diff: a git
+     * ref moved, a command that changes something ran clean. The gate reads
+     * "0 files changed" as "nothing was implemented", which is true of a
+     * turn that only talked and false of a turn that reset a branch — and
+     * the second kind could never close its timeline.
+     */
+    let stateChanged = false;
     // Inputs of in-flight tool calls, so a finished read can be remembered
     // with the path and range it was asked for (the completion event only
     // carries the result).
@@ -1370,8 +1699,17 @@ export class PipelineExecutor {
           name?: string;
           error?: string;
         };
+        const failedInput = toolInputs.get(payload.toolCallId)?.input;
         toolInputs.delete(payload.toolCallId);
         blockers.note(`tool ${payload.name ?? ""}`, payload.error ?? "");
+        if (payload.name) {
+          this.deps.debugProtocol?.noteFailed(
+            ctx.taskId,
+            payload.name,
+            failedInput,
+            payload.error ?? ""
+          );
+        }
       }
       if (event.topic === "edit.applied") {
         const path = (event.payload as { path: string }).path;
@@ -1379,6 +1717,15 @@ export class PipelineExecutor {
         appliedEdits += 1;
         ctx.record.editCount += 1;
         verificationObserved = false;
+        this.deps.debugProtocol?.noteEdit(ctx.taskId, path);
+        // The diff decides how much verification the change deserves; it
+        // is re-read after every edit so the guard and the tail stages see
+        // the change as it is now.
+        this.refreshChangeScale(ctx);
+        // The workspace moved, so every lookup taken before it answered a
+        // question about a file that no longer reads that way. Re-running
+        // one now is new information, not a repeat.
+        this.deps.repeatCalls?.invalidate(ctx.taskId);
         // Advance the plan checklist live from real edits, so it moves even
         // when the model doesn't call update_plan_step itself.
         this.deps.planTracker.noteFileEdited(ctx.taskId, path);
@@ -1392,21 +1739,72 @@ export class PipelineExecutor {
           name?: string;
           result?: { exitCode?: number; timedOut?: boolean };
         };
-        if (
-          payload.name === "run_terminal" &&
-          payload.result?.exitCode === 0 &&
-          payload.result.timedOut !== true
-        ) {
-          verificationObserved = true;
-        }
         // What this turn looked at, remembered for the next one. Failures
         // are swallowed: memory is a side effect of the turn, never a way
         // to fail it.
         const started = payload.toolCallId
           ? toolInputs.get(payload.toolCallId)
           : undefined;
+        if (
+          payload.name === "run_terminal" &&
+          payload.result?.exitCode === 0 &&
+          payload.result.timedOut !== true
+        ) {
+          verificationObserved = true;
+          // …and effect, not just proof. A command that ran clean inside a
+          // started step is the only evidence a git-ref or infrastructure
+          // step ever produces; without this it could never be checked off.
+          stateChanged = true;
+          this.deps.planTracker.noteWorkObserved(ctx.taskId);
+          // A green test/typecheck run is attached to the step it verifies,
+          // so a "done" the model asserts and a "done" the harness saw are
+          // told apart in the plan rail and in memory.
+          const command = commandOf(started?.input);
+          if (VERIFYING_COMMAND.test(command)) {
+            this.deps.planTracker.noteVerified?.(
+              ctx.taskId,
+              `${clip(command, 80)} → exit 0`
+            );
+          }
+        }
+        // A preview assertion only verifies a change if what it asserts
+        // was not already on the page when the turn was sent.
+        if (payload.name === "preview_test") {
+          const outcome = payload.result as
+            | { status?: string; tautological?: boolean; title?: string }
+            | undefined;
+          if (outcome?.status === "passed" && outcome.tautological !== true) {
+            this.deps.planTracker.noteVerified?.(
+              ctx.taskId,
+              `preview_test "${clip(outcome.title ?? "", 60)}" passed`
+            );
+          }
+        }
+        // Did the model look at what the user named? The guard that holds
+        // planning and editing until it has is fed from here.
+        if (payload.name) {
+          this.deps.namedTargets?.note(
+            ctx.taskId,
+            payload.name,
+            started?.input,
+            payload.result
+          );
+        }
+        if (payload.name === "git" && mutatesGit(started?.input)) {
+          stateChanged = true;
+          this.deps.planTracker.noteWorkObserved(ctx.taskId);
+        }
         if (payload.toolCallId) toolInputs.delete(payload.toolCallId);
         if (started && payload.name) {
+          // A runtime observation? The debugging gate reads the result to
+          // decide whether the failure has been seen and, after a fix,
+          // re-seen coming back clean.
+          this.deps.debugProtocol?.note(
+            ctx.taskId,
+            payload.name,
+            started.input,
+            payload.result
+          );
           // Everything a tool returns is now something this turn has read,
           // so the next search may be grounded in it.
           this.deps.searchGrounding?.note(
@@ -1415,20 +1813,21 @@ export class PipelineExecutor {
               ? payload.result
               : JSON.stringify(payload.result ?? "")
           );
-          try {
-            this.deps.workingMemory?.noteTool({
-              conversationId: ctx.conversationId,
-              taskId: ctx.taskId,
-              name: payload.name,
-              input: started.input,
-              result: payload.result,
-            });
-          } catch (error) {
-            this.deps.log.warn({ err: error }, "could not note tool result");
-          }
+          // ...and something this turn no longer needs to look up. Same
+          // event, because a lookup's identity is only worth recording
+          // once it has actually returned something to reuse.
+          this.deps.repeatCalls?.note(
+            ctx.taskId,
+            payload.name,
+            started.input,
+            payload.result
+          );
         }
       }
     });
+    // What this turn reads, searches, runs and edits, remembered for the
+    // next one. One recorder for both modes — see rememberActions.
+    const forget = this.turns.remember(ctx);
 
     // NOT marked as a direct task. That mark exists for one thing: a turn
     // running with system knowledge OFF has no knowledge engine behind it,
@@ -1454,14 +1853,68 @@ export class PipelineExecutor {
       // file names the user typed) is available from the prompt itself, and
       // the one thing they genuinely decided — "does this need the code?" —
       // is now answered by retrieval scoring rather than by asking a model.
+      // The previous turn's answer, when this turn implements it. Read in
+      // the understand stage so its file references steer retrieval and
+      // the impact walk; rendered in the execute stage as "plan handoff".
+      let handoffAnswer = "";
       const intent = await this.stage(ctx, "understand", async () => {
-        const result = readIntent(ctx.prompt);
+        // The user's words only. The hidden page dump used to be read here
+        // too, and its URLs and utility classes came out as `targets`.
+        const result = readIntent(ctx.humanPrompt);
+        // What the user pointed at — a typed path, quoted text, an i18n
+        // key, a phrase that is on the previewed page, a highlighted
+        // region — and how this message relates to the last turn.
+        ctx.named = namedTargets({
+          humanPrompt: ctx.humanPrompt,
+          previewText: ctx.previewText,
+          focused: focusedLiterals(ctx.prompt),
+        });
+        const previous = this.deps.summaries.previous(
+          ctx.conversationId,
+          ctx.taskId
+        );
+        const stance = turnStance({
+          humanPrompt: ctx.humanPrompt,
+          previousStatus: previous?.status ?? null,
+          named: ctx.named,
+        });
+        ctx.stance = stance.stance;
+        handoffAnswer = handoffAnswerFor(ctx, result, previous);
+        const handoffRefs = extractRefs(handoffAnswer, 8).map((ref) =>
+          ref.replace(/:\d+(?:-\d+)?$/, "")
+        );
+        // A named file is the subject; retrieval and the impact walk start
+        // from it — and from the files the plan being implemented names —
+        // rather than from whatever the earlier turns touched.
+        result.targets = [
+          ...new Set([...ctx.named.paths, ...handoffRefs, ...result.targets]),
+        ].slice(0, 8);
         ctx.record.intentKind = result.kind;
         ctx.record.intentSummary = result.summary;
         this.deps.bus.publish("intent.resolved", result, ctx.taskId);
+        this.deps.bus.publish(
+          "turn.stance",
+          {
+            stance: ctx.stance,
+            reasons: stance.reasons,
+            namedPaths: ctx.named.paths,
+            namedLiterals: ctx.named.literals,
+            previousTaskId: previous?.taskId ?? null,
+            previousStatus: previous?.status ?? null,
+          },
+          ctx.taskId
+        );
+        // The guard that holds set_plan and the edit tools until the named
+        // thing has been read or searched: what the wrong-file turns never
+        // did before editing somewhere else.
+        this.deps.namedTargets?.arm(ctx.taskId, ctx.named);
         return {
           value: result,
-          detail: `${result.kind}: ${clip(result.summary, 80)}`,
+          detail:
+            `${result.kind} · ${ctx.stance}: ${clip(result.summary, 80)}` +
+            (ctx.named.paths.length + ctx.named.literals.length > 0
+              ? ` · names ${describeNamedTargets(ctx.named)}`
+              : ""),
         };
       });
 
@@ -1472,18 +1925,62 @@ export class PipelineExecutor {
       // rode on it regardless of intent. An answer-only turn publishes no
       // execution contract, so no plan-before-edit gate and no checklist:
       // the model reads what it needs and replies.
-      const answerOnly = isReadOnly(intent);
+      // Ask mode is the user overruling the classifier, so it only ever
+      // adds an answer-only turn — never cancels one. A prompt that reads
+      // as a question is still answered in Code mode; what Code does not
+      // do is promise an edit the classifier never saw a reason for.
+      const answerOnly = ctx.opts.turnMode === "ask" || isReadOnly(intent);
       if (answerOnly) this.deps.planTracker.markAnswerOnly(ctx.taskId);
       else this.deps.planTracker.requirePlan(ctx.taskId);
+      // "Study this and create a plan" is a work turn whose deliverable is
+      // the plan. Its steps are study and design steps, and the plan gates
+      // built for change turns turned it into a dead end: set_plan was
+      // refused until every request bullet had a step "delivering" it, and
+      // then no step could ever be checked because none had an edit — the
+      // user watched a finished study with every bullet still unchecked.
+      const planOnly =
+        answerOnly ||
+        ctx.opts.planMode === true ||
+        asksForPlanOnly(ctx.humanPrompt);
+      if (planOnly) this.deps.planTracker.markPlanOnly(ctx.taskId);
+
+      // A change turn that reports a failure enters the debugging protocol:
+      // its edits wait until the failure has been observed in this turn.
+      // Only the human half of the prompt is read (the hidden preview blob
+      // says "errors are present" on every send), and the conversation
+      // carries the symptom so a "then?" after a failed fix stays gated.
+      // A change turn that reports a failure enters `fix` mode (edits wait on
+      // the observation). A question that asks to diagnose one enters
+      // `diagnose` mode: it makes no edits, but a confident root-cause verdict
+      // still has to be reproduced or hedged — the jump-to-conclusions guard.
+      if (!isTrivialChat(ctx.humanPrompt, ctx.images.length > 0)) {
+        this.deps.debugProtocol?.arm(
+          ctx.taskId,
+          ctx.conversationId,
+          ctx.prompt,
+          {
+            mode: answerOnly ? "diagnose" : "fix",
+            hasImages: ctx.images.length > 0,
+            // "I can still see <label>" beside a page that shows that label
+            // is a copy complaint, not a runtime failure to observe.
+            previewText: ctx.previewText,
+          }
+        );
+      }
 
       const retrieval = await this.stage(ctx, "retrieve", async () => {
         // Small talk is the one turn with nothing to look up, and the test
         // for it is a regex, not a model.
-        if (isTrivialChat(ctx.prompt, ctx.images.length > 0)) {
+        if (isTrivialChat(ctx.humanPrompt, ctx.images.length > 0)) {
           return { value: emptyRetrieval(), detail: "skipped — small talk" };
         }
+        // The user's words, the files they named, and the strings they
+        // expect to find — never the page dump, which once made a 37KB DOM
+        // the retrieval query for a five-word request.
         const base =
-          [ctx.prompt, ...intent.targets].join(" ").trim() || ctx.prompt;
+          [ctx.humanPrompt, ...intent.targets, ...ctx.named.literals]
+            .join(" ")
+            .trim() || ctx.humanPrompt;
         const anchored = anchoredQuery(base, ctx.priorTurns);
         const queryText = [
           anchored,
@@ -1579,7 +2076,7 @@ export class PipelineExecutor {
       // Skills are opt-in: only what the user typed as a leading slash
       // command. Nothing is published on a plain prompt, so a turn that
       // invoked no skill shows no skill line at all.
-      const skills = this.deps.skillLoader.load(ctx.prompt);
+      const skills = this.deps.skillLoader.load(ctx.humanPrompt);
       if (skills.skills.length > 0) {
         this.deps.bus.publish(
           "skills.selected",
@@ -1608,7 +2105,7 @@ export class PipelineExecutor {
       // callers, flows, tests and past lessons ride into the prompt before
       // the model picks a target. impact_of_edit stays available for a
       // symbol- or line-precise question the map does not answer.
-      const radius = this.editRadius(ctx, intent);
+      const radius = this.investigationRadius(ctx, intent);
 
       // No planning model call, and — deliberately — no published plan yet.
       //
@@ -1657,40 +2154,81 @@ export class PipelineExecutor {
           plan,
           constraints: intent.constraints,
         });
-        // Recall is COMPLEMENTARY to retrieval, never replaced by it: RAG
-        // finds the relevant old work, the shared block carries the recent
-        // exchange, and it drops the summaries RAG already returned. Both
-        // ride into every provider identically — this is what survives a
-        // model or provider switch mid-conversation.
-        const recalled = this.recallSession(ctx, retrieval, intent.kind);
+        const conversation = isOllamaModel(ctx.opts.model) ? "" : renderPriorTurns(ctx.priorTurns);
         // What earlier turns already READ, on top of what they said. This
         // is the block that lets "now also handle X" start from the three
         // files the last turn gathered instead of reading them again.
-        const gathered = await this.recallWorkingMemory(ctx, intent.kind);
+        const gathered = await this.recallWorkingMemory(
+          ctx,
+          intent.kind,
+          new Set(retrieval.chunks.map((chunk) => chunk.path))
+        );
         // Named, not joined: the provider gets the same bytes either way,
         // and the names are what the timeline's "sent to model" row shows
         // beside each block's size, so a heavy turn can be read at a glance.
-        const appendContext: ContextSection[] = [
+        // Whether this conversation has been investigated yet. The recall
+        // block is the evidence: if nothing came back, nobody has looked.
+        const carriedWiki = this.renderWiki(ctx, intent.kind);
+        // The answer the previous turn gave, quoted whole when this turn is
+        // the "implement it" that follows a plan. A go-ahead block already
+        // covers the bare approval; this covers the typo'd, wordy one.
+        const handoff = planHandoffBlock(ctx, intent, handoffAnswer);
+        const built = buildExecuteContext({
+          inlinedPaths: gathered.inlinedPaths,
+          pinnedFeature: ctx.featureContext
+            ? this.deps.featureContexts.pinnedName(ctx.conversationId)
+            : null,
+          stance: ctx.stance,
+          named: ctx.named,
+          sections: [
           { name: "answer-only rules", text: answerOnly ? ANSWER_ONLY_RULES : "" },
-          { name: "session memory", text: recalled.text },
+          { name: "plan handoff", text: handoff },
+          { name: "conversation", text: conversation },
           {
             name: "session feature",
             text: ctx.featureContext
-              ? this.deps.featureContexts.render(ctx.featureContext)
+              ? this.deps.featureContexts.render(
+                  ctx.featureContext,
+                  ctx.workingSet
+                )
               : "",
           },
-          { name: "feature wiki", text: this.renderWiki(ctx, intent.kind) },
+          { name: "feature wiki", text: carriedWiki },
           { name: "previously gathered", text: gathered.text },
           { name: "attachments", text: attachmentBlock(ctx) },
-          { name: "go-ahead", text: goAheadBlock(ctx) },
+          { name: "go-ahead", text: handoff ? "" : goAheadBlock(ctx) },
           {
             name: "asked-about",
-            text: followUpBlock(ctx.prompt, ctx.priorTurns, intent),
+            text: followUpBlock(ctx.humanPrompt, ctx.priorTurns, intent),
           },
           { name: "recovery plan", text: ctx.recoveryPlan },
           { name: "skills", text: skills.context },
           { name: "knowledge context", text: context },
-        ];
+          ],
+        });
+        // Small talk gets no investigation rules; it looks nothing up.
+        const appendContext = isTrivialChat(ctx.humanPrompt, ctx.images.length > 0)
+          ? built.sections.filter(
+              (section) => section.name !== "investigation rules"
+            )
+          : built.sections;
+        // Seeded from the SAME fact the rule was written from: only refuse
+        // to re-gather findings that actually reached the model. Seeding on
+        // findings that were clipped away would refuse the turn the lookups
+        // it has no carried answer for — a deadlock, not a saving.
+        // …and not at all on a correction turn: the user just said the
+        // last attempt looked in the wrong place, so re-looking is the
+        // point, not the failure.
+        if (built.carriedInvestigation && ctx.stance !== "correct") {
+          this.deps.repeatCalls?.seedEarlier(ctx.taskId, {
+            searches:
+              this.deps.workingMemory?.searchesBefore(
+                ctx.conversationId,
+                ctx.taskId
+              ) ?? [],
+            inlinedPaths: gathered.inlinedPaths,
+          });
+        }
         // Whether this turn owes the user an EDIT, decided before the model
         // is called rather than after — the turn-ceiling path runs inside
         // streamSession, so by the time control returns here it has already
@@ -1704,21 +2242,51 @@ export class PipelineExecutor {
         // A turn that only TELLS Atelier something is excluded for the same
         // reason: it owes no edit, so requiring one only bought a gate that
         // could never close.
+        // `answerOnly`, not the classifier it came from. Ask mode can make
+        // a turn answer-only that the classifier read as work — "how create
+        // contract works here?" carries a verb and an object and scans as a
+        // request to build one — and arming the gate on such a turn is a
+        // contradiction with only one way out. The gate exists to force an
+        // edit; the answer-only guard refuses every edit tool; so the model
+        // cannot satisfy it by working and can only satisfy it by emitting
+        // the escape sentinel. That sentinel then IS the reply, and the
+        // user gets "NO CHANGE NEEDED: …" where their answer should be.
+        // A plan-only turn is not actionable either: it must not be
+        // nudged to implement, and it owes no edit.
         const actionable =
-          !isReadOnly(intent) &&
-          !isTrivialChat(ctx.prompt, ctx.images.length > 0) &&
-          !looksInformational(ctx.prompt);
+          !answerOnly &&
+          !this.deps.planTracker.isPlanOnly(ctx.taskId) &&
+          !isTrivialChat(ctx.humanPrompt, ctx.images.length > 0) &&
+          !looksInformational(ctx.humanPrompt);
         ctx.mustEdit = actionable;
-        const guardCompletion = completionGateRequired({
-          actionable,
-          planMode: ctx.opts.planMode === true,
-          model: ctx.opts.model,
-        });
+        // An armed diagnose turn runs the completion gate too, even though it
+        // is answer-only: its whole purpose is to refuse a confident verdict
+        // the turn never reproduced.
+        const debugArmed = this.deps.debugProtocol?.isArmed(ctx.taskId) === true;
+        const guardCompletion =
+          completionGateRequired({
+            actionable,
+            planMode: ctx.opts.planMode === true,
+            model: ctx.opts.model,
+          }) || (debugArmed && ctx.opts.planMode !== true);
         // Read at completion time, not when the query starts: edits and plan
         // updates happen inside the stream, and every provider hook must judge
-        // the checklist as it exists when the model tries to finish.
-        const gateOutstanding = (): string =>
-          completionGatePrompt(
+        // the checklist as it exists when the model tries to finish. `report`
+        // is the answer the model is trying to end with, so the jump-to-
+        // conclusions block can read it.
+        const gateOutstanding = (report?: string): string => {
+          const debug = this.deps.debugProtocol?.status(ctx.taskId, report);
+          const debugLines = debug?.lines ?? [];
+          // A diagnose turn owes no plan and no edit — only, at most, the
+          // reproduction behind a confident conclusion.
+          if (!actionable) {
+            if (debugLines.length === 0) return "";
+            return (
+              "The debugging gate is still open:\n" +
+              debugLines.map((line) => `- ${line}`).join("\n")
+            );
+          }
+          const base = completionGatePrompt(
             this.deps.planTracker.unfinishedSteps(ctx.taskId),
             touchesCode([...changedFiles]) &&
               !verificationObserved &&
@@ -1727,9 +2295,23 @@ export class PipelineExecutor {
             // has no Claude turn-limit continuation counter, so delaying the
             // no-edit verdict until that counter moves lets a model check its
             // plan done and finish with 0 edits forever.
-            changedFiles.size === 0,
+            //
+            // `stateChanged` is the exception that had to exist: a turn whose
+            // whole job was a git ref or a command changes no files and is
+            // not "nothing implemented".
+            changedFiles.size === 0 && !stateChanged,
             this.deps.planTracker.get(ctx.taskId) === undefined
           );
+          // The debugging gate is independent of the plan checklist: a bug
+          // turn can have every step checked off and still owe an observation
+          // of the failure it claims to have fixed — or a confident conclusion
+          // it never reproduced.
+          if (debugLines.length === 0) return base;
+          const debugBlock =
+            "The observe-before-fix gate is still open:\n" +
+            debugLines.map((line) => `- ${line}`).join("\n");
+          return base ? `${base}\n\n${debugBlock}` : debugBlock;
+        };
         // Images ride on this first turn — either the ones attached now or
         // the conversation's last set, when the prompt asks about them. The
         // whole tool surface is offered and the model decides what it needs
@@ -1775,66 +2357,16 @@ export class PipelineExecutor {
         // task may need many bounded SDK chunks, but every chunk that completes
         // a step, applies another edit, or verifies the edit earns the next.
         if (guardCompletion) {
-          const gateProgress = (): CompletionGateProgress => ({
-            completedSteps:
-              this.deps.planTracker
-                .get(ctx.taskId)
-                ?.steps.filter((step) => step.status === "done").length ?? 0,
-            appliedEdits,
-            verificationObserved,
-          });
-          // A first pass that already declared "nothing to change here" is
-          // finished. Re-opening the gate on it is what turned a one-line
-          // answer into eight model calls and a warning that the work may
-          // be undone.
-          let outstanding = reportsNoChangeNeeded(result.text)
+          // The gate REPORTS, it no longer retries. The retry loop re-ran
+          // the model up to six times whenever a plan step was still open,
+          // each round on a fresh ~450k-token session; the user watched a
+          // spinner and then read that the task was incomplete. The model's
+          // report now stands as written, with one line under it saying
+          // what is still open — and the next message carries on, in the
+          // same session, if the user wants it carried on.
+          const outstanding = reportsNoChangeNeeded(result.text)
             ? ""
-            : gateOutstanding();
-          let rounds = 0;
-          while (outstanding) {
-            const progressBefore = gateProgress();
-            const attemptsBefore = ctx.gateNudges;
-            rounds += 1;
-            const plan = this.deps.planTracker.get(ctx.taskId);
-            const round = await this.nudgeToImplement(
-              ctx,
-              appendContext,
-              harnessPrompt({
-                outstanding,
-                changedFiles: [...changedFiles],
-                stepsDone: progressBefore.completedSteps,
-                stepsTotal: plan?.steps.length ?? 0,
-                attempt: rounds,
-                stalled: ctx.gateNudges,
-                blockers: blockers.drain(),
-              }),
-              {
-                gateRetry: true,
-                maxTurns: claudeContinuationBudget(
-                  "execute",
-                  changedFiles.size === 0
-                ),
-                completionGate: gateOutstanding,
-              }
-            );
-            result.text += round;
-            if (ctx.gateNudges === attemptsBefore) break;
-            if (completionGateMadeProgress(progressBefore, gateProgress())) {
-              ctx.gateNudges = 0;
-            }
-            // The one honest exit while items stay open: the model named a
-            // blocker only the user can clear. Looping past it would spend
-            // rounds re-hitting the same wall.
-            if (reportsHardBlocker(round)) break;
-            // The other honest exit, and the only one that closes the gate
-            // rather than reporting it open: the model looked and there is
-            // nothing to change.
-            if (reportsNoChangeNeeded(round)) {
-              outstanding = "";
-              break;
-            }
-            outstanding = gateOutstanding();
-          }
+            : gateOutstanding(result.text);
           gateStillOpen = outstanding !== "";
           result.text = completionGateResultText(result.text, gateStillOpen);
         }
@@ -1876,9 +2408,17 @@ export class PipelineExecutor {
             detail: "no code changed — validators skipped",
           };
         }
-        const { results, extraText } = await this.validateWithFixLoop(ctx, [
-          ...changedFiles,
-        ]);
+        // The scale is refreshed after every edit; make sure the last
+        // refresh has landed before it decides how much to run.
+        const scale = await this.changeScaleOf(ctx.taskId);
+        const { results, extraText } = await this.validateWithFixLoop(
+          ctx,
+          [...changedFiles],
+          // A copy change cannot fail a test it did not touch; the
+          // typecheck is the one validator that can still catch a broken
+          // string, so it is the one that runs.
+          scale === "copy" ? ["typecheck"] : undefined
+        );
         assistantText += extraText;
         const failed = results.filter((r) => !r.ok).length;
         return {
@@ -1949,6 +2489,9 @@ export class PipelineExecutor {
         return { value: undefined, detail, ok: passed };
       });
 
+      assistantText = this.appendNotDelivered(ctx, assistantText);
+      assistantText = this.appendTaskTokenReport(ctx, assistantText);
+
       await this.stage(ctx, "summary", async () => {
         // Keep live statuses honest. The execute-stage completion gate already
         // resumed the model once with every open step; anything still open is
@@ -1959,7 +2502,8 @@ export class PipelineExecutor {
           validation,
           plan,
           reviewVerdict,
-          gateStillOpen
+          gateStillOpen,
+          this.deps.planTracker.notCoveredFor(ctx.taskId)
         );
         this.deps.bus.publish(
           "summary.created",
@@ -1985,17 +2529,21 @@ export class PipelineExecutor {
             taskId: ctx.taskId,
             conversationId: ctx.conversationId,
             intentSummary: intent.summary,
-            originalPrompt: ctx.prompt,
+            // The user's words, not the page dump that rode with them.
+            originalPrompt: ctx.humanPrompt,
             attachmentPaths: ctx.imagePaths,
             assistantText,
             changedFiles: [...changedFiles],
             validation,
-            planGoal: plan.goal,
+            planGoal: this.deps.planTracker.get(ctx.taskId)?.goal ?? plan.goal,
             // Live statuses from the tracker reflect only model updates and
             // edit evidence; summary never manufactures completion.
             steps: ctx.record.steps,
             reviewVerdict,
             status: "completed",
+            // A question, an ask-mode or a plan-mode turn: its answer is
+            // the deliverable the next message says "implement" to.
+            answerTurn: answerOnly || ctx.opts.planMode === true,
           })
         );
         // Nothing awaits it, so nothing would surface a rejection.
@@ -2013,6 +2561,7 @@ export class PipelineExecutor {
       return { assistantText, sdkSessionId: ctx.sdkSessionId };
     } finally {
       unsubscribe();
+      forget();
       // The lock is stored per conversation; this only drops the per-task
       // binding so a finished taskId cannot leak into a later run.
       this.deps.scopeGuard.release(ctx.taskId);
@@ -2036,19 +2585,32 @@ export class PipelineExecutor {
    * conversation's scope anchors and the plan checklist, which only exist
    * to feed later pipeline runs.
    */
+  /**
+   * Every task runs here. The flow itself lives in turn-runner.ts; this
+   * method only owns what the executor has that the runner does not — the
+   * transport to the providers, the token report, and the per-task state
+   * the remaining hooks read.
+   */
   private async runDirect(ctx: TaskContext): Promise<PipelineOutcome> {
     const changedFiles = ctx.record.changedFiles;
-    // Tells the impact / modularity / rewrite guards to stand down for the
-    // life of this task — their preconditions cannot be met without the
-    // tools this mode withholds.
+    // Guards that only made sense beside the knowledge stages stand down.
     this.deps.directTasks.mark(ctx.taskId);
+    // A question turn answers; the MCP edit tools refuse it too (answer-only
+    // hook), matching the native read-only mode set in streamSession.
+    if (ctx.opts.turnMode === "ask") this.deps.planTracker.markAnswerOnly(ctx.taskId);
     const unsubscribe = this.deps.bus.subscribe((event) => {
+      if (event.topic === "tool.completed" && event.taskId === ctx.taskId) {
+        const result = (event.payload as { result?: unknown }).result;
+        this.deps.searchGrounding?.note(ctx.taskId,
+          typeof result === "string" ? result : JSON.stringify(result ?? ""));
+      }
       if (event.topic === "edit.applied" && event.taskId === ctx.taskId) {
         changedFiles.add((event.payload as { path: string }).path);
       }
     });
-
     try {
+      // The user's own preTask hooks still run; nothing else stands between
+      // the message and the model.
       await this.stage(ctx, "hooks", async () => {
         const decision = await this.deps.hooks.evaluatePreTask(
           ctx.prompt,
@@ -2059,43 +2621,203 @@ export class PipelineExecutor {
         }
         return { value: undefined, detail: "passed" };
       });
-
       const exec = await this.stage(ctx, "execute", async () => {
-        const result = await this.streamSession(
-          ctx,
-          ctx.prompt,
-          // The only context this turn gets: the chat transcript itself.
-          // Ollama receives it as real user/assistant messages instead (see
-          // streamSession), and rendering it here as well would send the
-          // same exchange twice.
-          [
-            isOllamaModel(ctx.opts.model)
-              ? ""
-              : renderPriorTurns(ctx.priorTurns),
-            ctx.recoveryPlan,
-          ]
-            .filter(Boolean)
-            .join("\n"),
-          ctx.images,
-          "execute",
-          { allowedTools: DIRECT_TOOL_NAMES }
+        const result = await this.turns.run(ctx, (c, prompt, context, images) =>
+          this.streamSession(c, prompt, context, images, "execute", {})
         );
         return {
           value: result,
-          detail: `direct mode · ${changedFiles.size} file(s) changed`,
+          detail: `${changedFiles.size} file(s) changed`,
         };
       });
-
-      // Enough of a record for the note report and the history list; no
-      // session memory is written, which is the point of the mode.
-      ctx.record.intentKind = "direct";
-      ctx.record.intentSummary = clip(ctx.prompt, 120);
-      return { assistantText: exec.text, sdkSessionId: ctx.sdkSessionId };
+      return {
+        assistantText: this.appendTaskTokenReport(ctx, exec.text),
+        sdkSessionId: ctx.sdkSessionId,
+      };
     } finally {
       unsubscribe();
       this.deps.directTasks.release(ctx.taskId);
       this.deps.searchGrounding?.release(ctx.taskId);
+      this.deps.repeatCalls?.release(ctx.taskId);
+      this.deps.debugProtocol?.release(ctx.taskId);
+      this.deps.namedTargets?.release(ctx.taskId);
+      this.deps.previewBaselines?.release(ctx.taskId);
+      this.changeScales.delete(ctx.taskId);
     }
+  }
+
+  /**
+   * Claude's native tools — Read, Edit, MultiEdit, Write, Bash — are on the
+   * surface: they are the tools the model is trained on, and driving the
+   * MCP equivalents cost a simple task sixty calls. These two hooks are the
+   * ONLY gates left, and they are the user's own: a shell command goes
+   * through the same preTool hooks run_terminal does (git-flow
+   * confirmation, DB/npm approval, dev-server), an edit through the same
+   * as write_file, and both stay inside the workspace. PostToolUse feeds
+   * the timeline and working memory, so native edits and reads are
+   * remembered exactly like MCP ones.
+   */
+  private nativeToolHooks(
+    ctx: TaskContext
+  ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+    const root = path.resolve(this.deps.config.workspaceRoot);
+    const relative = (file: unknown): string | null => {
+      if (typeof file !== "string" || !file) return null;
+      const abs = path.resolve(root, file);
+      const rel = path.relative(root, abs);
+      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+      return rel.split(path.sep).join("/");
+    };
+    const deny = (reason: string): HookJSONOutput => ({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
+      },
+    });
+    const pre = async (raw: HookInput): Promise<HookJSONOutput> => {
+      const input = raw as PreToolUseHookInput;
+      const args = (input.tool_input ?? {}) as Record<string, unknown>;
+      if (input.tool_name === "Grep") {
+        const decision = await this.deps.hooks.evaluateToolUse(
+          "search_text", { query: args.pattern, regex: true }, ctx.taskId, ctx.abort.signal
+        );
+        return decision.allowed ? {} : deny(decision.reason ?? "Search needs an observed term");
+      }
+      if (input.tool_name === "Bash") {
+        const command = typeof args.command === "string" ? args.command : "";
+        try {
+          assertCommandConfined(command, root);
+        } catch (error) {
+          return deny(error instanceof Error ? error.message : String(error));
+        }
+        const decision = await this.deps.hooks.evaluateToolUse(
+          "run_terminal",
+          { command },
+          ctx.taskId,
+          ctx.abort.signal
+        );
+        return decision.allowed ? {} : deny(decision.reason ?? "blocked by hook");
+      }
+      const target = args.file_path ?? args.notebook_path;
+      const rel = relative(target);
+      if (!rel) {
+        return deny(`Edits stay inside the workspace: ${String(target ?? "?")}`);
+      }
+      const decision = await this.deps.hooks.evaluateToolUse(
+        input.tool_name === "Write" ? "write_file" : "replace_code",
+        { path: rel },
+        ctx.taskId,
+        ctx.abort.signal
+      );
+      return decision.allowed ? {} : deny(decision.reason ?? "blocked by hook");
+    };
+    const post = async (raw: HookInput): Promise<HookJSONOutput> => {
+      const input = raw as PostToolUseHookInput;
+      const args = (input.tool_input ?? {}) as Record<string, unknown>;
+      try {
+        this.deps.searchGrounding?.note(ctx.taskId,
+          typeof input.tool_response === "string" ? input.tool_response : JSON.stringify(input.tool_response ?? ""));
+        if (input.tool_name === "Read") {
+          const rel = relative(args.file_path);
+          const content = readToolContent(input.tool_response);
+          if (rel && content !== null) {
+            this.deps.workingMemory?.noteRead({
+              conversationId: ctx.conversationId,
+              taskId: ctx.taskId,
+              path: rel,
+              offset: finiteNumber(args.offset),
+              limit: finiteNumber(args.limit),
+              content,
+            });
+          }
+        } else if (input.tool_name === "Bash") {
+          const response = (input.tool_response ?? {}) as {
+            stdout?: unknown;
+            stderr?: unknown;
+            interrupted?: unknown;
+          };
+          this.deps.workingMemory?.noteCommand({
+            conversationId: ctx.conversationId,
+            taskId: ctx.taskId,
+            command: typeof args.command === "string" ? args.command : "",
+            exitCode: null,
+            output: [response.stdout, response.stderr]
+              .filter((part): part is string => typeof part === "string")
+              .join("\n"),
+            timedOut: response.interrupted === true,
+          });
+        } else if (!["Grep", "Glob"].includes(input.tool_name)) {
+          const rel = relative(args.file_path ?? args.notebook_path);
+          if (rel) {
+            this.deps.bus.publish(
+              "edit.applied",
+              { path: rel, diffId: `native:${input.tool_use_id}` },
+              ctx.taskId
+            );
+          }
+        }
+      } catch (error) {
+        this.deps.log.warn({ err: error }, "native tool hook failed");
+      }
+      return {};
+    };
+    return {
+      PreToolUse: [
+        {
+          matcher: "Grep|Bash|Edit|MultiEdit|Write|NotebookEdit",
+          hooks: [pre],
+          // The DB/npm approval modal waits for the user; the default hook
+          // timeout would auto-deny it after a minute.
+          timeout: 3600,
+        },
+      ],
+      PostToolUse: [
+        { matcher: "Read|Grep|Glob|Edit|MultiEdit|Write|NotebookEdit|Bash", hooks: [post] },
+      ],
+    };
+  }
+
+  /**
+   * Per-task diff scale, kept current from the edit stream. The guard that
+   * refuses a build on a copy change reads it through `changeScaleOf`, and
+   * awaits the refresh in flight so it never judges a stale diff.
+   */
+  private changeScales = new Map<
+    string,
+    { scale: ChangeScale | null; pending: Promise<void> }
+  >();
+
+  private refreshChangeScale(ctx: TaskContext): void {
+    const entry = this.changeScales.get(ctx.taskId) ?? {
+      scale: null,
+      pending: Promise.resolve(),
+    };
+    entry.pending = entry.pending.then(async () => {
+      const diffs: Array<{ path: string; diff: string }> = [];
+      for (const file of [...ctx.record.changedFiles].slice(0, 12)) {
+        try {
+          const { diff } = await this.deps.git.diff(file);
+          diffs.push({ path: file, diff: diff ?? "" });
+        } catch {
+          // An untracked or unreadable file: its size is unknown, and an
+          // unknown change is code — classifyChange's default.
+          diffs.push({ path: file, diff: "" });
+        }
+      }
+      const scale = diffs.length > 0 ? classifyChange(diffs) : null;
+      entry.scale = scale;
+      ctx.changeScale = scale;
+    });
+    this.changeScales.set(ctx.taskId, entry);
+  }
+
+  /** The current diff scale of a task, after any refresh in flight. */
+  async changeScaleOf(taskId: string): Promise<ChangeScale | null> {
+    const entry = this.changeScales.get(taskId);
+    if (!entry) return null;
+    await entry.pending.catch(() => undefined);
+    return entry.scale;
   }
 
   // -------------------------------------------------------------- stages
@@ -2176,7 +2898,10 @@ export class PipelineExecutor {
     // once and the loop stops: the findings still reach the user, but no
     // agent is dispatched to act on them. The clone sweep goes with it —
     // an env file has no twin to find, and the probe boots the embedder.
-    const deep = touchesCode([...changed]);
+    // A copy-only diff (string literals, visible text) is read as inert
+    // here: a reviewer asked to judge a label has nothing in its rubric to
+    // judge and reaches for the repo around it instead.
+    const deep = touchesCode([...changed]) && ctx.changeScale !== "copy";
     // Retry budget follows the size of the change. Measured across ~50 real
     // reviews: a single pass costs ~30-45% of the execute stage, two costs
     // ~160%, three costs 200-450%. Spending three rounds on a one- or
@@ -2317,9 +3042,12 @@ export class PipelineExecutor {
   /** Bounded fix loop: run validators, feed failures back, retry. */
   private async validateWithFixLoop(
     ctx: TaskContext,
-    changedFiles: string[]
+    changedFiles: string[],
+    /** Restrict to these validators (a copy change runs only the typecheck). */
+    only?: ValidationKind[]
   ): Promise<{ results: ValidationResult[]; extraText: string }> {
-    const kinds = this.deps.validators.detect();
+    const detected = this.deps.validators.detect();
+    const kinds = only ? detected.filter((kind) => only.includes(kind)) : detected;
     if (kinds.length === 0) return { results: [], extraText: "" };
     const maxRetries = this.deps.settings.get().maxValidationRetries;
     const testPaths = testOnlyPaths(changedFiles);
@@ -2383,54 +3111,6 @@ export class PipelineExecutor {
   }
 
   /**
-   * The provider-neutral memory for this turn: the session-memory chunks
-   * retrieval already surfaced, plus the recent exchange those chunks do not
-   * cover. Publishes `session.recalled` so recall is visible in the chat
-   * console exactly like knowledge retrieval and impact analysis are.
-   */
-  private recallSession(
-    ctx: TaskContext,
-    retrieval: RetrievalResult,
-    intentKind: string
-  ): SharedSessionContext {
-    const chunks = retrieval.chunks.filter((c) => c.kind === "session-memory");
-    // Whatever RAG already returned is not worth sending a second time as a
-    // summary line; the chunk carries strictly more of the same task.
-    const excludeTaskIds = this.deps.summaries.taskIdsForChunks(
-      chunks.map((chunk) => chunk.id)
-    );
-    const shared = this.deps.sharedSessions.build({
-      conversationId: ctx.conversationId,
-      currentTaskId: ctx.taskId,
-      excludeTaskIds,
-      maxTokens: sessionTokensFor(intentKind),
-      // Ollama carries the newest turns as real messages, so summarising
-      // them here as well would pay for the same exchange twice.
-      verbatimTurns: isOllamaModel(ctx.opts.model) ? ctx.priorTurns.length : 0,
-    });
-    if (chunks.length === 0 && shared.tokens === 0) return shared;
-
-    const chunkTokens = chunks.reduce((n, c) => n + (c.tokenCount ?? 0), 0);
-    this.deps.bus.publish(
-      "session.recalled",
-      {
-        chunks: chunks.length,
-        summaries: shared.summaries,
-        turns: shared.turns,
-        tokens: shared.tokens + chunkTokens,
-        labels: [
-          ...chunks.slice(0, 3).map((chunk) => chunkLabel(chunk.preview)),
-          ...shared.labels,
-        ]
-          .filter(Boolean)
-          .slice(0, 4),
-      },
-      ctx.taskId
-    );
-    return shared;
-  }
-
-  /**
    * Feature-wiki pages for this turn. Matching is deterministic (words of
    * the prompt vs page names, files of the turn vs page sources) so it
    * costs nothing and never surprises; the pages themselves are what the
@@ -2444,13 +3124,22 @@ export class PipelineExecutor {
     const store = this.deps.wiki;
     if (!store) return;
     try {
+      // The working set, not the raw anchors: anchors are every file any
+      // earlier turn ever edited, wrong attempts included, and two of them
+      // were enough to pull in a page about a different feature.
       const matched = store.match({
-        terms: featureTerms(ctx.prompt),
+        terms: featureTerms(ctx.humanPrompt),
         namedFiles: [...ctx.scope.named, ...intent.targets],
-        files: [...ctx.scope.anchors.slice(0, 8), ...retrievedPaths],
+        files: [...ctx.workingSet.slice(0, 8), ...retrievedPaths],
       });
       ctx.wiki = matched.map(({ page }) => ({ page, moved: store.moved(page) }));
       if (ctx.wiki.length === 0) return;
+      // Why each page matched rides on the event: a page pulled in by
+      // touched files alone is the signal to look for when the wrong page
+      // steers a turn.
+      const matchedBy = new Map(
+        matched.map(({ page, matchedBy: by }) => [page.slug, by])
+      );
       this.deps.bus.publish(
         "wiki.recalled",
         {
@@ -2459,6 +3148,7 @@ export class PipelineExecutor {
             title: page.title,
             status: moved.length > 0 ? "stale" : page.status,
             moved,
+            matchedBy: matchedBy.get(page.slug),
           })),
           tokens: approxTokens(this.renderWiki(ctx, intent.kind)),
         },
@@ -2554,12 +3244,13 @@ export class PipelineExecutor {
    */
   private async recallWorkingMemory(
     ctx: TaskContext,
-    intentKind: string
+    intentKind: string,
+    excludePaths: Set<string>
   ): Promise<RecalledWorkingMemory> {
     const store = this.deps.workingMemory;
     if (!store) return EMPTY_RECALL;
     // Small talk looks nothing up and should not pay to carry old reads.
-    if (isTrivialChat(ctx.prompt, ctx.images.length > 0)) return EMPTY_RECALL;
+    if (isTrivialChat(ctx.humanPrompt, ctx.images.length > 0)) return EMPTY_RECALL;
     try {
       // On Ollama the block competes with the rules and the tool loop for
       // one fixed window, and a model that reports no window gets a small
@@ -2574,6 +3265,16 @@ export class PipelineExecutor {
         workingMemoryTokensFor(intentKind),
         window ? Math.floor(window * WORKING_MEMORY_WINDOW_SHARE) : Infinity
       );
+      // Tasks the user stopped: what they read is listed, never inlined as
+      // "the files you hold". Three stopped attempts in a row once filled
+      // the inline slots with the wrong files and the rule then told the
+      // next turn not to look anywhere else.
+      const demoteTaskIds = new Set(
+        this.deps.summaries
+          .recent(ctx.conversationId, 8)
+          .filter((summary) => summary.status && summary.status !== "completed")
+          .map((summary) => summary.taskId)
+      );
       const gathered = await store.recall({
         conversationId: ctx.conversationId,
         currentTaskId: ctx.taskId,
@@ -2584,6 +3285,16 @@ export class PipelineExecutor {
         seedPaths: ctx.wiki.flatMap(({ page }) =>
           page.sources.map((source) => source.path)
         ),
+        // Current retrieval already carries these files. Keep their earlier
+        // read ranges as cheap path references instead of paying to inline
+        // the same source again under "previously gathered".
+        excludePaths,
+        demoteTaskIds,
+        // What the user named this turn rides in first, and the files that
+        // earlier searches for the same string located ride in as content
+        // rather than as a one-line "→ path" the model never opened.
+        preferPaths: ctx.named.paths,
+        literals: ctx.named.literals,
       });
       if (gathered.tokens > 0) {
         this.deps.bus.publish(
@@ -2596,6 +3307,8 @@ export class PipelineExecutor {
             tokens: gathered.tokens,
             paths: gathered.inlinedPaths,
             seeded: gathered.seeded,
+            demoted: gathered.demoted,
+            located: gathered.located,
           },
           ctx.taskId
         );
@@ -2612,11 +3325,7 @@ export class PipelineExecutor {
       ctx.collectedText.trim().length > 0
         ? "CURRENT TASK TRANSCRIPT SO FAR:\n" + clip(ctx.collectedText, 1600)
         : "";
-    const shared = this.deps.sharedSessions.build({
-      conversationId: ctx.conversationId,
-      currentTaskId: ctx.taskId,
-    });
-    return [shared.text, current].filter(Boolean).join("\n");
+    return [renderPriorTurns(ctx.priorTurns), current].filter(Boolean).join("\n");
   }
 
   /**
@@ -2644,10 +3353,14 @@ export class PipelineExecutor {
     ctx: TaskContext,
     status: "cancelled" | "error"
   ): Promise<void> {
-    // A direct turn writes no memory when it succeeds, so it must not write
-    // any when it is cancelled either — that record would come back as a
-    // retrievable chunk in the next pipeline run.
-    if (isDirectMode(ctx.opts) || ctx.record.summarized) return;
+    if (ctx.record.summarized) return;
+    // A stopped direct turn is remembered the way a finished one is: as a
+    // STOPPED record, built locally, so the next turn knows the attempt was
+    // rejected rather than meeting it as if it never happened.
+    if (isDirectMode(ctx.opts)) {
+      this.turns.saveSummary(ctx, ctx.collectedText, status);
+      return;
+    }
     const record = ctx.record;
     this.captureLivePlanSteps(ctx);
     const hasWork =
@@ -2660,16 +3373,21 @@ export class PipelineExecutor {
       buildTaskSummary({
         taskId: ctx.taskId,
         conversationId: ctx.conversationId,
-        intentSummary: record.intentSummary || clip(ctx.prompt, 120),
-        originalPrompt: ctx.prompt,
+        intentSummary: record.intentSummary || clip(ctx.humanPrompt, 120),
+        originalPrompt: ctx.humanPrompt,
         attachmentPaths: ctx.imagePaths,
+        // What the model said before the stop is the only record of what
+        // it found — a plan turn stopped after its answer still answered.
+        assistantText: ctx.collectedText,
         changedFiles: [...record.changedFiles],
         validation: record.validation,
-        planGoal: record.planGoal,
+        planGoal: this.deps.planTracker.get(ctx.taskId)?.goal ?? record.planGoal,
         steps: record.steps,
         reviewVerdict: record.reviewVerdict,
         status,
         partialText: ctx.collectedText,
+        answerTurn:
+          record.intentKind === "question" || ctx.opts.planMode === true,
       })
     );
   }
@@ -2785,7 +3503,7 @@ export class PipelineExecutor {
       /** Overrides the purpose's ceiling; only the continuation sets it. */
       maxTurns?: number;
       /** Live evidence checked by Claude's Stop hook before accepting a report. */
-      completionGate?: () => string;
+      completionGate?: (report?: string) => string;
       /**
        * Files whose exact current content already rides in the context
        * (previously gathered). Ollama's blind-edit guard accepts them as
@@ -2795,6 +3513,10 @@ export class PipelineExecutor {
     } = {}
   ): Promise<{ text: string }> {
     const resume = opts.resume ?? true;
+    const direct = isDirectMode(ctx.opts);
+    const toolNames = direct
+      ? DIRECT_TOOLS.filter((name) => !opts.allowedTools || opts.allowedTools.includes(name))
+      : opts.allowedTools;
     const sdkContext: SdkToolContext = {
       taskId: ctx.taskId,
       signal: ctx.abort.signal,
@@ -2802,7 +3524,8 @@ export class PipelineExecutor {
     const mcpServer = createAtelierMcpServer(
       this.deps.tools,
       () => sdkContext,
-      (imagePath) => this.deps.attachments.load(imagePath)
+      (imagePath) => this.deps.attachments.load(imagePath),
+      toolNames
     );
     let text = "";
     // Claude streams candidate report text before its Stop hook runs. Keep
@@ -2816,57 +3539,64 @@ export class PipelineExecutor {
     // and always run at the picked effort.
     const effort =
       purpose === "execute"
-        ? effortFor(prompt, hasImages, ctx.opts.effort)
+        ? effortFor(ctx.humanPrompt || prompt, hasImages, ctx.opts.effort)
         : ctx.opts.effort;
     if (effort !== ctx.opts.effort) {
       this.deps.log.info({ effort }, "trivial chat turn — effort lowered");
     }
-    // Provider-neutral: the same layout block precedes the rules on every
-    // backend, so a Codex or Ollama run knows the folder shape too. It
-    // survives direct mode — knowing the real folder names is not knowledge
-    // retrieval, and without it the model invents paths.
-    const layout = await this.workspaceLayout();
-    // Direct mode swaps the whole rule block: the pipeline's rules describe
-    // a knowledge engine this turn does not have, down to tools it cannot
-    // call and hooks that will not fire.
-    const direct = isDirectMode(ctx.opts);
-    // The rules are deliberately short: the same tasks came out better with
-    // system knowledge OFF, carrying a fifth of the text, which is what a
-    // paragraph of good advice costs when it competes with the task for
-    // attention. What survived is what changes what the model DOES.
-    // The user's own rules stay LAST — they are instructions for this
-    // workspace, and they are declared to win.
-    const rules =
-      ATELIER_EXECUTOR_CONTRACT +
-      (direct ? DIRECT_RULES : FAST_RULES) +
-      (await this.userRules(ctx));
-    // Rides AFTER the static rules, never between them: the lock changes
-    // per conversation, and splitting the static prefix would invalidate
-    // the provider prompt cache on every turn. A direct turn has no lock —
-    // the scope store is part of the pipeline, not of a plain agent loop.
+    // FULL keeps the exact provider payload it had before. LIGHT clips each
+    // locally available block and never asks a second model to summarize it.
+    const fullLayout = await this.workspaceLayout();
+    const layout = direct
+      ? clipLightContext(fullLayout, LIGHT_LAYOUT_CHARS)
+      : fullLayout;
+    const fullUserRules = await this.userRules(ctx);
+    const userRules = direct
+      ? clipLightContext(fullUserRules, LIGHT_USER_RULE_CHARS)
+      : fullUserRules;
+    const rules = direct
+      ? DIRECT_RULES + userRules
+      : ATELIER_EXECUTOR_CONTRACT + FAST_RULES + userRules;
+    // The scope store is part of the full pipeline. LIGHT remains confined by
+    // ToolRegistry's active task scope and carries only the compact boundary.
     const scoped = direct ? "" : await this.scopeContext(ctx);
-    // Byte-identical Atelier context for every interactive provider. Native
-    // provider presets and transport protocols still differ, but model
-    // selection can no longer add or remove the executor contract itself.
-    const providerContext =
-      layout +
-      rules +
-      (ctx.opts.vibe ? VIBE_RULES : "") +
-      scoped +
-      contextText(appendContext);
-    // The turn's vocabulary: what the user asked, and every block the model
-    // is about to be given. A search term outside this and outside anything
-    // the tools return is one the model made up.
-    this.deps.searchGrounding?.seed(ctx.taskId, [prompt, providerContext]);
+    const vibeRules = ctx.opts.vibe
+      ? direct
+        ? clipLightContext(VIBE_RULES, LIGHT_VIBE_CHARS)
+        : VIBE_RULES
+      : "";
+    const appended = direct
+      ? clipLightContext(contextText(appendContext), LIGHT_APPEND_CHARS)
+      : contextText(appendContext);
+    // The outer cap is a hard guarantee even if a future static rule grows.
+    // FULL deliberately bypasses it and remains byte-for-byte on its old path.
+    const providerContext = direct
+      ? clipLightContext(
+          layout + rules + vibeRules + scoped + appended,
+          LIGHT_CONTEXT_MAX_CHARS
+        )
+      : layout + rules + vibeRules + scoped + appended;
+    // The turn's vocabulary: what the user asked, what the page SHOWS, and
+    // every block the model is about to be given. A search term outside
+    // this and outside anything the tools return is one the model made up.
+    // The page's markup and classes are deliberately not vocabulary: a
+    // grounded `max-w-[180px]` once outranked the label the user named.
+    this.deps.searchGrounding?.seed(ctx.taskId, [
+      stripHiddenContext(prompt),
+      ctx.previewText,
+      providerContext,
+    ]);
     // What is about to be sent, block by block, published BEFORE the call:
     // this is the row the timeline shows as "sent to model", and it has to
     // exist even for a call that never comes back.
     const requestSections: ContextSection[] = [
       { name: "workspace layout", text: layout },
       { name: "rules", text: rules },
-      { name: "vibe rules", text: ctx.opts.vibe ? VIBE_RULES : "" },
+      { name: "vibe rules", text: vibeRules },
       { name: "scope lock", text: scoped },
-      ...contextSections(appendContext),
+      ...(direct
+        ? [{ name: "light carried context", text: appended }]
+        : contextSections(appendContext)),
     ];
     const modelLabel = String(ctx.opts.model ?? "claude (default)");
     const announceRequest = (
@@ -2926,7 +3656,7 @@ export class PipelineExecutor {
           ...(resume ? { transcript: ctx.ollamaTranscript } : {}),
           tools: this.deps.tools,
           files: this.deps.files,
-          toolNames: direct ? DIRECT_TOOLS : undefined,
+          toolNames,
           preGrounded: opts.preGrounded,
           // Decides the reasoning models' hidden pass; see the loop.
           effort,
@@ -3003,7 +3733,7 @@ export class PipelineExecutor {
 
     if (isGrokModel(ctx.opts.model)) {
       announceRequest("grok", {
-        toolsOffered: direct ? DIRECT_TOOLS.length : undefined,
+        toolsOffered: undefined,
       });
       return {
         text: await runGrokAgentLoop({
@@ -3013,7 +3743,7 @@ export class PipelineExecutor {
           images,
           tools: this.deps.tools,
           files: this.deps.files,
-          toolNames: direct ? DIRECT_TOOLS : undefined,
+          toolNames,
           effort,
           taskId: ctx.taskId,
           signal: ctx.abort.signal,
@@ -3056,7 +3786,7 @@ export class PipelineExecutor {
         effort,
         signal: ctx.abort.signal,
         toolBridge,
-        toolNames: direct ? DIRECT_TOOLS : undefined,
+        toolNames,
         images,
         telemetry: {
           bus: this.deps.bus,
@@ -3082,7 +3812,10 @@ export class PipelineExecutor {
     // still in context when the implementer starts. The checkbox wins if
     // both are on, because a user asking to plan wants to be asked.
     const systemPlan = opts.systemPlan === true && !ctx.opts.planMode;
-    const planning = systemPlan || ctx.opts.planMode === true;
+    // Ask mode is read-only natively: the SDK's plan permission mode denies
+    // every writing tool, so a question turn cannot edit on any surface.
+    const planning =
+      systemPlan || ctx.opts.planMode === true || ctx.opts.turnMode === "ask";
 
     // canUseTool closes over the query it belongs to, so the handle is
     // declared first and assigned below; it is only ever read from inside a
@@ -3104,12 +3837,7 @@ export class PipelineExecutor {
     let firstToken = false;
     announceRequest("claude", {
       resumes: resume && ctx.sdkSessionId !== null,
-      toolsOffered:
-        opts.allowedTools?.length === 0
-          ? 0
-          : direct
-            ? DIRECT_TOOLS.length
-            : undefined,
+      toolsOffered: opts.allowedTools?.length === 0 ? 0 : undefined,
     });
     /**
      * SDK-builtin tool calls awaiting their result, by tool_use id. Only
@@ -3164,56 +3892,16 @@ export class PipelineExecutor {
           : {}),
         // This path is only for Claude models. Ollama selections are handled
         // by runOllamaAgentLoop above because the Claude SDK cannot run them.
-        ...(opts.completionGate
-          ? {
-              hooks: {
-                Stop: [
-                  {
-                    hooks: [
-                      async (input) => {
-                        const stopHookActive =
-                          typeof input === "object" &&
-                          input !== null &&
-                          (input as { stop_hook_active?: unknown })
-                            .stop_hook_active === true;
-                        const decision = completionStopHookDecision(
-                          opts.completionGate!(),
-                          stopHookActive,
-                          text
-                        );
-                        completionAccepted = decision.decision !== "block";
-                        if (decision.decision === "block") {
-                          // The report was already generated into our private
-                          // buffer, but must never reach chat or a later pass.
-                          text = "";
-                          this.deps.bus.publish(
-                            "hook.blocked",
-                            {
-                              hookId: "completion-gate",
-                              name: "Completion gate",
-                              reason: decision.reason,
-                            },
-                            ctx.taskId
-                          );
-                        }
-                        return decision;
-                      },
-                    ],
-                  },
-                ],
-              },
-            }
-          : {}),
+        hooks: this.nativeToolHooks(ctx),
         ...(sdkModel(ctx.opts.model)
           ? { model: sdkModel(ctx.opts.model) }
           : {}),
         ...(claudeEffort(effort) ? { effort: claudeEffort(effort) } : {}),
-        // A normal Claude Code query is otherwise open-ended. Tool loops and
-        // failed repair attempts can keep spending the five-hour quota long
-        // after the useful work stopped. Purpose-aware ceilings leave enough
-        // room for a grounded coding pass while bounding every SDK session.
-        maxTurns: opts.maxTurns ?? claudeTurnBudget(purpose),
-        disallowedTools: DISABLED_BUILTINS,
+        // Omit the SDK ceiling for agent turns; completion or user Stop ends them.
+        ...(!direct ? { maxTurns: opts.maxTurns ?? claudeTurnBudget(purpose) } : {}),
+        disallowedTools: direct
+          ? DISABLED_BUILTINS.filter((name) => !CLAUDE_NATIVE_TOOLS.some((native) => native === name))
+          : DISABLED_BUILTINS,
         mcpServers: { [MCP_SERVER_NAME]: mcpServer },
         strictMcpConfig: true,
         // An explicitly empty list is a casual turn: no tools at all, not
@@ -3224,18 +3912,24 @@ export class PipelineExecutor {
           opts.allowedTools?.length === 0
             ? []
             : [
-                ...(opts.allowedTools ??
-                  (direct
-                    ? DIRECT_TOOLS.map(
-                        (name) => `mcp__${MCP_SERVER_NAME}__${name}`
-                      )
-                    : [`mcp__${MCP_SERVER_NAME}__*`])),
+                ...(opts.allowedTools ?? [
+                  `mcp__${MCP_SERVER_NAME}__*`,
+                  ...CLAUDE_NATIVE_TOOLS,
+                ]),
                 ...CLAUDE_FAST_BUILTINS,
               ],
         includePartialMessages: true,
-        // Atelier injects selected skills itself so disabled skills cannot
-        // leak through Claude's native user/project settings.
-        settingSources: [],
+        // Subagents the turn can delegate to — see ATELIER_AGENTS.
+        agents: ATELIER_AGENTS as unknown as NonNullable<
+          Parameters<typeof query>[0]["options"]
+        >["agents"],
+        // The project's CLAUDE.md (and .claude/ project settings) load the
+        // way the CLI loads them: the project's own instructions are the
+        // highest-leverage context there is, and Atelier was the one
+        // surface that dropped them. User-level settings stay out so a
+        // machine's personal hooks and permissions never steer a shared
+        // workspace.
+        settingSources: ["project"],
         abortController: ctx.abort,
         ...(resume && ctx.sdkSessionId ? { resume: ctx.sdkSessionId } : {}),
       },
@@ -3480,13 +4174,14 @@ export class PipelineExecutor {
 
   /**
    * Carries a session that spent its turn ceiling into a bounded wrap-up
-   * round, in the SAME session, so every file it read is still context.
+   * round from a compact execution checkpoint.
    *
    * The ceiling exists to bound what one turn can spend, and it does its
-   * job — but the SDK reports reaching it as a thrown error, which used to
-   * take the whole task down with it: no answer, no summary, no session
-   * memory, just a red banner over work that had already partly happened.
-   * A short convergence round is both the honest and the cheaper ending.
+   * job — but resuming the provider's complete native transcript on every
+   * round makes each continuation repay every prior tool call. A fresh
+   * session receives the same bounded evidence plus the live plan, changed
+   * files, and exact outstanding work, preserving execution quality without
+   * unbounded transcript growth.
    *
    * Returns the continuation's text, or a note when there is no
    * continuation left to spend.
@@ -3498,7 +4193,7 @@ export class PipelineExecutor {
     opts: {
       resume: boolean;
       allowedTools?: string[];
-      completionGate?: () => string;
+      completionGate?: (report?: string) => string;
     }
   ): Promise<string> {
     // A non-resuming session (the independent reviewer) has no id of its own
@@ -3516,7 +4211,9 @@ export class PipelineExecutor {
         { taskId: ctx.taskId, purpose, resumable },
         "turn ceiling reached with no continuation left"
       );
-      return TURN_LIMIT_NOTE;
+      // Nothing is appended: the answer and the edits stand on their own,
+      // and the open gate (full mode) already says the work is unfinished.
+      return "";
     }
     ctx.turnLimitContinuations += 1;
     // A turn that owed an edit and produced none did not run out of room
@@ -3554,14 +4251,15 @@ export class PipelineExecutor {
             blockers,
           })
         : turnLimitContinuationPrompt(outstanding, unstarted);
+    const checkpoint = this.executionCheckpoint(ctx, prompt);
     const { text } = await this.streamSession(
       ctx,
-      prompt,
+      checkpoint,
       appendContext,
       undefined,
       purpose,
       {
-        resume: true,
+        resume: false,
         allowedTools: opts.allowedTools,
         systemPlan: false,
         maxTurns: claudeContinuationBudget(purpose, unstarted),
@@ -3574,7 +4272,26 @@ export class PipelineExecutor {
       evidenceAfter.stepsDone > evidenceBefore.stepsDone
         ? 0
         : ctx.turnLimitStalls + 1;
-    return text ? `\n\n${text}` : TURN_LIMIT_NOTE;
+    return text ? `\n\n${text}` : "";
+  }
+
+  /** Compact live state for a fresh continuation request. */
+  private executionCheckpoint(
+    ctx: TaskContext,
+    outstanding: string
+  ): string {
+    const plan = this.deps.planTracker.get(ctx.taskId);
+    return renderExecutionCheckpoint({
+      request: ctx.prompt,
+      outstanding,
+      goal: plan?.goal ?? ctx.record.planGoal,
+      steps: (plan?.steps ?? ctx.record.steps).map((step) => ({
+        title: step.title,
+        status: step.status,
+        files: step.files,
+      })),
+      changedFiles: [...ctx.record.changedFiles],
+    });
   }
 
   /** Live completion evidence, for the progress-driven loops. */
@@ -3601,9 +4318,9 @@ export class PipelineExecutor {
    * and with it off, planning is what happens BEFORE editing in the same
    * turn, not instead of it.
    *
-   * The continuation resumes the same session, so every file the planner
-   * read is still in context. Bounded to one so a run that genuinely has
-   * nothing to change cannot be made to loop here.
+   * The first plan-to-edit transition keeps the same session so its source
+   * reads remain available. Repeated completion-gate retries switch to the
+   * compact execution checkpoint so they do not repay a growing transcript.
    */
   private async nudgeToImplement(
     ctx: TaskContext,
@@ -3612,7 +4329,7 @@ export class PipelineExecutor {
     opts: {
       gateRetry?: boolean;
       maxTurns?: number;
-      completionGate?: () => string;
+      completionGate?: (report?: string) => string;
     } = {}
   ): Promise<string> {
     // A generic offer nudge after a turn-limit continuation would spend a
@@ -3635,23 +4352,72 @@ export class PipelineExecutor {
     } else {
       ctx.nudges += 1;
     }
+    const checkpointed = opts.gateRetry === true;
+    const continuationPrompt = checkpointed
+      ? this.executionCheckpoint(ctx, prompt)
+      : prompt;
     this.deps.log.warn(
-      { taskId: ctx.taskId },
-      "turn ended with outstanding work; continuing the same session"
+      { taskId: ctx.taskId, checkpointed },
+      checkpointed
+        ? "turn ended with outstanding work; continuing from compact state"
+        : "turn ended with outstanding work; continuing the same session"
     );
     const { text } = await this.streamSession(
       ctx,
-      prompt,
+      continuationPrompt,
       appendContext,
       undefined,
       "execute",
       {
+        resume: !checkpointed,
         systemPlan: false,
         maxTurns: opts.maxTurns,
         completionGate: opts.completionGate,
       }
     );
     return text ? `\n\n${text}` : "";
+  }
+
+  /** Add real per-request usage after the task's last model call. */
+  /**
+   * The harness's own line under the report: what the plan declared it
+   * would not deliver. The model wrote the report and may have glossed
+   * over the narrowing; this line comes from the set_plan declaration, so
+   * the user sees the gap in the same message as the claim.
+   */
+  private appendNotDelivered(ctx: TaskContext, text: string): string {
+    const items = this.deps.planTracker.notCoveredFor(ctx.taskId);
+    if (items.length === 0) return text;
+    const block =
+      "Not delivered this turn (declared at planning):\n" +
+      items.map((item) => `- ${item}`).join("\n");
+    return this.appendReportText(ctx, text, block);
+  }
+
+  private appendTaskTokenReport(ctx: TaskContext, text: string): string {
+    const report = renderTaskTokenReport(this.deps.ledger.taskUsage(ctx.taskId));
+    if (!report) return text;
+    return this.appendReportText(ctx, text, report);
+  }
+
+  /** Streams a harness-written block onto the end of the answer. */
+  private appendReportText(
+    ctx: TaskContext,
+    text: string,
+    report: string
+  ): string {
+    const delta = `${text.trim() ? "\n\n" : ""}${report}`;
+    ctx.collectedText += delta;
+    this.deps.bus.publish(
+      "chat.message.delta",
+      {
+        conversationId: ctx.conversationId,
+        messageId: ctx.messageId,
+        delta,
+      },
+      ctx.taskId
+    );
+    return text + delta;
   }
 
   private recordTestRun(
@@ -3675,54 +4441,181 @@ export class PipelineExecutor {
 }
 
 /**
- * Token cap for the shared memory block. A bare "continue" classifies as
- * chat, which is precisely the turn that needs the thread most — so the light
- * budget stays generous here even though its code budget is small.
- */
-/**
- * Cap for the "previously gathered" block. A question or a chat turn gets
- * the list and a little content; a change turn gets enough to carry the
- * two or three files the last turn read, which is what a follow-up edit
- * almost always needs first.
+ * Recall budgets stay deliberately smaller than current retrieval. Earlier
+ * turns are continuity hints; exact evidence can be demand-loaded again when
+ * the compact block does not settle a needed detail.
  */
 /** Most of an Ollama window the gathered block may take. */
 const WORKING_MEMORY_WINDOW_SHARE = 0.15;
+
+/**
+ * Dynamic context ceiling for the first execute request. Static rules, the
+ * workspace boundary, and the user's prompt sit outside this allowance.
+ * Sections are packed by value so exact current evidence wins over older
+ * summaries when the turn has more relevant context than the model needs.
+ */
+/**
+ * Raised from 3000, because 3000 was set before a turn carried this much.
+ *
+ * A follow-up turn now ships four evidence blocks that have to coexist:
+ * the gathered reads (~1.4k), the feature Flow (~750), session memory
+ * (~320) and current retrieval (~1.1k). That is 3.6k of evidence against a
+ * 3k budget, so one of them was always going to be zeroed — and the greedy
+ * packer zeroed whichever sat last, silently.
+ *
+ * Paying ~1.2k more per turn is the cheap side of this trade by an order of
+ * magnitude: the turn that went without its carried findings re-investigated
+ * instead, and that cost five continuation rounds at ~6.3k each.
+ */
+const EXECUTE_CONTEXT_TOKENS = 4200;
+
+/**
+ * Room held back for the investigation rules, which are written AFTER the
+ * rest is packed — see buildExecuteContext. They are short and they decide
+ * how the model reads everything else, so they are never in the auction.
+ */
+const INVESTIGATION_RULES_RESERVE = 320;
+
+/**
+ * Packing order, and it is an order of DEPENDENCE, not of interest.
+ *
+ * "previously gathered" used to sit second-from-last, which on a normal
+ * follow-up turn meant it got whatever survived the blocks above it —
+ * observed live at TWO tokens, out of the 1447 the recall had produced.
+ * The turn was then told, at the top of its own prompt, that the findings
+ * it must not re-derive were in a block that had been clipped to nothing.
+ * It re-investigated, the repeat guard refused the searches, and the turn
+ * burned five identical continuation rounds getting nowhere.
+ *
+ * So the carried investigation now outranks current retrieval. Retrieval
+ * can be re-derived from the index at any time; the gathered block is the
+ * only record that earlier turns of THIS conversation ever read anything,
+ * and it is what every no-re-investigation rule points at.
+ */
+const EXECUTE_CONTEXT_PRIORITY = [
+  "answer-only rules",
+  "recovery plan",
+  // Small, and supplied by the USER rather than gathered on their behalf.
+  // Cheap enough that ranking them first costs the blocks below almost
+  // nothing, and losing one of them is never the right saving.
+  "attachments",
+  "go-ahead",
+  "asked-about",
+  // The plan the previous turn proposed, on the turn that implements it.
+  // As user-supplied as a go-ahead: the user read it and said "do it".
+  "plan handoff",
+  // The map the USER pinned with /context, and the reason they pinned it:
+  // every later turn is supposed to run against this feature rather than
+  // rediscover it. It was last in this list, which meant the one block the
+  // whole workflow depends on was the first one a busy turn dropped. It is
+  // bounded by construction — 12 files, 12 symbols — so ranking it here
+  // costs the blocks below it very little.
+  "session feature",
+  // The evidence the investigation rules depend on, before anything the
+  // model could reconstruct for itself.
+  "previously gathered",
+  "feature wiki",
+  "session memory",
+  // Re-derivable from the index on demand, so it yields first when the
+  // budget is tight — unlike the carried blocks, which exist nowhere else.
+  "knowledge context",
+  "skills",
+] as const;
+
+/**
+ * Packs the turn's context, then writes the investigation rules to match
+ * what SURVIVED the packing.
+ *
+ * The two have to be decided in this order. A rule that says "the findings
+ * are above, do not gather them again" is only true if the findings are
+ * still above after the budget has had its way with them — and when it is
+ * false it is worse than absent, because the repeat guard is seeded from
+ * the same belief and will refuse the model the very lookups it now has no
+ * carried answer for. Rule, evidence, and guard are one decision here, so
+ * they are made in one place from one fact: what actually shipped.
+ */
+export function buildExecuteContext(input: {
+  sections: ContextSection[];
+  inlinedPaths: string[];
+  /** Name the user pinned with /context, if this conversation has one. */
+  pinnedFeature?: string | null;
+  /** How this turn relates to the last; `correct` softens the carried rule. */
+  stance?: TurnStance;
+  /** What the user named this turn, for the correction variant to point at. */
+  named?: NamedTargets;
+}): { sections: ContextSection[]; carriedInvestigation: boolean } {
+  const packed = compactExecuteContext(
+    input.sections,
+    EXECUTE_CONTEXT_TOKENS - INVESTIGATION_RULES_RESERVE
+  );
+  const survived = (name: string): boolean =>
+    (packed.find((section) => section.name === name)?.text ?? "").trim()
+      .length > 0;
+  const gathered = survived("previously gathered");
+  const hasFlow = survived("feature wiki");
+  // Only an anchor the model can actually see is an anchor.
+  const pinned =
+    input.pinnedFeature && survived("session feature")
+      ? input.pinnedFeature
+      : undefined;
+  const carriedInvestigation = gathered || hasFlow || Boolean(pinned);
+  const rules = investigationRules({
+    first: !carriedInvestigation,
+    // Only claim files the model can actually see the text of.
+    inlined: gathered ? input.inlinedPaths : [],
+    hasFlow,
+    pinnedFeature: pinned,
+    stance: input.stance,
+    named: input.named,
+  });
+  return {
+    sections: [{ name: "investigation rules", text: rules }, ...packed],
+    carriedInvestigation,
+  };
+}
+
+export function compactExecuteContext(
+  sections: ContextSection[],
+  budget = EXECUTE_CONTEXT_TOKENS
+): ContextSection[] {
+  const byName = new Map(sections.map((section) => [section.name, section]));
+  const packed = new Map<string, string>();
+  let remaining = budget;
+
+  for (const name of EXECUTE_CONTEXT_PRIORITY) {
+    const section = byName.get(name);
+    if (!section?.text || remaining <= 0) continue;
+    const text =
+      approxTokens(section.text) <= remaining
+        ? section.text
+        : clipToTokens(section.text, remaining);
+    if (!text) continue;
+    packed.set(name, text);
+    remaining -= approxTokens(text);
+  }
+
+  return sections
+    .map((section) => ({ ...section, text: packed.get(section.name) ?? "" }))
+    .filter((section) => section.text.length > 0);
+}
 
 /** Diff text handed to the wiki compiler; the page is a summary, not a patch. */
 const WIKI_DIFF_CHARS = 14_000;
 
 /** Cap for the feature-wiki block; a page is compact by construction. */
 function wikiTokensFor(intentKind: string): number {
-  if (intentKind === "question" || intentKind === "chat") return 900;
-  if (intentKind === "command") return 500;
-  return 1600;
+  if (intentKind === "question" || intentKind === "chat") return 400;
+  if (intentKind === "command") return 300;
+  return 700;
 }
 
 function workingMemoryTokensFor(intentKind: string): number {
-  if (intentKind === "question" || intentKind === "chat") return 900;
-  if (intentKind === "command") return 600;
-  if (intentKind === "feature" || intentKind === "refactor") return 3600;
-  return 2600;
+  if (intentKind === "question" || intentKind === "chat") return 350;
+  if (intentKind === "command") return 300;
+  if (intentKind === "feature" || intentKind === "refactor") return 1000;
+  return 800;
 }
 
-function sessionTokensFor(intentKind: string): number {
-  if (intentKind === "feature" || intentKind === "refactor") return 1100;
-  return 900;
-}
-
-/** What a recalled memory chunk was about, for the console line. */
-function chunkLabel(preview: string): string {
-  const lines = preview.split("\n");
-  const work = lines.find((line) => line.startsWith("Work: "));
-  const summary = lines.find((line) => line.startsWith("Summary: "));
-  const head = (work ?? summary ?? lines[0] ?? "")
-    .replace(/^(Work|Summary):\s*/, "")
-    .replace(/^request:\s*/i, "")
-    .split(" · ")[0]
-    ?.trim();
-  if (!head) return "";
-  return head.length > 60 ? `${head.slice(0, 57)}…` : head;
-}
 
 /**
  * What a chat turn actually carries.
@@ -3735,8 +4628,8 @@ function chunkLabel(preview: string): string {
  * of the ceremony. What survives is the enforced half plus the four
  * behaviours that stop a turn ending wrong:
  *
- * - KNOWLEDGE FIRST, because the index is the thing Atelier has and a stock
- *   CLI does not, and the model will not reach for it unprompted.
+ * - REUSE FIRST / KNOWLEDGE GAPS, because assembled evidence should remove
+ *   investigation rounds, while the live index fills only what is missing.
  * - PLAN, because a blocking completion hook reads the plan's steps.
  * - TARGETED EDITS / LAYOUT / MODULARITY, because those hooks DO block, and
  *   a model that was not told loops against them.
@@ -3758,36 +4651,43 @@ function chunkLabel(preview: string): string {
  * Byte-stable — it rides in the static half of the prompt for caching.
  */
 export const FAST_RULES =
-  "KNOWLEDGE FIRST: call retrieve_knowledge / query_knowledge_graph / " +
-  "search_symbols before falling back to search_workspace or reading " +
-  "files — the index is live and current. Once you know the exact string " +
-  "or filename you want, use your fastest text-search tool (Grep/Glob " +
-  "where available, else search_text) and run several searches in ONE " +
-  "message rather than one per turn. The DIRECTORY MAP above lists real " +
-  "paths and file names: read from it instead of guessing a path or " +
-  "listing folders one by one.\n" +
-  "PLAN (a blocking completion hook reads it): for a change task, call " +
-  "set_plan once you know the shape of the work and before editing, naming " +
-  "the files each step touches. Mark each step done as its work completes, " +
-  "and do not write the final report until every step is done. Call " +
-  "set_plan again with ONLY new steps to append; it cannot erase, reorder " +
-  "or complete existing ones.\n" +
-  "GROUNDED SEARCH (enforced by a blocking hook): search for words the user " +
-  "used, a name from the DIRECTORY MAP, or a string you have actually read. " +
-  "Do not invent an identifier you expect this codebase to contain and then " +
-  "grep for it — on a large repo that is a full scan that finds nothing. The " +
-  "first such search is refused. Start from the thing the user named.\n" +
+  "REUSE PROVIDED EVIDENCE FIRST: start from FEATURE WIKI, PREVIOUSLY " +
+  "GATHERED CONTEXT, TASK CONTEXT, and IMPACT RADIUS already in this " +
+  "prompt. Inlined current source and verified flow descriptions count as " +
+  "work already completed. Do not retrieve, search, list, or read again " +
+  "for a fact or exact range they provide; this also satisfies a selected " +
+  "skill's read/study step for that evidence. Use tools only for a concrete " +
+  "missing detail, a source marked changed or stale, lines not included, " +
+  "or post-edit verification.\n" +
+  "KNOWLEDGE GAPS: when supplied evidence does not settle a needed detail, " +
+  "call retrieve_knowledge / query_knowledge_graph / search_symbols before " +
+  "falling back to search_workspace or reading files — the index is live " +
+  "and current. Once you know the exact string or filename you want, use " +
+  "your fastest text-search tool (Grep/Glob where available, else " +
+  "search_text) and run several searches in ONE message rather than one " +
+  "per turn. The DIRECTORY MAP above lists real paths and file names: read " +
+  "from it instead of guessing a path or listing folders one by one.\n" +
+  "PLAN: for a multi-step change, call set_plan once you know the shape of " +
+  "the work, naming the files each step touches, and mark steps done as " +
+  "their work completes — the plan rail shows the user your progress. It " +
+  "never blocks an edit; a one-line fix needs no plan. Call set_plan again " +
+  "with ONLY new steps to append; it cannot erase, reorder or complete " +
+  "existing ones.\n" +
+  "GROUNDED SEARCH: search for words the user used, a name from the " +
+  "DIRECTORY MAP, or a string you have actually read. Do not invent an " +
+  "identifier you expect this codebase to contain and then grep for it — on " +
+  "a large repo that is a full scan that finds nothing. Start from the " +
+  "thing the user named.\n" +
   "IMPACT RADIUS: when the prompt carries one, it already lists who calls " +
   "and imports your targets, which flows ride on them, and which tests " +
   "cover them — keep those aligned with your change instead of " +
   "rediscovering them. impact_of_edit answers a symbol- or line-precise " +
   "question the block does not.\n" +
-  "TARGETED EDITS (enforced by a blocking hook): use replace_code / " +
-  "replace_many for the lines that change. write_file is refused when most " +
-  "of the file it sends back is the file that was already there — that is a " +
-  "patch, and restating the rest is how untouched lines get silently " +
-  "dropped. A genuine full rewrite is allowed on the repeat call.\n" +
-  "FLEX-FIRST UI LAYOUT (enforced by a blocking hook): center and align UI " +
+  "TARGETED EDITS: use replace_code / replace_many for the lines that " +
+  "change; keep write_file for new files and genuine rewrites — restating " +
+  "a whole file to change three lines is how untouched lines get silently " +
+  "dropped.\n" +
+  "FLEX-FIRST UI LAYOUT: center and align UI " +
   "with a flex container (display: flex + align-items + justify-content, or " +
   "the framework's utility classes), not grid, absolute positioning, " +
   "transforms, or spacer margins. Keep a non-flex layout only where the " +
@@ -3833,6 +4733,158 @@ export const FAST_RULES =
  * Rides per-turn, after the static rules, so the cached prefix is untouched
  * on every other turn.
  */
+/**
+ * The no-re-investigation rule, in the two forms a conversation needs.
+ *
+ * Atelier already carries the investigation forward — working memory, the
+ * feature wiki's Flow, session memory — and each of those blocks asks the
+ * model, politely and in passing, to reuse what it holds. Politely and in
+ * passing loses to a model's reflex to go and look, so turn four re-greps
+ * what turn one already established and pays full price for an answer it
+ * was handed at the top of its own prompt.
+ *
+ * So it is stated once, first, and as a rule. The FIRST turn investigates
+ * and owes an end-to-end flow for its trouble — the artifact that makes
+ * every later turn's investigation unnecessary. Every turn after it reads
+ * only what it is about to change. The rule is enforced, not advised: the
+ * repeat guard is seeded with those earlier findings, so a rerun of one is
+ * refused at the tool boundary with the answer attached.
+ *
+ * Rides per-turn, so the cached static prefix is untouched.
+ */
+export function investigationRules(input: {
+  /** Nothing carried in: this turn is the one that gets to look around. */
+  first: boolean;
+  /** Files whose current bytes are already inlined in this turn's context. */
+  inlined: string[];
+  /** Whether a compiled feature Flow rode along. */
+  hasFlow: boolean;
+  /** Feature the user pinned with /context, when its map shipped this turn. */
+  pinnedFeature?: string;
+  /** `correct`: the last attempt was stopped or called wrong. */
+  stance?: TurnStance;
+  /** What the user named this turn. */
+  named?: NamedTargets;
+}): string {
+  // A stopped or corrected attempt inverts the rule below. Everything the
+  // carried blocks hold was gathered by a turn the user has just rejected:
+  // it is a record of what was TRIED, and telling the next turn to "treat
+  // it as the answer" is how the same wrong file was edited three turns in
+  // a row. The target is re-derived from the user's own words, and the
+  // one thing that stays refused is silently starting over.
+  // (Only once something HAS been carried: a first turn that opens with
+  // "wait, this is wrong" still owes the end-to-end flow below.)
+  if (input.stance === "correct" && !input.first) {
+    const named = input.named ? describeNamedTargets(input.named) : "";
+    return (
+      "THE LAST ATTEMPT WAS STOPPED OR CALLED WRONG — RE-ANCHOR BEFORE " +
+      "YOU ACT.\n" +
+      "The user stopped the previous attempt or says its result is wrong. " +
+      "Everything carried below (files it read or edited, its plan, its " +
+      "\"changed\"/\"touched\" lists) is evidence of what was TRIED, not of " +
+      "what is right: do not resume it, and do not treat any file it " +
+      "touched as the target because it was touched.\n" +
+      "The target is what the user named" +
+      (named ? `: ${named}. ` : " in the latest message. ") +
+      "Look at exactly that FIRST — read_file the named file, search_text " +
+      "the quoted text. Only then plan. Do not narrate what you take the " +
+      "request to mean; if, having looked, the right place is elsewhere, " +
+      "say so briefly in the final report.\n" +
+      "Earlier searches and their hits are listed under PREVIOUSLY GATHERED " +
+      "CONTEXT: use those results rather than re-running the searches. " +
+      "Reading the files they point at IS allowed on this turn.\n" +
+      VERIFICATION_SCALE_RULE
+    );
+  }
+  // A pinned feature IS the end-to-end map, gathered on purpose by a
+  // command the user ran for exactly this reason. A turn that has one is
+  // never a first turn, whatever else did or did not survive packing.
+  if (input.pinnedFeature) {
+    return (
+      `ANCHORED TO THE PINNED FEATURE "${input.pinnedFeature}".\n` +
+      "The user ran /context for this feature, so its end-to-end map is " +
+      "already in this prompt under SESSION FEATURE CONTEXT: the files, the " +
+      "symbols, and the roles they play. That map is this conversation's " +
+      "frame. Work inside it.\n" +
+      "DO NOT RE-INVESTIGATE. Do not text-search to rediscover the shape of " +
+      "this feature, do not re-derive its file list, and do not re-read a " +
+      "file to confirm something the map already states. Re-running a " +
+      "search an earlier turn already ran is REFUSED at the tool boundary.\n" +
+      (input.inlined.length > 0
+        ? "You already hold the CURRENT text of: " +
+          `${input.inlined.slice(0, 12).join(", ")}` +
+          (input.inlined.length > 12 ? ", …" : "") +
+          ". Do not read these again.\n"
+        : "") +
+      "What you may still do: read the exact file you are about to edit at " +
+      "the range you are about to change, follow ONE named hop the map " +
+      "omits, and run verification. If the map is genuinely missing " +
+      "something this turn needs, name it in one line, gather only that, " +
+      "and say so — the user can run /context_update to fix the map " +
+      "properly. Silently starting over is the failure this rule stops.\n" +
+      VERIFICATION_SCALE_RULE
+    );
+  }
+  if (input.first) {
+    return (
+      "INVESTIGATE ONCE — THIS IS THAT TURN.\n" +
+      "Nothing has been gathered for this conversation yet, so this is the " +
+      "only turn that may look around broadly. Spend it well, and finish " +
+      "the investigation with an END-TO-END FLOW of the feature you were " +
+      "asked about: every hop from the user-facing entry point to the data " +
+      "and back — UI component, handler, route, service, store, schema — " +
+      "each named as `path:line`. Include the hops you did NOT change.\n" +
+      "State it in your report under a line beginning `FLOW:`. It is " +
+      "compiled into the feature wiki and shipped to every later turn, " +
+      "which is what lets them start from it instead of repeating this. " +
+      "A flow with a hop you never traced is worse than a short one — say " +
+      "`unverified` next to any step you inferred rather than read.\n" +
+      VERIFICATION_SCALE_RULE
+    );
+  }
+  const held =
+    input.inlined.length > 0
+      ? "You already hold the CURRENT text of: " +
+        `${input.inlined.slice(0, 12).join(", ")}` +
+        (input.inlined.length > 12 ? ", …" : "") +
+        ". Do not read these again.\n"
+      : "";
+  return (
+    "DO NOT RE-INVESTIGATE.\n" +
+    "This conversation has already been investigated and the findings are " +
+    "in this prompt: " +
+    (input.hasFlow ? "the FEATURE WIKI Flow, " : "") +
+    "PREVIOUSLY GATHERED CONTEXT, and session memory. Treat them as the " +
+    "answer, not as a hint about where to look. Re-running a search an " +
+    "earlier turn already ran is REFUSED at the tool boundary, and the " +
+    "refusal will hand you back the result you already had.\n" +
+    held +
+    "What you may still do: read the exact file you are about to edit, at " +
+    "the range you are about to change, and run verification. What you may " +
+    "not do: re-derive the shape of the feature, re-grep for identifiers " +
+    "the carried context already located, or re-read a file to confirm " +
+    "something the flow already states.\n" +
+    "If the carried flow is genuinely missing a hop this turn needs, name " +
+    "the missing hop in one line, gather ONLY that hop, and continue. " +
+    "Silently starting over is the failure this rule exists to stop.\n" +
+    VERIFICATION_SCALE_RULE
+  );
+}
+
+/**
+ * Rides with every variant above. A one-line label change once got nine
+ * test rewrites, eleven test runs and a production build — none of which
+ * can tell a right label from a wrong one. Stated once, and enforced at
+ * the tool boundary for copy-only diffs by the change-scale guard.
+ */
+const VERIFICATION_SCALE_RULE =
+  "VERIFICATION SCALES WITH THE CHANGE. A copy/label/string change is " +
+  "verified by the typecheck plus ONE existing test that covers the file, " +
+  "or a preview_test asserting the NEW text — never a new test file, never " +
+  "a build. A preview assertion on text that was already on the page " +
+  "before your edit verifies nothing. Reserve suites and builds for changes " +
+  "that move logic.\n";
+
 export const ANSWER_ONLY_RULES =
   "THIS TURN IS A QUESTION — ANSWER IT, DO NOT IMPLEMENT.\n" +
   "The user asked to be told something, not to have something changed. " +
@@ -3840,7 +4892,16 @@ export const ANSWER_ONLY_RULES =
   "NOT call set_plan and do NOT open an execution timeline: there is no " +
   "work to check off, and a checklist here is noise over the answer. Do " +
   "NOT edit, create, move, or delete any file, and do not run commands " +
-  "that change state. The AUTONOMOUS EXECUTION and TIMELINE EXECUTION " +
+  "that change state.\n" +
+  "READ-ONLY COMMANDS ARE ALLOWED AND OFTEN THE FASTEST ANSWER. " +
+  "`git show`, `git log`, `git diff`, `git status`, and the like change " +
+  "nothing and are not covered by the sentence above. When the question " +
+  "is about history, a branch, or what is actually committed, run the one " +
+  "command that settles it instead of inferring the answer from the " +
+  "working tree — grepping files cannot tell you what a commit contains, " +
+  "and repeating the grep will not make it. Never end a turn saying you " +
+  "could have run a read-only check: run it.\n" +
+  "The AUTONOMOUS EXECUTION and TIMELINE EXECUTION " +
   "clauses above are suspended for this turn — ending without a change is " +
   "the correct outcome here, not a turn that stopped short.\n" +
   "If the honest answer is that something is wrong or unfinished, say " +
@@ -3865,7 +4926,7 @@ export const ANSWER_ONLY_RULES =
  * stay cacheable as a prefix.
  */
 export const MODULARITY_RULE =
-  "MODULARITY RULE (enforced by a blocking hook): ONE file = ONE " +
+  "MODULARITY RULE: ONE file = ONE " +
   "top-level function/component/class. Split helpers into " +
   "one-file-per-function folders with an index.ts barrel. Types, " +
   "interfaces, and constants may share a file.\n";
@@ -3886,7 +4947,51 @@ const CODEX_MCP_RULES =
  * mistaken for one.
  */
 const GO_AHEAD =
-  /^(ok(ay)?|yes|yep|yeah|sure|do it|just do it|go|go on|go ahead|go for it|fix it|fix that|proceed|continue|implement it|apply it|make it so|please do|do that|sounds good|lgtm)\b[\s.!,]*$/i;
+  /^(ok(ay)?|yes|yep|yeah|sure|do it|just do it|go|go on|go ahead|go for it|fix it|fix that|proceed|continue|implement(?: it| this| that| the plan)?|apply it|make it so|please do|do that|sounds good|lgtm)\b[\s.!,]*$/i;
+
+/**
+ * An approval that keeps talking: "implement, i'm expecting the fixed
+ * version", "go ahead and do the plan". The opener is the approval; the
+ * rest is commentary. Bounded in length so a genuinely new request that
+ * happens to start with "implement" is not read as one.
+ */
+const GO_AHEAD_OPENER =
+  /^(?:ok(?:ay)?[,.]?\s+)?(?:yes[,.]?\s+)?(?:please\s+)?(?:implement|go ahead|proceed|do it|make it so)\b/i;
+const GO_AHEAD_MAX_WORDS = 14;
+
+/**
+ * `answer` is the previous assistant turn: an opener-only approval
+ * ("implement the login page") is a go-ahead only when it is about that
+ * answer — shares a subject word with it — or names no subject at all.
+ */
+export function isGoAhead(human: string, answer = ""): boolean {
+  const text = human.trim();
+  if (GO_AHEAD.test(text)) return true;
+  const words = text.match(/\S+/g)?.length ?? 0;
+  if (!GO_AHEAD_OPENER.test(text) || words > GO_AHEAD_MAX_WORDS) return false;
+  return !answer || sharesSubject(text, answer);
+}
+
+const SUBJECT_STOPWORDS = new Set([
+  "implement", "please", "that", "this", "with", "from", "then", "also", "just",
+  "what", "your", "plan", "version", "fixed", "expecting", "expect", "said",
+  "clear", "because", "have", "already", "now", "again", "same", "into",
+]);
+
+/** Whether a message and an earlier answer name at least one thing in common. */
+export function sharesSubject(human: string, answer: string): boolean {
+  const words = new Set(
+    (human.toLowerCase().match(/[a-z][a-z0-9_.-]{3,}/g) ?? []).filter(
+      (word) => !SUBJECT_STOPWORDS.has(word)
+    )
+  );
+  if (words.size === 0) return true;
+  const haystack = answer.toLowerCase();
+  for (const word of words) {
+    if (haystack.includes(word)) return true;
+  }
+  return false;
+}
 
 /** How much of the approved message to quote back. */
 const GO_AHEAD_CHARS = 2_000;
@@ -3917,17 +5022,17 @@ const ASKED_ABOUT_CHARS = 4_000;
  * which is why users end up pasting the whole suggestion back in by hand.
  */
 function goAheadBlock(ctx: TaskContext): string {
-  if (!GO_AHEAD.test(ctx.prompt.trim())) return "";
   const lastAnswer = [...ctx.priorTurns]
     .reverse()
     .find((turn) => turn.role === "assistant" && turn.text.trim());
   if (!lastAnswer) return "";
+  if (!isGoAhead(ctx.humanPrompt, lastAnswer.text)) return "";
   const text = lastAnswer.text.trim();
   const quoted =
     text.length <= GO_AHEAD_CHARS ? text : `…${text.slice(-GO_AHEAD_CHARS)}`;
   return (
     "THIS TURN IS A GO-AHEAD\n" +
-    `The user replied "${ctx.prompt.trim()}" — they are approving what you ` +
+    `The user replied "${clip(ctx.humanPrompt.trim(), 200)}" — they are approving what you ` +
     "just proposed, not opening a new subject. Your previous message ended " +
     "as follows; whatever you offered or deferred in it is the work to do " +
     "now. Do not substitute a different improvement, and do not ask again.\n" +
@@ -3935,6 +5040,115 @@ function goAheadBlock(ctx: TaskContext): string {
     `${quoted}\n` +
     "--- end ---\n" +
     "If it named more than one option, say in one line which you took.\n"
+  );
+}
+
+/**
+ * The previous turn's answer, when THIS turn is the one that implements it.
+ *
+ * A plan turn answered with the two right lines; the next message was a
+ * wordy, typo'd "Implmenet and i am expecting the ixed version…" — not a
+ * bare go-ahead, so nothing quoted the plan back, and session memory had
+ * clipped its middle. The implement turn built the wrong thing from the
+ * surviving tail. The signal is structural, not lexical: the last task
+ * was an ANSWER (question, ask mode, plan mode) and this one is work.
+ */
+function handoffAnswerFor(
+  ctx: TaskContext,
+  intent: Intent,
+  previous: { kind?: "answer" | "change"; status?: string } | null
+): string {
+  if (intent.kind !== "work") return "";
+  if (!previous || previous.kind !== "answer") return "";
+  if (ctx.opts.turnMode === "ask") return "";
+  const last = [...ctx.priorTurns]
+    .reverse()
+    .find((turn) => turn.role === "assistant" && turn.text.trim());
+  const answer = last?.text.trim() ?? "";
+  if (!answer) return "";
+  // Only an answer that PROPOSED something is a plan: it names files or
+  // lays out steps. A one-line factual reply is not handed off.
+  const proposes =
+    extractRefs(answer, 1).length > 0 || /^\s*(?:[-*]|\d+[.)])\s+\S/m.test(answer);
+  if (!proposes) return "";
+  // …and only when this message is about it: a go-ahead (spelled however
+  // — "Implmenet and i am expecting the ixed version" is one), a
+  // correction, or a request that shares its subject. "add a footer" after
+  // a plan for the login page is a new request, not its implementation.
+  if (
+    !isGoAhead(ctx.humanPrompt, answer) &&
+    !hasApprovalVerb(ctx.humanPrompt) &&
+    ctx.stance !== "correct" &&
+    !sharesSubject(ctx.humanPrompt, answer)
+  ) {
+    return "";
+  }
+  return answer;
+}
+
+const APPROVAL_VERBS = ["implement", "proceed", "continue", "go ahead", "do it"];
+
+/**
+ * An approval verb anywhere in the message, misspellings included: the
+ * hand-off that failed in the field was lost to "Implmenet". Words of 6+
+ * letters match within an edit distance of 2 (3 for 10+).
+ */
+export function hasApprovalVerb(human: string): boolean {
+  const lower = human.toLowerCase();
+  if (/\b(?:go ahead|do it)\b/.test(lower)) return true;
+  const words = lower.match(/[a-z]{5,}/g) ?? [];
+  return words.some((word) =>
+    APPROVAL_VERBS.some(
+      (verb) =>
+        !verb.includes(" ") &&
+        editDistance(word, verb) <= (verb.length >= 10 ? 3 : 2)
+    )
+  );
+}
+
+function editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = prev[0]!;
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const temp = prev[j]!;
+      prev[j] = Math.min(
+        prev[j]! + 1,
+        prev[j - 1]! + 1,
+        diagonal + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+      diagonal = temp;
+    }
+  }
+  return prev[b.length]!;
+}
+
+/** How much of the handed-off answer to quote. */
+const HANDOFF_CHARS = 4_000;
+
+function planHandoffBlock(
+  ctx: TaskContext,
+  intent: Intent,
+  answer: string
+): string {
+  if (!answer) return "";
+  const correction = ctx.stance === "correct";
+  return (
+    "THE PLAN YOU PROPOSED LAST TURN\n" +
+    (correction
+      ? "The user's message is a CORRECTION to it — read their words for " +
+        "what to change; the parts they did not object to stand.\n"
+      : "The user's message is the go-ahead for it. Start from the files " +
+        "and lines it names; do not re-derive the target, and do not " +
+        "substitute a different improvement.\n") +
+    "--- your previous answer ---\n" +
+    `${quoteEnds(answer, HANDOFF_CHARS)}\n` +
+    "--- end ---\n" +
+    (intent.targets.length > 0
+      ? `Files it names: ${intent.targets.join(", ")}.\n`
+      : "")
   );
 }
 
@@ -3951,12 +5165,21 @@ function attachmentBlock(ctx: TaskContext): string {
   if (ctx.imagePaths.length === 0) return "";
   const lines = ctx.imagePaths.map((p) => `- ${p}`);
   const shown = ctx.images.length > 0;
+  const focused = focusedLiterals(ctx.prompt);
   return (
     "IMAGES IN THIS CONVERSATION\n" +
     `${lines.join("\n")}\n` +
     (shown
       ? "The image(s) above are attached to this message and you can see " +
-        "them already.\n"
+        "them already.\n" +
+        SCREENSHOT_SUBJECT_NOTE +
+        (focused.length > 0
+          ? "The user highlighted region(s) of the screenshot; the text " +
+            "inside them is: " +
+            focused.map((text) => `"${text}"`).join(", ") +
+            ". That text is the subject. search_text for it before " +
+            "anything else.\n"
+          : "")
       : "These were attached on an earlier turn and are NOT in front of " +
         "you. If this request refers to what was shown — 'the image', " +
         "'the screenshot', 'the error above' — call view_image on the " +
@@ -3964,6 +5187,21 @@ function attachmentBlock(ctx: TaskContext): string {
         "description of it.\n")
   );
 }
+
+/**
+ * Rides with every screenshot, on every provider. Only the Claude path
+ * used to carry the annotation note, inside the image message itself;
+ * Codex and Ollama got the picture with no word about how to read it and
+ * grounded "this" on the page dump instead.
+ */
+const SCREENSHOT_SUBJECT_NOTE =
+  "The screenshot and the user's words define the SUBJECT of this request. " +
+  "The hidden page-preview block is supporting evidence: use its quoted " +
+  "labels to locate code, never its selectors, classes or console URLs. " +
+  "When the request says 'this', 'here' or 'the label' beside a picture, " +
+  "search_text the exact on-screen text it points at before planning — " +
+  "do not narrate what you take it to mean. If any image " +
+  "carries a drawn box, arrow or circle, the marked part IS the subject.\n";
 
 /**
  * Rides with every attached image.
@@ -4114,7 +5352,8 @@ function buildSummary(
   validation: ValidationResult[],
   plan: Plan,
   reviewVerdict: "pass" | "fail" | null,
-  gateStillOpen = false
+  gateStillOpen = false,
+  notDelivered: string[] = []
 ): string {
   const parts = [intent.summary];
   if (changedFiles.length > 0) {
@@ -4124,6 +5363,12 @@ function buildSummary(
     );
   } else {
     parts.push("no file changes");
+  }
+  // Carried into the next turn's memory: what this one left undone is
+  // the first thing a "continue" should pick up, not something it has to
+  // rediscover from the user's complaint.
+  if (notDelivered.length > 0) {
+    parts.push(`NOT DELIVERED: ${notDelivered.slice(0, 6).join("; ")}`);
   }
   // This line is the durable record: it goes into session memory and comes
   // back as recall on the NEXT turn. Left neutral, "no file changes" reads
@@ -4173,6 +5418,22 @@ function emptyRetrieval(): RetrievalResult {
   return { strategy: "skipped", chunks: [], graphNodes: [], features: [] };
 }
 
+export function investigationTargets(
+  currentTargets: string[],
+  scopedTargets: string[],
+  retrievedFiles: string[]
+): string[] {
+  const currentFiles = currentTargets.filter(isFilePath);
+  const scopedFiles = scopedTargets.filter(isFilePath);
+  const entryPoints =
+    currentFiles.length > 0
+      ? currentFiles
+      : scopedFiles.length > 0
+        ? scopedFiles
+        : retrievedFiles;
+  return [...new Set(entryPoints.filter(isFilePath))].slice(0, IMPACT_TARGETS);
+}
+
 function emptyRadius(targets: string[] = []): ImpactRadius {
   return {
     targets,
@@ -4206,12 +5467,17 @@ function extractJson(text: string): unknown {
  * and a bare title is not a description of what changed.
  */
 function recordSteps(steps: Plan["steps"]): TaskRecord["steps"] {
-  return steps.map((step) => ({
-    title: step.title,
-    detail: step.detail,
-    files: step.files,
-    status: step.status,
-  }));
+  return steps.map((step) => {
+    const extra = step as { note?: string; verification?: string };
+    return {
+      title: step.title,
+      detail: step.detail,
+      files: step.files,
+      status: step.status,
+      ...(extra.note ? { note: extra.note } : {}),
+      ...(extra.verification ? { verification: extra.verification } : {}),
+    };
+  });
 }
 
 function asStringArray(value: unknown): string[] {
@@ -4315,11 +5581,7 @@ function intentAnchor(priorTurns: TaskContext["priorTurns"]): string {
  * ends so an anchor never degenerates into only the answer's preamble.
  */
 function clipConversationTurn(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  const marker = " … [middle omitted] … ";
-  const available = maxChars - marker.length;
-  const head = Math.floor(available * 0.4);
-  return `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`;
+  return clipKeepingRefs(text, maxChars);
 }
 
 /**
@@ -4335,6 +5597,27 @@ function clipConversationTurn(text: string, maxChars: number): string {
  * `targets` is deliberately literal: a path in the prompt is a path the
  * user named. Guessing beyond that is what retrieval is for.
  */
+/**
+ * The composer's trailer on a screenshot send — "Screenshot context:\n-
+ * Current page preview URL: …" — is machine text that older renderers put
+ * OUTSIDE the hidden markers. It is not the user's words either.
+ */
+const SCREENSHOT_TRAILER =
+  /\n*Screenshot context:\n(?:- [^\n]*\n?)+/g;
+
+function humanText(visible: string): string {
+  return visible.replace(SCREENSHOT_TRAILER, "\n").trim();
+}
+
+/** A shell command that verifies code: tests, a typecheck, a linter. */
+const VERIFYING_COMMAND =
+  /\b(?:vitest|jest|mocha|ava|pytest|phpunit|rspec|go test|cargo test|dotnet test|tsc\b|typecheck|type-check|eslint|lint|npm test|pnpm test|yarn test|bun test|npm run test|pnpm run test)\b/i;
+
+function commandOf(input: unknown): string {
+  const command = (input as { command?: unknown } | undefined)?.command;
+  return typeof command === "string" ? command : "";
+}
+
 export function readIntent(prompt: string): Intent {
   const targets = [...prompt.matchAll(TARGET_PATH)]
     .map((match) => match[0].replace(/^@/, ""))
@@ -4585,6 +5868,42 @@ export function looksInformational(prompt: string): boolean {
     return false;
   }
   return STATEMENT_OPENERS.test(trimmed);
+}
+
+/**
+ * "plan" as a THING to build ("create a plan page") is a change request;
+ * only a bare plan, or one qualified as a plan, is a request for one.
+ */
+const PLAN_AS_ARTIFACT =
+  /\bplan\s+(?:page|screen|component|view|form|card|table|model|entity|schema|type|route|endpoint|module|class|object|record|tier|feature|picker|selector|editor|builder)s?\b/i;
+
+const PLAN_REQUEST =
+  /\b(?:create|make|write|draft|prepare|propose|produce|give|build|come\s+up\s+with)\s+(?:me\s+)?(?:a|an|the)?\s*(?:\w+\s+){0,3}?plan\b/i;
+
+const PLAN_QUALIFIER =
+  /\bplan\s+(?:only|first)\b|\bplanning[- ]only\b|\b(?:do\s+not|don'?t|without|no)\s+(?:implement|code|coding|change|modify|edit|touch)/i;
+
+/**
+ * A turn that asks for a PLAN — to study something and say how it would be
+ * done — and not for the change itself.
+ *
+ * The turn this exists for: "Understand and study this and create a plan
+ * …", six study steps, zero edits by design. It classified as work, so the
+ * plan owed a step per request bullet and every step owed an edit; the
+ * study finished with the timeline wedged and nothing checked. A plan-only
+ * turn keeps every tool — the model may still edit if asked to in the same
+ * breath — it only stops OWING a change.
+ */
+export function asksForPlanOnly(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) return false;
+  if (PLAN_QUALIFIER.test(text)) return true;
+  if (PLAN_AS_ARTIFACT.test(text)) return false;
+  const match = PLAN_REQUEST.exec(text);
+  if (!match) return false;
+  // "create a plan and implement it" asks for both; the change wins.
+  const after = text.slice(match.index + match[0].length);
+  return !/\b(?:and|then)\s+(?:implement|apply|execute|build|do)\b/i.test(after);
 }
 
 function looksLikeQuestion(prompt: string): boolean {

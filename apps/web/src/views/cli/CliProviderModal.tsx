@@ -1,22 +1,26 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bot, TerminalSquare } from "lucide-react";
+import { TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { CliProviderLogo } from "./CliProviderLogo";
 import {
   CLI_PROVIDERS,
-  createCliSession,
   useCliConsoleStore,
 } from "@/services/cli-console";
 
 /** Provider choice for every user-created CLI session. */
-export function CliProviderModal() {
+export function CliProviderModal(props: { onChoose: (providerId: string, title: string) => Promise<void> }) {
   const open = useCliConsoleStore((s) => s.providerPickerOpen);
   const close = useCliConsoleStore((s) => s.closeProviderPicker);
   const [starting, setStarting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [title, setTitle] = useState("");
 
   useEffect(() => {
     if (!open) return;
+    setTitle("");
+    setError(null);
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !starting) close();
     };
@@ -28,7 +32,8 @@ export function CliProviderModal() {
     setStarting(providerId);
     setError(null);
     try {
-      await createCliSession(providerId);
+      await props.onChoose(providerId, title.trim());
+      setTitle("");
       close();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -66,9 +71,22 @@ export function CliProviderModal() {
             </div>
             <div className="flex flex-col gap-2 p-4">
               <span className="text-xs text-muted-foreground">
-                Codex and Claude use separate session flows. Choose which CLI
-                should run this session.
+                Choose the terminal to open.
               </span>
+              <Input
+                type="text"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if (event.key === "Escape") close();
+                }}
+                disabled={starting !== null}
+                maxLength={120}
+                placeholder="Session title (optional)"
+                aria-label="Session title"
+                className="text-xs"
+              />
               {CLI_PROVIDERS.map((provider) => (
                 <Button
                   key={provider.id}
@@ -78,9 +96,9 @@ export function CliProviderModal() {
                   onClick={() => void choose(provider.id)}
                   className="h-auto justify-start gap-3 px-3 py-2.5 text-left"
                 >
-                  <Bot className="h-4 w-4 shrink-0 text-primary" />
+                  <CliProviderLogo providerId={provider.id} className="h-6 w-6" />
                   <span className="flex min-w-0 flex-col items-start">
-                    <span className="text-xs font-medium">{provider.label}</span>
+                    <span className="text-xs font-medium">{provider.label} CLI</span>
                     <span className="text-[11px] font-normal text-muted-foreground">
                       {starting === provider.id
                         ? `Starting ${provider.command}…`

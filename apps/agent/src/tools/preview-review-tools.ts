@@ -3,10 +3,16 @@ import path from "node:path";
 import {
   chromium,
   type Browser,
+  type BrowserContext,
   type ConsoleMessage,
   type LaunchOptions,
   type Page,
 } from "playwright-core";
+import type {
+  PreviewSession,
+  PreviewSessionStore,
+  PreviewSessionSummary,
+} from "../preview/preview-session-store.js";
 import type { ToolRegistry } from "./registry.js";
 
 interface PreviewReviewInput {
@@ -34,6 +40,8 @@ interface ViewportReview {
   height: number;
   url: string;
   status: number | null;
+  /** False when the app redirected away from the requested route. */
+  reachedRequestedRoute: boolean;
   screenshot: string;
   audit: BrowserAudit;
   /** The whole console stream, chronological — what DevTools would show. */
@@ -376,15 +384,21 @@ async function auditPage(page: Page): Promise<BrowserAudit> {
 
 export function registerPreviewReviewTools(
   registry: ToolRegistry,
-  workspaceRoot: string
+  workspaceRoot: string,
+  sessions?: PreviewSessionStore
 ): void {
   registry.register(
     "preview_review",
     async (input: PreviewReviewInput, ctx) => {
       const target = localPreviewUrl(input.url);
+      const session = sessions?.get(target.href) ?? null;
+      const sessionSummary = sessions?.summary(target.href) ?? null;
       let browser: Browser;
+      let reusedBrowser = false;
       try {
-        browser = await launchBrowser();
+        const acquired = await acquireBrowser();
+        browser = acquired.browser;
+        reusedBrowser = acquired.reused;
       } catch (error) {
         return {
           status: "failed",
@@ -395,7 +409,10 @@ export function registerPreviewReviewTools(
           error: errorText(error),
         };
       }
-      const closeOnAbort = () => void closeBrowser(browser);
+      let context: BrowserContext | null = null;
+      const closeOnAbort = () => {
+        if (context) void closeContext(context);
+      };
       ctx.signal.addEventListener("abort", closeOnAbort, { once: true });
       try {
         const reviews: ViewportReview[] = [];
@@ -406,11 +423,11 @@ export function registerPreviewReviewTools(
         for (const viewport of VIEWPORTS) {
           if (ctx.signal.aborted) throw new Error("Preview review cancelled");
           ctx.emitOutput(
-            `Reviewing ${target.href} at ${viewport.width}×${viewport.height}…\n`
+            `Reviewing ${target.href} at ${viewport.width}×${viewport.height}` +
+              `${session ? " with the signed-in Page preview session" : ""}…\n`
           );
-          const page = await browser.newPage({
-            viewport: { width: viewport.width, height: viewport.height },
-          });
+          context = await openContext(browser, viewport, session);
+          const page = await context.newPage();
           const consoleEntries: ConsoleEntry[] = [];
           const resolving: Array<Promise<void>> = [];
           const pageErrors: string[] = [];
@@ -481,6 +498,7 @@ export function registerPreviewReviewTools(
             ...viewport,
             url: liveUrl,
             status: response?.status() ?? null,
+            reachedRequestedRoute: sameRoute(target, liveUrl),
             screenshot: `.atelier/reviews/${fileName}`,
             audit,
             console: consoleEntries.map(formatConsoleEntry),
@@ -489,11 +507,8 @@ export function registerPreviewReviewTools(
             pageErrors: [...new Set(pageErrors)].slice(0, 30),
             failedRequests: [...new Set(failedRequests)].slice(0, 30),
           });
-          await withTimeout(
-            page.close().catch(() => undefined),
-            BROWSER_CLOSE_TIMEOUT_MS,
-            "page close timed out"
-          ).catch(() => undefined);
+          await closeContext(context);
+          context = null;
         }
 
         const totals = reviews.reduce(
@@ -510,17 +525,51 @@ export function registerPreviewReviewTools(
           totals.consoleWarnings === 0 &&
           totals.pageErrors === 0 &&
           totals.failedRequests === 0;
+        // A review that never landed on the requested route audited some other
+        // screen — usually the app's login redirect. That is not evidence
+        // about the change, however clean its console was.
+        const routeReached = reviews.every(
+          (review) => review.reachedRequestedRoute
+        );
+        const previewSession = {
+          applied: session !== null,
+          ...(sessionSummary
+            ? {
+                origin: sessionSummary.origin,
+                cookies: sessionSummary.cookies,
+                localStorageKeys: sessionSummary.localStorage,
+                sessionStorageKeys: sessionSummary.sessionStorage,
+                ageMs: sessionSummary.ageMs,
+              }
+            : {}),
+          note: session
+            ? "The signed-in Page preview session was reused, so this audit sees what the user sees."
+            : "No Page preview session was published, so this audit ran signed out. An app that gates its routes will have redirected to its login screen.",
+        };
         return {
-          status: consoleClean ? "ready" : "issues",
-          decision: consoleClean
-            ? "continue"
-            : "report-diagnostics-then-fix-or-skip",
+          status: !routeReached ? "off-route" : consoleClean ? "ready" : "issues",
+          decision: !routeReached
+            ? "report-route-not-reached-and-fail"
+            : consoleClean
+              ? "continue"
+              : "report-diagnostics-then-fix-or-skip",
           requestedUrl: target.href,
-          browser: "Playwright Chromium (headless)",
+          browser:
+            "Playwright Chromium (headless" +
+            (reusedBrowser ? ", warm" : "") +
+            (session ? ", signed-in Page preview session" : "") +
+            ")",
           reviewedAt: Date.now(),
-          message: consoleClean
-            ? "Preview is running and its browser diagnostics are clean."
-            : "Preview browser diagnostics found runtime failures. Report the exact evidence, then fix it when edits are allowed or skip the review.",
+          routeReached,
+          previewSession,
+          message: !routeReached
+            ? "The review browser was redirected away from the requested route and audited a " +
+              "different screen — see each viewport's url (a signed-out app lands on its login " +
+              "route). Report this as a blocking review failure, naming the URL actually reached: " +
+              "no evidence about the requested change was collected."
+            : consoleClean
+              ? "Preview is running and its browser diagnostics are clean."
+              : "Preview browser diagnostics found runtime failures. Report the exact evidence, then fix it when edits are allowed or skip the review.",
           totals,
           consoleClean,
           debug: {
@@ -556,7 +605,8 @@ export function registerPreviewReviewTools(
         };
       } finally {
         ctx.signal.removeEventListener("abort", closeOnAbort);
-        await closeBrowser(browser);
+        if (context) await closeContext(context);
+        releaseBrowser(browser);
       }
     }
   );
@@ -577,6 +627,145 @@ function localPreviewUrl(value: string): URL {
     throw new Error("preview_review only accepts local http(s) Page preview URLs");
   }
   return url;
+}
+
+/**
+ * Did the audit land where it was sent?
+ *
+ * Only path and query are compared: a client-side router may normalise a
+ * trailing slash or drop the hash, and neither is a different screen. A
+ * different path — /auth instead of /workspace — is.
+ */
+function sameRoute(requested: URL, actual: string): boolean {
+  let live: URL;
+  try {
+    live = new URL(actual);
+  } catch {
+    return false;
+  }
+  if (live.origin !== requested.origin) return false;
+  const normalise = (value: string) => value.replace(/\/+$/, "") || "/";
+  if (normalise(live.pathname) !== normalise(requested.pathname)) return false;
+  // Under a hash router the whole route lives in the fragment, so ignoring it
+  // would call #/auth the same screen as #/workspace. It only has to match
+  // when the requested URL carried one.
+  if (requested.hash && live.hash !== requested.hash) return false;
+  // A route that keeps every requested query parameter is the same screen,
+  // even when the app appended state of its own.
+  for (const [key, value] of requested.searchParams) {
+    if (live.searchParams.get(key) !== value) return false;
+  }
+  return true;
+}
+
+/**
+ * Opens the audit context, wearing the user's Page preview session when one
+ * has been published.
+ *
+ * Cookies and localStorage ride Playwright's own storageState. sessionStorage
+ * has no storageState slot, so it is seeded by an init script that runs before
+ * the app's first line of code — exactly when a token-reading bootstrap looks
+ * for it.
+ */
+async function openContext(
+  browser: Browser,
+  viewport: { width: number; height: number },
+  session: PreviewSession | null
+): Promise<BrowserContext> {
+  const context = await browser.newContext({
+    viewport: { width: viewport.width, height: viewport.height },
+    ...(session
+      ? {
+          storageState: {
+            cookies: session.cookies,
+            origins: [
+              { origin: session.origin, localStorage: session.localStorage },
+            ],
+          },
+        }
+      : {}),
+  });
+  if (session && session.sessionStorage.length > 0) {
+    await context.addInitScript(
+      (entries: Array<{ name: string; value: string }>) => {
+        const host = globalThis as unknown as {
+          __name?: <T>(value: T) => T;
+          sessionStorage?: { setItem(key: string, value: string): void };
+        };
+        host.__name ??= (value) => value;
+        try {
+          for (const entry of entries) {
+            host.sessionStorage?.setItem(entry.name, entry.value);
+          }
+        } catch {
+          // An opaque or storage-blocked origin simply keeps its own state.
+        }
+      },
+      session.sessionStorage
+    );
+  }
+  return context;
+}
+
+async function closeContext(context: BrowserContext): Promise<void> {
+  await withTimeout(
+    context.close().catch(() => undefined),
+    BROWSER_CLOSE_TIMEOUT_MS,
+    "context close timed out"
+  ).catch(() => undefined);
+}
+
+/**
+ * One Chromium, kept warm between reviews.
+ *
+ * Launching the browser is the single largest cost of a review — seconds,
+ * every time — while a fresh BrowserContext per viewport costs milliseconds
+ * and gives the same isolation the old per-review browser did. The instance
+ * is dropped after an idle window, so a finished session leaves nothing
+ * running.
+ */
+let warmBrowser: Browser | null = null;
+let warmBrowserIdleTimer: ReturnType<typeof setTimeout> | null = null;
+const BROWSER_IDLE_MS = 5 * 60_000;
+
+async function acquireBrowser(): Promise<{ browser: Browser; reused: boolean }> {
+  if (warmBrowserIdleTimer) {
+    clearTimeout(warmBrowserIdleTimer);
+    warmBrowserIdleTimer = null;
+  }
+  if (warmBrowser?.isConnected()) return { browser: warmBrowser, reused: true };
+  const browser = await launchBrowser();
+  browser.on("disconnected", () => {
+    if (warmBrowser === browser) warmBrowser = null;
+  });
+  warmBrowser = browser;
+  return { browser, reused: false };
+}
+
+function releaseBrowser(browser: Browser): void {
+  if (browser !== warmBrowser) {
+    void closeBrowser(browser);
+    return;
+  }
+  if (warmBrowserIdleTimer) clearTimeout(warmBrowserIdleTimer);
+  warmBrowserIdleTimer = setTimeout(() => {
+    const idle = warmBrowser;
+    warmBrowser = null;
+    warmBrowserIdleTimer = null;
+    if (idle) void closeBrowser(idle);
+  }, BROWSER_IDLE_MS);
+  warmBrowserIdleTimer.unref?.();
+}
+
+/** Test seam: drops the warm instance so a smoke run leaves nothing behind. */
+export async function shutdownPreviewReviewBrowser(): Promise<void> {
+  if (warmBrowserIdleTimer) {
+    clearTimeout(warmBrowserIdleTimer);
+    warmBrowserIdleTimer = null;
+  }
+  const browser = warmBrowser;
+  warmBrowser = null;
+  if (browser) await closeBrowser(browser);
 }
 
 async function launchBrowser(): Promise<Browser> {
@@ -614,7 +803,10 @@ async function launchBrowser(): Promise<Browser> {
     try {
       return await chromium.launch(attempt.options);
     } catch (error) {
-      errors.push(`${attempt.label}: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+      errors.push(
+        `${attempt.label}: ` +
+          (error instanceof Error ? error.message.split("\n")[0] : String(error))
+      );
     }
   }
   throw new Error(

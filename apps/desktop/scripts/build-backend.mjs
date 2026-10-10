@@ -86,6 +86,11 @@ await esbuild({
   entryPoints: [path.join(agentSrc, "knowledge", "parsing", "parse-worker.ts")],
   outfile: path.join(agentOut, "parse-worker.mjs"),
 });
+await esbuild({
+  ...shared,
+  entryPoints: [path.join(agentSrc, "knowledge", "embeddings", "embed-worker.mjs")],
+  outfile: path.join(agentOut, "embed-worker.mjs"),
+});
 // Stdio MCP server Codex spawns; must land beside utility-main.mjs so the
 // runtime resolver finds it without pnpm or tsx.
 await esbuild({

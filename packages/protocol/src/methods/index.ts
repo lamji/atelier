@@ -17,6 +17,7 @@ import { modelsMethods } from "./models.js";
 import { projectsMethods } from "./projects.js";
 import { contextMethods } from "./context.js";
 import { providersMethods } from "./providers.js";
+import { previewMethods } from "./preview.js";
 
 export const methods = {
   ...sessionMethods,
@@ -34,6 +35,7 @@ export const methods = {
   ...projectsMethods,
   ...contextMethods,
   ...providersMethods,
+  ...previewMethods,
 } as const;
 
 export type Methods = typeof methods;
@@ -65,9 +67,17 @@ export {
   projectsMethods,
   contextMethods,
   providersMethods,
+  previewMethods,
 };
 export {
   ProjectInfo,
   ProjectStatus,
   ProjectEndpoint,
 } from "./projects.js";
+export { PreviewConsoleCapture, PreviewConsoleEntry } from "./preview.js";
+export {
+  PreviewTestStep,
+  PreviewTestCase,
+  PreviewTestStepResult,
+  PreviewTestReport,
+} from "./preview.js";

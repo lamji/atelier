@@ -1,4 +1,4 @@
-import { approxTokens } from "@atelier/shared";
+import { approxTokens, stripHiddenContext } from "@atelier/shared";
 import type {
   ContextPurpose,
   LlmProvider,
@@ -62,6 +62,34 @@ export interface BuildLlmRequestInput {
   contextWindow?: number;
   elided?: number;
   resumes?: boolean;
+}
+
+export const PREVIEW_MARKUP_REQUEST_RE =
+  /\b(?:css|dom|html|markup|style|styles|stylesheet|stylesheets|styling|layout|class(?:es|name)?)\b/i;
+/**
+ * The raw markup and stylesheet sections of the hidden preview block, in
+ * the tagged layout the renderer emits (`apps/web/src/services/
+ * preview-context.ts`). The previous pattern matched a `HTML:` / `CSS:`
+ * layout that no longer exists, so for months NOTHING was stripped and
+ * every screenshot turn carried ~18K chars of markup the request never
+ * asked about — enough for a model to grep a Tailwind class out of it
+ * instead of the label the user pointed at.
+ */
+const PREVIEW_MARKUP_SECTION_RE =
+  /\r?\n?\r?\n<(page-html|page-css)>\r?\n[\s\S]*?\r?\n<\/\1>/g;
+
+/**
+ * The live preview always carries the visible labels, the focused elements
+ * and the console diagnostics. Raw HTML and CSS are much larger, so keep
+ * them only when the visible user request explicitly asks about markup or
+ * styling source.
+ */
+export function promptWithRelevantPreview(prompt: string): string {
+  if (!prompt.includes("<page-html>") && !prompt.includes("<page-css>")) {
+    return prompt;
+  }
+  if (PREVIEW_MARKUP_REQUEST_RE.test(stripHiddenContext(prompt))) return prompt;
+  return prompt.replace(PREVIEW_MARKUP_SECTION_RE, "");
 }
 
 export function buildLlmRequest(input: BuildLlmRequestInput): LlmRequest {

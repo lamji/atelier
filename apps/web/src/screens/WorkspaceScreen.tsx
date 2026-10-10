@@ -1,6 +1,3 @@
-// Monaco is bundled with THIS chunk, not the app entry: the workspace is
-// lazy-loaded, so login and the picker never pay for the editor.
-import "@/lib/monaco-setup";
 import { AppShell } from "@/views/shell/AppShell";
 
 /**

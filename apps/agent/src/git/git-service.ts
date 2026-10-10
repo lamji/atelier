@@ -4,8 +4,10 @@ import path from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import { simpleGit, type SimpleGit } from "simple-git";
 import type {
+  GitBlameLine,
   GitBranch,
   GitCommit,
+  GitCommitFile,
   GitLineStat,
   GitMergeState,
   GitRepo,
@@ -19,6 +21,14 @@ import {
   repoActivityAt,
   repoLabel,
 } from "./repo-locator.js";
+import {
+  EMPTY_TREE,
+  LOG_FORMAT,
+  assertRev,
+  parseBlame,
+  parseCommitFiles,
+  parseLog,
+} from "./history-parse.js";
 
 /** A resolved checkout: the client plus its absolute root. */
 interface ResolvedRepo {
@@ -326,7 +336,7 @@ export class GitService {
       this.numstat(root, false),
     ]);
     const branch = s.current ?? "HEAD";
-    const untrackedStats = this.untrackedLineStats(root, s.files);
+    const untrackedStats = await this.untrackedLineStats(root, s.files);
     return {
       branch,
       hasRemote: remotes.length > 0,
@@ -410,34 +420,34 @@ export class GitService {
    * entirely new, so every line is an addition. Bounded — see the
    * constants — because a fresh checkout can list thousands of them.
    */
-  private untrackedLineStats(
+  private async untrackedLineStats(
     root: string,
     files: Array<{ index: string; path: string }>
-  ): Map<string, GitLineStat> {
+  ): Promise<Map<string, GitLineStat>> {
     const out = new Map<string, GitLineStat>();
     let seen = 0;
     for (const f of files) {
       if (f.index !== "?") continue;
       if (++seen > MAX_UNTRACKED_COUNTED) break;
-      const stat = this.countNewFileLines(root, f.path);
+      const stat = await this.countNewFileLines(root, f.path);
       if (stat) out.set(toPosix(f.path), stat);
     }
     return out;
   }
 
   /** Line count of an untracked file, or a binary/too-big marker. */
-  private countNewFileLines(
+  private async countNewFileLines(
     root: string,
     repoRel: string
-  ): GitLineStat | undefined {
+  ): Promise<GitLineStat | undefined> {
     const abs = path.join(root, repoRel);
     try {
-      const stat = fs.statSync(abs);
+      const stat = await fs.promises.stat(abs);
       if (stat.isDirectory()) return undefined;
       if (stat.size > MAX_UNTRACKED_BYTES) {
         return { added: 0, removed: 0, binary: true };
       }
-      const buffer = fs.readFileSync(abs);
+      const buffer = await fs.promises.readFile(abs);
       // Same test git uses to call a file binary: a NUL in the first 8k.
       if (buffer.subarray(0, 8000).includes(0)) {
         return { added: 0, removed: 0, binary: true };
@@ -453,23 +463,100 @@ export class GitService {
     }
   }
 
-  async log(maxCount = 50, repo?: string): Promise<GitCommit[]> {
+  /**
+   * The commit log, with parent hashes so the History graph can draw its
+   * lanes. `all` walks every ref (the GitKraken view); `path` narrows to
+   * one repo-relative file's history and follows it across renames.
+   */
+  async log(
+    maxCount = 50,
+    repo?: string,
+    opts: { all?: boolean; ref?: string; path?: string } = {}
+  ): Promise<GitCommit[]> {
     const { git } = this.resolveRepo(repo);
-    let result;
+    const args = [
+      "log",
+      `--max-count=${Math.max(1, Math.floor(maxCount))}`,
+      `--format=${LOG_FORMAT}`,
+    ];
+    // Date order keeps the graph readable: children above parents, and
+    // parallel branches interleaved by time rather than one after another.
+    if (opts.ref) {
+      // Branch names may contain characters such as '&'. Validate the full
+      // ref with Git itself, then pass it as one argument (never shell text).
+      if (!/^refs\/(?:heads|remotes)\/[^/]/.test(opts.ref)) {
+        throw new Error(`Not a branch ref: ${opts.ref}`);
+      }
+      await git.raw(["check-ref-format", opts.ref]);
+      args.push("--date-order", opts.ref);
+    } else if (opts.all) args.push("--all", "--date-order");
+    if (opts.path) args.push("--follow", "--", opts.path);
+    let raw: string;
     try {
-      result = await git.log({ maxCount });
+      raw = await git.raw(args);
     } catch (error) {
       // Unborn branch (no commits yet) — an empty history, not a failure.
-      if (/does not have any commits/i.test(String(error))) return [];
+      const text = String(error);
+      if (/does not have any commits|bad default revision/i.test(text)) {
+        return [];
+      }
       throw error;
     }
-    return result.all.map((c) => ({
-      hash: c.hash,
-      message: c.message,
-      author: c.author_name,
-      date: c.date,
-      refs: c.refs || undefined,
-    }));
+    return parseLog(raw);
+  }
+
+  /**
+   * What a commit changed, against its first parent. A root commit is
+   * compared with the empty tree, so its files all read as added.
+   */
+  async commitFiles(
+    hash: string,
+    repo?: string
+  ): Promise<{ files: GitCommitFile[]; parents: string[] }> {
+    const { git } = this.resolveRepo(repo);
+    const rev = assertRev(hash);
+    const parentLine = await git.raw(["rev-list", "--parents", "-n", "1", rev]);
+    const parents = parentLine.trim().split(/\s+/).slice(1);
+    const base = parents[0] ?? EMPTY_TREE;
+    const [names, nums] = await Promise.all([
+      git.raw(["diff", "--name-status", "-z", "-M", base, rev]),
+      git.raw(["diff", "--numstat", "-z", "-M", base, rev]),
+    ]);
+    return { files: parseCommitFiles(names, nums), parents };
+  }
+
+  /** Both sides of one file across a commit, for the History diff. */
+  async commitFileDiff(
+    hash: string,
+    filePath: string,
+    oldPath?: string,
+    repo?: string
+  ): Promise<{ before: string; after: string }> {
+    const { git, root } = this.resolveRepo(repo);
+    const rev = assertRev(hash);
+    const parentLine = await git.raw(["rev-list", "--parents", "-n", "1", rev]);
+    const parent = parentLine.trim().split(/\s+/)[1];
+    const before = parent
+      ? await this.showOrEmpty(root, `${parent}:${oldPath ?? filePath}`)
+      : "";
+    const after = await this.showOrEmpty(root, `${rev}:${filePath}`);
+    return { before, after };
+  }
+
+  /**
+   * `git blame` of a repo-relative file. Without `ref` it blames the
+   * working tree, where uncommitted lines carry the all-zero hash.
+   */
+  async blame(
+    filePath: string,
+    ref?: string,
+    repo?: string
+  ): Promise<GitBlameLine[]> {
+    const { git } = this.resolveRepo(repo);
+    const args = ["blame", "--porcelain"];
+    if (ref) args.push(assertRev(ref));
+    args.push("--", filePath);
+    return parseBlame(await git.raw(args));
   }
 
   /**
@@ -547,9 +634,24 @@ export class GitService {
     await this.refresh();
   }
 
-  async commit(message: string, repo?: string): Promise<string> {
+  /**
+   * Commits, or REWRITES the branch's existing commit when `amend` is set.
+   *
+   * Amending is how a branch stays one dated changelog entry instead of a
+   * trail of fixups. The caller decides — see git-ops.branchState, which is
+   * what tells the UI whether an amend is the safe default here — because
+   * only the caller knows whether the commit being rewritten is the
+   * branch's own work or something it merely sits on top of.
+   */
+  async commit(
+    message: string,
+    repo?: string,
+    opts: { amend?: boolean } = {}
+  ): Promise<string> {
     const { git } = this.resolveRepo(repo);
-    const result = await git.commit(message);
+    const result = opts.amend
+      ? await git.commit(message, { "--amend": null })
+      : await git.commit(message);
     await this.refresh();
     return result.commit;
   }

@@ -76,8 +76,11 @@ export const TerminalPanel = memo(function TerminalPanel(
                 if (el) containers.current.set(session.id, el);
                 else containers.current.delete(session.id);
               }}
+              // Inset rather than padding: the fit addon measures this
+              // element's border-box, so padding would be sized into the
+              // terminal and clip its last column and bottom row.
               className={cn(
-                "absolute inset-0 px-2 pb-2 pt-1",
+                "absolute inset-x-2 top-1 bottom-2",
                 session.id !== activeTermId && "hidden"
               )}
               style={{ backgroundColor: profile.surface }}

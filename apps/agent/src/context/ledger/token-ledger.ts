@@ -33,6 +33,20 @@ interface LedgerRow {
   created_at: number;
 }
 
+export interface TaskTokenTurn {
+  purpose: ContextPurpose;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface TaskTokenUsage {
+  turns: TaskTokenTurn[];
+  totalTokens: number;
+}
+
 /**
  * Records what every assembled context cost — estimated at assembly time,
  * reconciled with SDK actuals when the result message arrives — and serves
@@ -101,6 +115,36 @@ export class TokenLedger {
     stats.cacheCreationTokens = usage.cache_creation_input_tokens ?? 0;
     stats.outputTokens = usage.output_tokens ?? 0;
     this.record(stats);
+  }
+
+  /** Ordered actual usage for every model request made by one task. */
+  taskUsage(taskId: string): TaskTokenUsage {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM context_requests " +
+          "WHERE task_id = ? AND actual_input_tokens IS NOT NULL " +
+          "ORDER BY created_at ASC, id ASC"
+      )
+      .all(taskId) as LedgerRow[];
+    const turns = rows.map((row): TaskTokenTurn => {
+      const inputTokens = row.actual_input_tokens ?? 0;
+      const cacheReadTokens = row.cache_read_tokens ?? 0;
+      const cacheCreationTokens = row.cache_creation_tokens ?? 0;
+      const outputTokens = row.output_tokens ?? 0;
+      return {
+        purpose: row.purpose as ContextPurpose,
+        inputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        outputTokens,
+        totalTokens:
+          inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens,
+      };
+    });
+    return {
+      turns,
+      totalTokens: turns.reduce((sum, turn) => sum + turn.totalTokens, 0),
+    };
   }
 
   /** Recent requests (newest first) plus rollup totals for the RPC. */

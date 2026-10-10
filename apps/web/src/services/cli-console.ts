@@ -9,6 +9,9 @@ import {
   seedResumedSessionChanges,
 } from "./session-changes.js";
 import { terminalRegistry } from "./terminal-registry.js";
+import { useSessionsStore } from "@/state/sessions.store";
+
+type Platform = AtelierDesktopApi["platform"];
 
 export interface CliProvider {
   id: string;
@@ -17,7 +20,15 @@ export interface CliProvider {
   command: string;
   /** The same CLI, reopened onto one of its own past sessions. */
   resume: (sessionId: string) => string;
+  /**
+   * The key the CLI reads as "paste the clipboard image", as the bytes a
+   * terminal sends for it. Pressing Ctrl+V over an image sends this.
+   */
+  imagePasteKey: (platform: Platform | null) => string;
 }
+
+const CTRL_V = "\x16";
+const ALT_V = "\x1bv";
 
 /**
  * Providers that can back a CLI-mode session. The first entry remains the
@@ -29,12 +40,16 @@ export const CLI_PROVIDERS: readonly CliProvider[] = [
     label: "Codex",
     command: "codex",
     resume: (sessionId) => `codex resume ${sessionId}`,
+    imagePasteKey: () => CTRL_V,
   },
   {
     id: "claude",
     label: "Claude",
     command: "claude",
     resume: (sessionId) => `claude --resume ${sessionId}`,
+    // Claude Code binds image paste to Alt+V on Windows, where Ctrl+V is the
+    // terminal's own paste; everywhere else it is Ctrl+V.
+    imagePasteKey: (platform) => (platform === "win32" ? ALT_V : CTRL_V),
   },
 ];
 
@@ -185,6 +200,61 @@ function writeResumed(map: Record<string, string>): Record<string, string> {
   return map;
 }
 
+/**
+ * Which CLI pty each Agents chat is standing in for, by conversation id.
+ *
+ * The dock's Claude/Codex tiles open the provider CLI as a row in the SAME
+ * Agents list as the chats, so the user has one list of sessions. The row
+ * is a real (empty) conversation; this map is what makes selecting it show
+ * the terminal instead of the transcript. Stored beside the names because
+ * term ids survive a reload and the pairing has to as well.
+ */
+const CHATS_KEY = "atelier.cli.chats";
+
+export interface CliChatBinding {
+  termId: string;
+  /**
+   * Which provider the row runs, so the row can be reopened after its pty
+   * has died (see {@link reviveCliChat}). null only for bindings written
+   * before the provider was recorded; those fall back to the history.
+   */
+  providerId: string | null;
+  /** The provider's resume ID, kept with the row even if the pty disappears. */
+  sessionId?: string;
+  /** When this pty opened; used to recover bindings made before it had an ID. */
+  startedAt?: number;
+}
+
+function readChats(): Record<string, CliChatBinding> {
+  try {
+    const raw = localStorage.getItem(CHATS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const chats: Record<string, CliChatBinding> = {};
+    for (const [conversationId, value] of Object.entries(parsed)) {
+      if (typeof value === "string") {
+        chats[conversationId] = { termId: value, providerId: null };
+      } else if (value && typeof value === "object" && "termId" in value) {
+        chats[conversationId] = value as CliChatBinding;
+      }
+    }
+    return chats;
+  } catch {
+    return {};
+  }
+}
+
+function writeChats(
+  map: Record<string, CliChatBinding>
+): Record<string, CliChatBinding> {
+  try {
+    localStorage.setItem(CHATS_KEY, JSON.stringify(map));
+  } catch {
+    // storage full or blocked — the pairing still holds for this window
+  }
+  return map;
+}
+
 interface CliConsoleStore {
   /** Live CLI ptys, oldest ordinal first. */
   sessions: CliSessionVm[];
@@ -202,17 +272,28 @@ interface CliConsoleStore {
    * including ones started outside Atelier. See {@link refreshCliHistory}.
    */
   history: CliHistoryEntry[];
+  historyOffset: number;
+  historyHasMore: boolean;
   /** Provider session id per live pty — see {@link RESUMED_KEY}. */
   resumed: Record<string, string>;
+  /** The CLI each Agents chat stands in for — see {@link CHATS_KEY}. */
+  chats: Record<string, CliChatBinding>;
+  bindChat: (
+    conversationId: string,
+    termId: string,
+    providerId: string
+  ) => void;
+  unbindChat: (conversationId: string) => void;
   /** True only while that CLI is executing, not merely while its pty exists. */
   processing: Record<string, boolean>;
+  renameStatus: Record<string, { text: string; error: boolean }>;
   /** New sessions choose a provider; initial bootstrap still uses Codex. */
   providerPickerOpen: boolean;
   setSessions: (sessions: CliSessionVm[]) => void;
   add: (session: CliSessionVm) => void;
   select: (termId: string) => void;
   markClosed: (termId: string) => void;
-  setHistory: (history: CliHistoryEntry[]) => void;
+  setHistoryPage: (history: CliHistoryEntry[], offset: number, hasMore: boolean) => void;
   bindSessionId: (termId: string, sessionId: string) => void;
   setProcessing: (termId: string, processing: boolean) => void;
   setBootstrapped: () => void;
@@ -227,9 +308,37 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
   bootstrapped: false,
   titles: readTitles(),
   history: [],
+  historyOffset: 0,
+  historyHasMore: true,
   resumed: readResumed(),
+  chats: readChats(),
   processing: {},
+  renameStatus: {},
   providerPickerOpen: false,
+
+  bindChat: (conversationId, termId, providerId) =>
+    set((s) => {
+      const previous = s.chats[conversationId];
+      const session = s.sessions.find((item) => item.termId === termId);
+      return {
+        chats: writeChats({
+          ...s.chats,
+          [conversationId]: {
+            termId,
+            providerId,
+            sessionId: s.resumed[termId],
+            startedAt: session?.createdAt ?? previous?.startedAt,
+          },
+        }),
+      };
+    }),
+
+  unbindChat: (conversationId) =>
+    set((s) => {
+      if (!(conversationId in s.chats)) return {};
+      const { [conversationId]: _dropped, ...rest } = s.chats;
+      return { chats: writeChats(rest) };
+    }),
 
   setSessions: (sessions) =>
     set((s) => {
@@ -256,20 +365,28 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
     set((s) => {
       unwatchTopic(termId);
       unwatchProcessing(termId);
+      unwatchSessionSwitch(termId);
+      unwatchRenameCommand(termId);
       endSessionTracking(termId);
       const sessions = s.sessions.filter((x) => x.termId !== termId);
       // Drop the name too, or a reused id would inherit a dead session's.
       const { [termId]: _gone, ...titles } = s.titles;
-      // Same for the pairing: the provider session is not running any more,
-      // so it goes back to being one of the resumable rows.
-      const { [termId]: _unbound, ...resumed } = s.resumed;
+      // Keep the provider ID while an Agents row still points here: that row
+      // uses it to reopen its context after a quit or provider switch.
+      const resumed = { ...s.resumed };
+      if (!Object.values(s.chats).some((chat) => chat.termId === termId)) {
+        delete resumed[termId];
+      }
       const processing = { ...s.processing };
       delete processing[termId];
+      const renameStatus = { ...s.renameStatus };
+      delete renameStatus[termId];
       return {
         sessions,
         titles: writeTitles(titles),
         resumed: writeResumed(resumed),
         processing,
+        renameStatus,
         selectedId:
           s.selectedId === termId
             ? (sessions[0]?.termId ?? null)
@@ -277,10 +394,32 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
       };
     }),
 
-  setHistory: (history) => set({ history }),
+  setHistoryPage: (history, offset, hasMore) => set((state) => {
+    const merged = new Map<string, CliHistoryEntry>();
+    for (const entry of [...state.history, ...history]) {
+      const key = `${entry.providerId}:${entry.id}`;
+      const previous = merged.get(key);
+      if (!previous || entry.updatedAt >= previous.updatedAt) merged.set(key, entry);
+    }
+    const nextOffset = offset + HISTORY_PAGE_SIZE;
+    return {
+      history: [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt),
+      historyOffset: Math.max(state.historyOffset, nextOffset),
+      historyHasMore: nextOffset >= state.historyOffset ? hasMore : state.historyHasMore,
+    };
+  }),
 
   bindSessionId: (termId, sessionId) =>
-    set((s) => ({ resumed: writeResumed({ ...s.resumed, [termId]: sessionId }) })),
+    set((s) => {
+      const chats = { ...s.chats };
+      for (const [conversationId, binding] of Object.entries(chats)) {
+        if (binding.termId === termId) chats[conversationId] = { ...binding, sessionId };
+      }
+      return {
+        resumed: writeResumed({ ...s.resumed, [termId]: sessionId }),
+        chats: writeChats(chats),
+      };
+    }),
 
   setProcessing: (termId, processing) =>
     set((s) => ({ processing: { ...s.processing, [termId]: processing } })),
@@ -292,8 +431,12 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
   closeProviderPicker: () => set({ providerPickerOpen: false }),
 
   reset: () => {
+    historyEpoch += 1;
+    pendingHistoryPages.clear();
     for (const termId of [...watchers.keys()]) unwatchTopic(termId);
     for (const termId of [...processingWatchers.keys()]) unwatchProcessing(termId);
+    for (const termId of [...sessionSwitchWatchers.keys()]) unwatchSessionSwitch(termId);
+    for (const termId of [...renameCommandWatchers.keys()]) unwatchRenameCommand(termId);
     // Names and pty→session pairings are NOT cleared: the ptys of the
     // project being left keep running, and coming back to it must find
     // them still named. History is, because it is per-project.
@@ -301,7 +444,10 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
       sessions: [],
       selectedId: null,
       history: [],
+      historyOffset: 0,
+      historyHasMore: true,
       processing: {},
+      renameStatus: {},
       bootstrapped: false,
       providerPickerOpen: false,
     });
@@ -314,6 +460,81 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
  * thing asked, so listening past that is pure overhead.
  */
 const watchers = new Map<string, () => void>();
+const sessionSwitchWatchers = new Map<string, () => void>();
+const renameCommandWatchers = new Map<string, () => void>();
+const renamingCli = new Set<string>();
+
+function setRenameStatus(termId: string, text: string, error = false): void {
+  const status = { text, error };
+  useCliConsoleStore.setState((state) => ({
+    renameStatus: { ...state.renameStatus, [termId]: status },
+  }));
+  setTimeout(() => {
+    useCliConsoleStore.setState((state) => {
+      if (state.renameStatus[termId] !== status) return state;
+      const { [termId]: _expired, ...renameStatus } = state.renameStatus;
+      return { renameStatus };
+    });
+  }, 5000);
+}
+
+async function autoRenameCliSession(termId: string, providerId: string): Promise<void> {
+  if (renamingCli.has(termId)) return;
+  renamingCli.add(termId);
+  setRenameStatus(termId, "Naming session from its context…");
+  try {
+    let sessionId = useCliConsoleStore.getState().resumed[termId];
+    for (let attempt = 0; !sessionId && attempt < 24; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      sessionId = useCliConsoleStore.getState().resumed[termId];
+    }
+    if (!sessionId) throw new Error("The provider session is not ready yet. Try /rename again shortly.");
+    const { title } = await bridge.rpc("cli.title.autoRename", { providerId, sessionId });
+    renameCliSession(termId, title);
+    useCliConsoleStore.setState((state) => ({
+      history: state.history.map((entry) =>
+        entry.providerId === providerId && entry.id === sessionId ? { ...entry, title } : entry
+      ),
+    }));
+    const binding = Object.entries(useCliConsoleStore.getState().chats)
+      .find(([, chat]) => chat.termId === termId);
+    if (binding && useSessionsStore.getState().sessions[binding[0]]) {
+      const conversationId = binding[0];
+      const previous = useSessionsStore.getState().sessions[conversationId]!.conversation.title;
+      useSessionsStore.getState().renameSession(conversationId, title);
+      try {
+        await bridge.rpc("session.renameConversation", { conversationId, title });
+      } catch (error) {
+        useSessionsStore.getState().renameSession(conversationId, previous);
+        throw error;
+      }
+    }
+    setRenameStatus(termId, `Renamed to ${title}`);
+  } catch (error) {
+    setRenameStatus(termId, error instanceof Error ? error.message : String(error), true);
+  } finally {
+    renamingCli.delete(termId);
+  }
+}
+
+/** Consume /rename at submit, clearing the CLI composer without sending Enter. */
+function watchRenameCommand(termId: string, providerId: string): void {
+  if (renameCommandWatchers.has(termId)) return;
+  const lines = new PtyInputLines();
+  renameCommandWatchers.set(termId, terminalRegistry.interceptInput(termId, (data) => {
+    if (lines.push(data).some((line) => line.toLowerCase() === "/rename")) {
+      void autoRenameCliSession(termId, providerId);
+      return "\x15";
+    }
+    return data;
+  }));
+}
+
+function unwatchRenameCommand(termId: string): void {
+  renameCommandWatchers.get(termId)?.();
+  renameCommandWatchers.delete(termId);
+  renamingCli.delete(termId);
+}
 
 interface ProcessingWatcher {
   stop: () => void;
@@ -379,6 +600,59 @@ function watchCliProcessing(termId: string): void {
 function unwatchTopic(termId: string): void {
   watchers.get(termId)?.();
   watchers.delete(termId);
+}
+
+/** A provider's /new or /clear keeps the PTY but changes its resume ID. */
+function watchSessionSwitch(termId: string, providerId: string, startedAt: number): void {
+  if (sessionSwitchWatchers.has(termId)) return;
+  const lines = new PtyInputLines();
+  let pendingSwitch: { previousId?: string; startedAt: number } | null = null;
+  let claiming = false;
+  const tryClaim = () => {
+    if (!pendingSwitch || claiming) return;
+    claiming = true;
+    const switchToClaim = pendingSwitch;
+    const { previousId, startedAt } = switchToClaim;
+    void claimSessionId(termId, providerId, startedAt, previousId).finally(() => {
+      claiming = false;
+      if (pendingSwitch === switchToClaim &&
+          useCliConsoleStore.getState().resumed[termId] !== previousId) {
+        pendingSwitch = null;
+      }
+      if (pendingSwitch && pendingSwitch !== switchToClaim) tryClaim();
+    });
+  };
+  const off = terminalRegistry.onInput(termId, (data) => {
+    for (const line of lines.push(data)) {
+      if (/^\/(?:new|clear|reset)(?:\s|$)/i.test(line)) {
+        pendingSwitch = {
+          previousId: useCliConsoleStore.getState().resumed[termId],
+          startedAt: Date.now(),
+        };
+        unwatchTopic(termId);
+        useCliConsoleStore.setState((state) => {
+          const titles = { ...state.titles };
+          delete titles[termId];
+          const renameStatus = { ...state.renameStatus };
+          delete renameStatus[termId];
+          return { titles: writeTitles(titles), renameStatus };
+        });
+        watchCliTopic(termId);
+      } else if (!useCliConsoleStore.getState().resumed[termId] &&
+                 line.trim() && !line.trim().startsWith("/")) {
+        // Some CLIs do not write a transcript until the first prompt. The
+        // initial timed claim may have expired while the user was thinking.
+        void claimSessionId(termId, providerId, startedAt);
+      }
+      tryClaim();
+    }
+  });
+  sessionSwitchWatchers.set(termId, off);
+}
+
+function unwatchSessionSwitch(termId: string): void {
+  sessionSwitchWatchers.get(termId)?.();
+  sessionSwitchWatchers.delete(termId);
 }
 
 /** Too short to be a topic — an approval keypress, a "y", a stray Enter. */
@@ -468,6 +742,8 @@ export function ensureCliSessions(): Promise<void> {
     for (const session of live) {
       watchCliTopic(session.termId);
       watchCliProcessing(session.termId);
+      watchSessionSwitch(session.termId, session.providerId, session.createdAt);
+      watchRenameCommand(session.termId, session.providerId);
       void beginSessionTracking(session.termId);
     }
     // The rest of this project's sessions — the ones the providers recorded,
@@ -511,6 +787,8 @@ async function spawnCliSession(
   });
   useCliConsoleStore.getState().add(toVm(session));
   watchCliProcessing(session.id);
+  watchSessionSwitch(session.id, provider.id, session.createdAt);
+  watchRenameCommand(session.id, provider.id);
   beginProcessing(session.id);
   await bridge.rpc("terminal.write", {
     termId: session.id,
@@ -522,15 +800,28 @@ async function spawnCliSession(
   return session.id;
 }
 
-/** Start a provider's CLI on a brand new session. */
+const pendingCreates = new Map<string, Promise<string>>();
+
+/** Start a fresh CLI session for the chosen provider. */
 export async function createCliSession(
   providerId: string = DEFAULT_CLI_PROVIDER.id
-): Promise<void> {
+): Promise<string> {
   const provider = cliProvider(providerId);
-  const startedAt = Date.now();
-  const termId = await spawnCliSession(provider, provider.command);
-  watchCliTopic(termId);
-  void claimSessionId(termId, provider.id, startedAt);
+  const pendingCreate = pendingCreates.get(provider.id);
+  if (pendingCreate) return pendingCreate;
+  const creating = (async () => {
+    const startedAt = Date.now();
+    const termId = await spawnCliSession(provider, provider.command);
+    watchCliTopic(termId);
+    void claimSessionId(termId, provider.id, startedAt);
+    return termId;
+  })();
+  pendingCreates.set(provider.id, creating);
+  try {
+    return await creating;
+  } finally {
+    pendingCreates.delete(provider.id);
+  }
 }
 
 /**
@@ -540,16 +831,18 @@ export async function createCliSession(
  * reloads its transcript itself, so the session comes back with its full
  * context, exactly as picking it from the CLI's own resume screen would.
  */
-export async function resumeCliSession(entry: CliHistoryEntry): Promise<void> {
-  // Already running: select it instead of starting a second pty on the same
-  // session. Resuming a session that is open is how one Codex ends up
-  // twice in the list — and the second copy is the one whose `resume` finds
-  // nothing to reopen and drops the user on the CLI's own session picker.
+export async function resumeCliSession(
+  entry: CliHistoryEntry
+): Promise<string> {
+  // Already running: select that pty instead of resuming the same provider
+  // session twice.
   const open = useCliConsoleStore.getState();
-  const live = open.sessions.find((s) => open.resumed[s.termId] === entry.id);
+  const live = open.sessions.find(
+    (s) => s.providerId === entry.providerId && open.resumed[s.termId] === entry.id
+  );
   if (live) {
     open.select(live.termId);
-    return;
+    return live.termId;
   }
   const provider = cliProvider(entry.providerId);
   try {
@@ -567,10 +860,104 @@ export async function resumeCliSession(entry: CliHistoryEntry): Promise<void> {
     watchCliTopic(termId);
   }
   void refreshCliHistory();
+  return termId;
+}
+
+/**
+ * Bring an Agents CLI row back after its pty has died — the agent was
+ * restarted, or the CLI was quit — by reopening the provider session it
+ * was running in a new pty, the provider's own `resume`, and binding the
+ * row to that. The transcript comes back because the provider reloads it.
+ *
+ * Resolves to the term id now showing, or null when no native resume ID can
+ * be identified safely. The caller then lets the user choose from history.
+ */
+export async function reviveCliChat(
+  conversationId: string,
+  conversationCreatedAt?: number
+): Promise<string | null> {
+  const state = useCliConsoleStore.getState();
+  const binding = state.chats[conversationId];
+  if (!binding) return null;
+  if (state.sessions.some((s) => s.termId === binding.termId)) {
+    state.select(binding.termId);
+    return binding.termId;
+  }
+  let sessionId = binding.sessionId ?? state.resumed[binding.termId];
+  // A stored native ID is sufficient for the provider's resume command.
+  // Avoid making a full history scan a prerequisite for every app restart.
+  const entries = sessionId && binding.providerId
+    ? state.history
+    : await refreshCliHistory();
+  // Older bindings can predate the first provider transcript. Recover only
+  // when exactly one unclaimed transcript started near that row's creation.
+  if (!sessionId && binding.providerId) {
+    const latest = useCliConsoleStore.getState();
+    const startedAt = binding.startedAt ?? conversationCreatedAt;
+    if (startedAt) {
+      const claimed = new Set(Object.entries(latest.chats)
+        .filter(([id]) => id !== conversationId)
+        .map(([, chat]) => chat.sessionId ?? latest.resumed[chat.termId])
+        .filter((id): id is string => Boolean(id)));
+      const matches = entries.filter((entry) =>
+        entry.providerId === binding.providerId &&
+        !claimed.has(entry.id) &&
+        Math.abs(entry.startedAt - startedAt) <= 30_000
+      );
+      if (matches.length === 1) sessionId = matches[0]!.id;
+    }
+  }
+  if (!sessionId) return null;
+  const found = entries.find((entry) =>
+    entry.id === sessionId &&
+    (!binding.providerId || entry.providerId === binding.providerId)
+  );
+  const providerId = found?.providerId ?? binding.providerId;
+  if (!providerId) return null;
+  const entry: CliHistoryEntry = found ?? {
+    id: sessionId,
+    providerId,
+    title: "",
+    startedAt: 0,
+    updatedAt: 0,
+    cwd: "",
+  };
+  const termId = await resumeCliSession(entry);
+  useCliConsoleStore.getState().bindChat(conversationId, termId, providerId);
+  return termId;
 }
 
 /** Rows kept per provider — the resume picker's own order, newest first. */
-const HISTORY_PER_PROVIDER = 20;
+const HISTORY_PAGE_SIZE = 30;
+const HISTORY_REQUEST_TIMEOUT_MS = 15_000;
+const pendingHistoryPages = new Map<number, Promise<CliHistoryEntry[]>>();
+let historyEpoch = 0;
+
+async function fetchCliHistoryPage(offset: number): Promise<CliHistoryEntry[]> {
+  const pending = pendingHistoryPages.get(offset);
+  if (pending) return pending;
+  const epoch = historyEpoch;
+  const request = (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const { entries, hasMore } = await Promise.race([
+        bridge.rpc("cli.history", { offset, limit: HISTORY_PAGE_SIZE }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("CLI history took too long. Try again.")), HISTORY_REQUEST_TIMEOUT_MS);
+        }),
+      ]);
+      if (epoch !== historyEpoch) return useCliConsoleStore.getState().history;
+      useCliConsoleStore.getState().setHistoryPage(entries, offset, hasMore);
+      return useCliConsoleStore.getState().history;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  })().finally(() => {
+    if (pendingHistoryPages.get(offset) === request) pendingHistoryPages.delete(offset);
+  });
+  pendingHistoryPages.set(offset, request);
+  return request;
+}
 
 /**
  * Re-read the providers' session history.
@@ -581,14 +968,22 @@ const HISTORY_PER_PROVIDER = 20;
  */
 export async function refreshCliHistory(): Promise<CliHistoryEntry[]> {
   try {
-    const { entries } = await bridge.rpc("cli.history", {
-      limit: HISTORY_PER_PROVIDER,
-    });
-    useCliConsoleStore.getState().setHistory(entries);
-    return entries;
+    return await fetchCliHistoryPage(0);
   } catch {
     return useCliConsoleStore.getState().history;
   }
+}
+
+/** First page with errors visible to the history picker. */
+export function loadFirstCliHistory(): Promise<CliHistoryEntry[]> {
+  return fetchCliHistoryPage(0);
+}
+
+/** Fetch the next provider transcript batch for the history list. */
+export async function loadMoreCliHistory(): Promise<CliHistoryEntry[]> {
+  const state = useCliConsoleStore.getState();
+  if (!state.historyHasMore) return state.history;
+  return fetchCliHistoryPage(state.historyOffset);
 }
 
 /** Clock slack between the transcript's own timestamp and ours. */
@@ -636,7 +1031,9 @@ export function resumableCliHistory(
   providerId: string,
   sessions: CliSessionVm[]
 ): CliHistoryEntry[] {
-  const claimed = new Set(Object.values(resumed));
+  const claimed = new Set(
+    sessions.map((session) => resumed[session.termId]).filter((id): id is string => Boolean(id))
+  );
   const covered = coveredByLive(history, sessions, claimed);
   return history.filter(
     (entry) =>
@@ -661,13 +1058,14 @@ const CLAIM_DELAYS_MS = [1500, 3000, 6000, 12000];
 async function claimSessionId(
   termId: string,
   providerId: string,
-  startedAt: number
+  startedAt: number,
+  previousId?: string
 ): Promise<void> {
   for (const delay of CLAIM_DELAYS_MS) {
     await new Promise((resolve) => setTimeout(resolve, delay));
     const state = useCliConsoleStore.getState();
     // Already paired by a later refresh — nothing left to do.
-    if (state.resumed[termId]) return;
+    if (state.resumed[termId] && state.resumed[termId] !== previousId) return;
     // Closed. Guarded on `bootstrapped`, because reset() empties the list
     // WITHOUT the pty going anywhere: reading that as "closed" is what
     // abandoned the claim for good, leaving a running session listed as
@@ -676,13 +1074,18 @@ async function claimSessionId(
       return;
     }
     const entries = await refreshCliHistory();
+    const current = useCliConsoleStore.getState();
     const claimed = new Set(
-      Object.values(useCliConsoleStore.getState().resumed)
+      current.sessions
+        .filter((session) => session.termId !== termId)
+        .map((session) => current.resumed[session.termId])
+        .filter((id): id is string => Boolean(id))
     );
     const match = entries
       .filter(
         (entry) =>
           entry.providerId === providerId &&
+          entry.id !== previousId &&
           !claimed.has(entry.id) &&
           entry.startedAt >= startedAt - CLAIM_SKEW_MS
       )

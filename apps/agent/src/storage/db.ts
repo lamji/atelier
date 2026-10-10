@@ -29,6 +29,12 @@ function applySchema(db: Db): void {
 
 /** Additive migrations for DBs created before a column existed. */
 function applyMigrations(db: Db): void {
+  const cliHistoryColumns = (
+    db.prepare("PRAGMA table_info(cli_session_history)").all() as Array<{ name: string }>
+  ).map((column) => column.name);
+  if (!cliHistoryColumns.includes("custom_title")) {
+    db.exec("ALTER TABLE cli_session_history ADD COLUMN custom_title TEXT");
+  }
   const columns = (
     db.prepare("PRAGMA table_info(features)").all() as Array<{ name: string }>
   ).map((c) => c.name);
@@ -52,6 +58,12 @@ function applyMigrations(db: Db): void {
       "ALTER TABLE task_summaries ADD COLUMN status TEXT NOT NULL " +
         "DEFAULT 'completed'"
     );
+  }
+  // `answer` vs `change`: the turn after an answer-only task quotes that
+  // answer back instead of re-deriving it. Nullable, and read as "answer
+  // when nothing changed" for rows that predate the column.
+  if (!summaryColumns.includes("kind")) {
+    db.exec("ALTER TABLE task_summaries ADD COLUMN kind TEXT");
   }
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_task_summaries_chunk " +

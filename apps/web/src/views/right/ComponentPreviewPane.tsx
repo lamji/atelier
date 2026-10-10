@@ -18,6 +18,7 @@ import {
   TriangleAlert,
   Undo2,
   X,
+  Terminal as TerminalIcon,
 } from "lucide-react";
 import type { TerminalSession } from "@atelier/protocol";
 import {
@@ -33,11 +34,14 @@ import {
   packageManifestPaths,
   previewCommandAtPort,
   pubspecPaths,
+  resolveBackendProjects,
   resolveComponentPreviews,
+  type BackendProjectRuntime,
   type ComponentPreviewRuntime,
 } from "@/lib/component-preview";
 import { openExternal } from "@/lib/desktop";
 import { bridge } from "@/services/bridge-client";
+import { registerPreviewScreenRect } from "@/services/preview-context";
 import { terminalRegistry } from "@/services/terminal-registry";
 import { useConnectionStore } from "@/state/connection.store";
 import { useTerminalStore } from "@/state/terminal.store";
@@ -151,6 +155,23 @@ function findPreviewTerminal(
     : undefined;
 }
 
+function backendTargetKey(runtime: BackendProjectRuntime): string {
+  return `backend:${runtime.projectDir || "."}:${runtime.script}`;
+}
+
+function backendTerminalName(runtime: BackendProjectRuntime): string {
+  return `${runtime.projectName} backend · ${runtime.projectDir || "."}`;
+}
+
+function findBackendTerminal(
+  runtime: BackendProjectRuntime,
+  sessions: TerminalSession[]
+): TerminalSession | undefined {
+  return sessions.find(
+    (session) => session.alive && session.name === backendTerminalName(runtime)
+  );
+}
+
 const MOBILE_VIEWPORT_OPTIONS = MOBILE_VIEWPORTS.map((profile) => ({
   value: profile.id,
   label: `${profile.label} · ${profile.width} × ${profile.height}`,
@@ -217,11 +238,21 @@ export function ComponentPreviewPane({
   );
   const terminalSessions = useTerminalStore((state) => state.sessions);
   const [runtimes, setRuntimes] = useState<ComponentPreviewRuntime[]>([]);
+  const [backends, setBackends] = useState<BackendProjectRuntime[]>([]);
+  const [backendKey, setBackendKey] = useState<string | null>(null);
   const [runtimeKey, setRuntimeKey] = useState<string | null>(null);
   const runtime =
     runtimes.find((candidate) => candidate.storageKey === runtimeKey) ??
     runtimes[0] ??
     null;
+  const backendRuntime =
+    backends.find((candidate) => backendTargetKey(candidate) === backendKey) ??
+    null;
+  const selectedTargetKey = backendRuntime
+    ? backendTargetKey(backendRuntime)
+    : runtime
+      ? `frontend:${runtime.storageKey}`
+      : "";
   const [address, setAddress] = useState("");
   const [customCommand, setCustomCommand] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -232,6 +263,12 @@ export function ComponentPreviewPane({
   const [frameKey, setFrameKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [launching, setLaunching] = useState(false);
+  const backendRunning = Boolean(
+    backendRuntime &&
+      !launching &&
+      managedTermId &&
+      findBackendTerminal(backendRuntime, terminalSessions)?.id === managedTermId
+  );
   /**
    * The question the preview command is blocked on, if any. A dev server
    * that asks "port 3000 is in use, use 3001?" prints no URL and never
@@ -243,10 +280,35 @@ export function ComponentPreviewPane({
     null
   );
   const [message, setMessage] = useState<string | null>(null);
+  // Captures output from the managed preview terminal for inline logs.
+  const [terminalLog, setTerminalLog] = useState<string>("");
+  const [logModalOpen, setLogModalOpen] = useState<boolean>(false);
+
   const previewCanvasRef = useRef<HTMLDivElement>(null);
   const previewScreenRef = useRef<HTMLDivElement>(null);
+
+  // Expose the live preview surface's on-screen rect so the frontend test
+  // runner can grab end-of-step evidence through the same capture path the
+  // screenshot button uses — no reaching into this component's internals.
+  useEffect(() => {
+    registerPreviewScreenRect(() => {
+      const screen = previewScreenRef.current;
+      if (!screen) return null;
+      const rect = screen.getBoundingClientRect();
+      return {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+    });
+    return () => registerPreviewScreenRect(null);
+  }, []);
   const [screenshotDraft, setScreenshotDraft] = useState<string | null>(null);
   const [screenshotSourceUrl, setScreenshotSourceUrl] = useState<string | null>(null);
+  // Iframe CSS px behind the draft; the viewport may change before it is saved.
+  const [screenshotCaptureSize, setScreenshotCaptureSize] =
+    useState<PendingImage["captureSize"]>(undefined);
   const [screenshotDestinationOpen, setScreenshotDestinationOpen] = useState(false);
   const [capturingScreenshot, setCapturingScreenshot] = useState(false);
   const [savingScreenshot, setSavingScreenshot] = useState(false);
@@ -286,7 +348,7 @@ export function ComponentPreviewPane({
         setLoading(true);
       }
       setLaunching(false);
-      setMessage(`Preview server ready at ${parsed.host}.`);
+      setMessage(null);
       if (runtime) {
         try {
           localStorage.setItem(runtime.storageKey, normalizedAddress);
@@ -327,6 +389,8 @@ export function ComponentPreviewPane({
     let output = "";
     let parseTimer: number | null = null;
     const stop = terminalRegistry.onOutput(managedTermId, (data) => {
+      setTerminalLog((previous) => `${previous}${data}`.slice(-16_384));
+      if (backendRuntime) return;
       output = `${output}${data}`.slice(-8_192);
       if (parseTimer !== null) window.clearTimeout(parseTimer);
       // Terminal output may split a URL across chunks. Let the current burst
@@ -341,7 +405,7 @@ export function ComponentPreviewPane({
       stop();
       if (parseTimer !== null) window.clearTimeout(parseTimer);
     };
-  }, [managedTermId, openPreviewAt]);
+  }, [backendRuntime, managedTermId, openPreviewAt]);
 
   useEffect(() => {
     if (!launching || !managedTermId || !address) return;
@@ -426,7 +490,7 @@ export function ComponentPreviewPane({
       setLoading(false);
       setLaunching(false);
       setTerminalPrompt(null);
-      setMessage("Page preview stopped. Start it again when you need it.");
+      setMessage(null);
     }
     previousManagedTermId.current = managedTermId;
   }, [managedTermId]);
@@ -445,6 +509,8 @@ export function ComponentPreviewPane({
   useEffect(() => {
     let cancelled = false;
     setRuntimes([]);
+    setBackends([]);
+    setBackendKey(null);
     setRuntimeKey(null);
     previewUrlRef.current = null;
     setPreviewUrl(null);
@@ -453,10 +519,14 @@ export function ComponentPreviewPane({
 
     if (!workspaceTree) return;
 
-    void resolveComponentPreviews(workspaceTree, workspaceRoot)
-      .then((next) => {
+    void Promise.all([
+      resolveComponentPreviews(workspaceTree, workspaceRoot),
+      resolveBackendProjects(workspaceTree, workspaceRoot),
+    ])
+      .then(([next, backends]) => {
         if (cancelled) return;
         setRuntimes(next);
+        setBackends(backends);
         setRuntimeKey(next[0]?.storageKey ?? null);
         if (next.length === 0) {
           setMessage("Atelier could not find a browser-capable project in this workspace.");
@@ -482,6 +552,8 @@ export function ComponentPreviewPane({
   }, [previewLayoutSignature, workspaceRoot]);
 
   useEffect(() => {
+    if (backendRuntime) return;
+
     let cancelled = false;
     previewUrlRef.current = null;
     setPreviewUrl(null);
@@ -562,7 +634,45 @@ export function ComponentPreviewPane({
         launchTimerRef.current = null;
       }
     };
-  }, [onManagedTermChange, runtime, runtimes]);
+  }, [backendRuntime, onManagedTermChange, runtime, runtimes]);
+
+  useEffect(() => {
+    if (!backendRuntime) return;
+
+    previewUrlRef.current = null;
+    setPreviewUrl(null);
+    setAddress("");
+    setMessage(null);
+    setTerminalPrompt(null);
+    setLaunching(false);
+    setLoading(false);
+
+    let savedCommand = "";
+    try {
+      savedCommand =
+        localStorage.getItem(`${backendTargetKey(backendRuntime)}::command`) ?? "";
+    } catch {
+      // A blocked localStorage only means preview settings are not remembered.
+    }
+    setCustomCommand(savedCommand);
+
+    const existing = findBackendTerminal(
+      backendRuntime,
+      useTerminalStore.getState().sessions
+    );
+    if (!existing) {
+      previousManagedTermId.current = null;
+      onManagedTermChange(null);
+      setTerminalLog("");
+      return;
+    }
+
+    onManagedTermChange(existing.id);
+    void bridge
+      .rpc("terminal.getHistory", { termId: existing.id })
+      .then(({ data }) => setTerminalLog(data.slice(-16_384)))
+      .catch(() => setTerminalLog(""));
+  }, [backendRuntime, onManagedTermChange]);
 
   const useAddress = () => {
     const raw = address.trim();
@@ -595,9 +705,131 @@ export function ComponentPreviewPane({
     }
   };
 
+  const stopProject = async (
+    termId: string,
+    projectName: string,
+    projectType: "frontend" | "backend"
+  ) => {
+    const selected = termId === managedTermId;
+    try {
+      await bridge.rpc("terminal.kill", { termId });
+      useTerminalStore.getState().removeSession(termId);
+      if (selected) {
+        if (launchTimerRef.current !== null) {
+          window.clearTimeout(launchTimerRef.current);
+          launchTimerRef.current = null;
+        }
+        previousManagedTermId.current = null;
+        onManagedTermChange(null);
+        previewUrlRef.current = null;
+        setPreviewUrl(null);
+        setLoading(false);
+        setLaunching(false);
+        setTerminalPrompt(null);
+        setTerminalLog("");
+      }
+      setMessage(
+        `Stopped ${projectName} ${projectType === "backend" ? "backend" : "preview"}.`
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : `The ${projectType} project could not be stopped.`
+      );
+    }
+  };
+
+  const stopBackend = async () => {
+    if (!backendRuntime) return;
+    const terminal = findBackendTerminal(backendRuntime, terminalSessions);
+    if (!terminal) return;
+    await stopProject(terminal.id, backendRuntime.projectName, "backend");
+  };
+
   const launch = async () => {
     if (!runtime || launching) return;
-    const baseCommand = runtime.command ?? customCommand.trim();
+
+    if (backendRuntime) {
+      const command =
+        (backendRuntime.missingBinary ? customCommand.trim() : "") ||
+        backendRuntime.command;
+      if (!command) {
+        setMessage("Enter the command that starts your backend server.");
+        return;
+      }
+
+      previewUrlRef.current = null;
+      setPreviewUrl(null);
+      setAddress("");
+      setLoading(false);
+      setLaunching(true);
+      setMessage(`Starting ${backendRuntime.framework}…`);
+      setTerminalPrompt(null);
+      setTerminalLog("");
+      setLogModalOpen(true);
+
+      try {
+        if (backendRuntime.missingBinary) {
+          try {
+            localStorage.setItem(
+              `${backendTargetKey(backendRuntime)}::command`,
+              command
+            );
+          } catch {
+            // The backend remains runnable when localStorage is unavailable.
+          }
+        }
+
+        const sessions = useTerminalStore.getState().sessions;
+        const existing = findBackendTerminal(backendRuntime, sessions);
+        let termId: string;
+        if (existing) {
+          termId = existing.id;
+          useTerminalStore.getState().setActive(termId);
+          onManagedTermChange(termId);
+          await bridge.rpc("terminal.interrupt", { termId });
+        } else {
+          const separator = workspaceRoot?.includes("\\") ? "\\" : "/";
+          const root = workspaceRoot?.replace(/[\\/]+$/, "") ?? "";
+          const child = backendRuntime.projectDir.replace(/\//g, separator);
+          const cwd = root && child ? `${root}${separator}${child}` : root || undefined;
+          const { session } = await bridge.rpc("terminal.create", {
+            ...(cwd ? { cwd } : {}),
+            name: backendTerminalName(backendRuntime),
+          });
+          termId = session.id;
+          useTerminalStore.getState().addSession(session);
+          onManagedTermChange(termId);
+        }
+
+        await bridge.rpc("terminal.write", {
+          termId,
+          data: `${command}\r`,
+        });
+        setLaunching(false);
+        setMessage(
+          existing
+            ? `Restarted ${backendRuntime.projectName} backend.`
+            : `Started ${backendRuntime.projectName} backend.`
+        );
+      } catch (error) {
+        setLaunching(false);
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "The backend server could not be started."
+        );
+      }
+      return;
+    }
+
+    // A detected command whose binary is missing here is not runnable, so a
+    // command the user typed instead of installing it wins over it.
+    const baseCommand =
+      (runtime.missingBinary ? customCommand.trim() : "") ||
+      runtime.command ||
+      customCommand.trim();
     if (!baseCommand) {
       setMessage("Enter the command that starts your local development server.");
       return;
@@ -612,6 +844,8 @@ export function ComponentPreviewPane({
     setLaunching(true);
     setMessage("Finding a free local port…");
     setTerminalPrompt(null);
+    setTerminalLog("");
+    setLogModalOpen(true);
 
     let allocatedPort: number | null = null;
     let commandStarted = false;
@@ -653,7 +887,7 @@ export function ComponentPreviewPane({
       setAddress(normalizedAddress);
       try {
         localStorage.setItem(runtime.storageKey, normalizedAddress);
-        if (!runtime.command) {
+        if (!runtime.command || runtime.missingBinary) {
           localStorage.setItem(
             `${runtime.storageKey}::command`,
             baseCommand
@@ -778,6 +1012,7 @@ export function ComponentPreviewPane({
   const resetScreenshotDraft = useCallback(() => {
     setScreenshotDraft(null);
     setScreenshotSourceUrl(null);
+    setScreenshotCaptureSize(undefined);
     setScreenshotDestinationOpen(false);
     setHighlights([]);
     setSelection(null);
@@ -825,9 +1060,23 @@ export function ComponentPreviewPane({
     if (!capture?.dataUrl) {
       throw new Error("Atelier could not capture the page preview.");
     }
+    // The iframe is drawn scaled (screenScale / viewportScale) but lays out
+    // at its real CSS viewport, so a screenshot pixel is not an iframe
+    // pixel. Measuring the iframe's drawn vs. laid-out width gives the
+    // scale exactly, whichever branch rendered it.
+    const iframe = screen.querySelector("iframe");
+    const drawnWidth = iframe?.getBoundingClientRect().width ?? 0;
+    const scale =
+      iframe && drawnWidth > 0 && iframe.offsetWidth > 0
+        ? drawnWidth / iframe.offsetWidth
+        : 1;
     return {
       dataUrl: capture.dataUrl,
       sourceUrl: capture.frameUrl ?? previewUrl,
+      captureSize: {
+        width: Math.round(rect.width / scale),
+        height: Math.round(rect.height / scale),
+      },
     };
   }, [previewUrl]);
 
@@ -840,6 +1089,7 @@ export function ComponentPreviewPane({
       const capture = await capturePagePreview();
       setScreenshotDraft(capture.dataUrl);
       setScreenshotSourceUrl(capture.sourceUrl);
+      setScreenshotCaptureSize(capture.captureSize);
       setHighlights([]);
       setSelection(null);
     } catch (error) {
@@ -952,6 +1202,10 @@ export function ComponentPreviewPane({
           dataUrl: outputUrl,
           path,
           sourceUrl: screenshotSourceUrl ?? previewUrl ?? undefined,
+          // The rects ride along un-burned so the send can name the DOM
+          // text under them; the pixels alone only show the model a box.
+          highlights: highlights.length > 0 ? highlights.map((h) => ({ ...h })) : undefined,
+          captureSize: screenshotCaptureSize,
         },
         destination
       );
@@ -994,6 +1248,11 @@ export function ComponentPreviewPane({
       </div>
     );
   }
+
+  const displayedBackend = backendRuntime ?? backends[0] ?? null;
+  const selectedCommand = backendRuntime?.command ?? runtime.command;
+  const selectedMissingBinary =
+    backendRuntime?.missingBinary ?? runtime.missingBinary;
 
   const viewportConfig =
     viewport === "mobile"
@@ -1077,51 +1336,117 @@ export function ComponentPreviewPane({
 
   return (
     <div className="flex h-full flex-col bg-muted/15">
-      <div className="flex min-w-0 items-center gap-1.5 border-b border-border/60 bg-background px-2 py-1.5">
+      {/*
+       * Toolbar controls carry the card surface plus a hairline rather than a
+       * `bg-muted` fill. Muted is one step off the canvas, which is a visible
+       * lift on dark (#212f32 on #0d1314) but not in light (#eff3f3 on
+       * #eef1f2) — there the fills vanished and the strip read as bare text.
+       */}
+      <div className="flex min-w-0 items-center gap-1.5 border-b border-border bg-background px-2 py-1.5">
         <form
           className="flex min-w-0 flex-1 items-center gap-1.5"
           onSubmit={(event) => {
             event.preventDefault();
+            if (backendRuntime) {
+              void launch();
+              return;
+            }
             useAddress();
           }}
         >
-          {runtimes.length > 1 && (
+          {runtimes.length + backends.length > 1 && (
             <Select
-              value={runtime.storageKey}
+              value={selectedTargetKey}
               onChange={(value) => {
-                if (value === runtime.storageKey) return;
+                if (value === selectedTargetKey) return;
                 setLoading(true);
-                setRuntimeKey(value);
+                if (value.startsWith("backend:")) {
+                  setBackendKey(value);
+                  return;
+                }
+                setBackendKey(null);
+                setRuntimeKey(value.slice("frontend:".length));
               }}
-              options={runtimes.map((candidate) => {
-                const running = Boolean(
-                  findPreviewTerminal(candidate, runtimes, terminalSessions)
-                );
-                return {
-                  value: candidate.storageKey,
-                  label: candidate.projectName,
-                  hint: `${running ? "Running" : "Ready"} · ${candidate.framework} · ${candidate.projectDir || "workspace root"}`,
-                };
-              })}
-              className="h-7 w-[min(12rem,24vw)] shrink-0 bg-muted/60"
-              menuClassName="w-[min(22rem,80vw)]"
+              options={[
+                ...runtimes.map((candidate) => {
+                  const terminal = findPreviewTerminal(
+                    candidate,
+                    runtimes,
+                    terminalSessions
+                  );
+                  return {
+                    value: `frontend:${candidate.storageKey}`,
+                    label: `Frontend · ${candidate.projectName}`,
+                    hint: `${terminal ? "Running" : "Ready"} · ${candidate.framework} · ${candidate.projectDir || "workspace root"}`,
+                    action: terminal
+                      ? {
+                          label: "Stop",
+                          onClick: () =>
+                            stopProject(
+                              terminal.id,
+                              candidate.projectName,
+                              "frontend"
+                            ),
+                        }
+                      : undefined,
+                  };
+                }),
+                ...backends.map((candidate) => {
+                  const terminal = findBackendTerminal(
+                    candidate,
+                    terminalSessions
+                  );
+                  return {
+                    value: backendTargetKey(candidate),
+                    label: `Backend · ${candidate.projectName}`,
+                    hint: `${terminal ? "Running" : "Ready"} · ${candidate.framework} · ${candidate.command}`,
+                    action: terminal
+                      ? {
+                          label: "Stop",
+                          onClick: () =>
+                            stopProject(
+                              terminal.id,
+                              candidate.projectName,
+                              "backend"
+                            ),
+                        }
+                      : undefined,
+                  };
+                }),
+              ]}
+              className="h-7 w-[min(14rem,28vw)] shrink-0 border border-border bg-card"
+              menuClassName="w-[min(24rem,80vw)]"
             />
           )}
-          <Server className="ml-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <Input
-            value={address}
-            onChange={(event) => setAddress(event.target.value)}
-            aria-label="Page preview URL"
-            placeholder={runtime.defaultUrl}
-            className="h-7 min-w-0 flex-1 bg-muted/50 font-mono text-[11px]"
-            spellCheck={false}
-          />
-          <Button type="submit" size="sm" variant="secondary">
-            Go
-          </Button>
+          {backendRuntime ? (
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-md border border-border bg-card px-2 text-[11px]">
+              <Server className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate font-mono">{backendRuntime.command}</span>
+            </div>
+          ) : (
+            <>
+              <Server className="ml-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <Input
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                aria-label="Page preview URL"
+                placeholder={runtime.defaultUrl}
+                className="h-7 min-w-0 flex-1 border border-border bg-card font-mono text-[11px] focus-visible:border-ring focus-visible:bg-card"
+                spellCheck={false}
+              />
+              <Button
+                type="submit"
+                size="sm"
+                variant="secondary"
+                className="h-7 shrink-0 border border-border"
+              >
+                Go
+              </Button>
+            </>
+          )}
         </form>
         <div
-          className="ml-1 flex shrink-0 items-center rounded-md bg-muted/60 p-0.5"
+          className="ml-1 flex shrink-0 items-center rounded-md border border-border bg-card p-0.5"
           role="group"
           aria-label="Preview viewport"
         >
@@ -1164,7 +1489,7 @@ export function ComponentPreviewPane({
             value={mobileViewportId}
             onChange={(value) => setMobileViewportId(value as MobileViewportId)}
             options={MOBILE_VIEWPORT_OPTIONS}
-            className="h-7 w-[min(13rem,24vw)] bg-muted/60"
+            className="h-7 w-[min(13rem,24vw)] border border-border bg-card"
             menuClassName="w-[min(19rem,80vw)]"
           />
         )}
@@ -1224,15 +1549,6 @@ export function ComponentPreviewPane({
           <ExternalLink className="h-3.5 w-3.5" />
         </Button>
       </div>
-
-      {message && (
-        <div
-          className="border-b border-border/50 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300"
-          role="status"
-        >
-          {message}
-        </div>
-      )}
 
       <div
         className={cn(
@@ -1513,12 +1829,31 @@ export function ComponentPreviewPane({
             <div className="m-auto w-full max-w-lg rounded-xl border border-border/70 bg-card p-6 shadow-sm">
               <div className="flex items-start gap-3">
                 <div className="rounded-lg bg-primary/10 p-2 text-primary">
-                  <Box className="h-5 w-5" />
+                  {backendRuntime ? (
+                    <Server className="h-5 w-5" />
+                  ) : (
+                    <Box className="h-5 w-5" />
+                  )}
                 </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold">Preview the full page</p>
+                  <p className="text-sm font-semibold">
+                    {backendRuntime ? "Start the backend server" : "Preview the full page"}
+                  </p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    {runtime.command ? (
+                    {backendRuntime ? (
+                      <>
+                        Atelier detected{" "}
+                        <span className="font-medium text-foreground">
+                          {backendRuntime.framework}
+                        </span>{" "}
+                        in{" "}
+                        <span className="font-mono text-foreground">
+                          {backendRuntime.projectName}
+                        </span>
+                        . Start its existing package script and inspect the live output in
+                        the integrated terminal below.
+                      </>
+                    ) : runtime.command ? (
                       <>
                         Atelier detected{" "}
                         <span className="font-medium text-foreground">
@@ -1541,22 +1876,45 @@ export function ComponentPreviewPane({
                 </div>
               </div>
 
-              <div className="mt-5 grid grid-cols-2 gap-2 rounded-lg bg-muted/45 p-3 text-[11px]">
-                <div>
-                  <p className="text-muted-foreground">Runtime</p>
+              <div className="mt-5 flex flex-wrap gap-4 rounded-lg bg-muted/45 p-3 text-[11px]">
+                <div className="min-w-0 flex-1">
+                  <p className="text-muted-foreground">Frontend</p>
                   <p className="mt-0.5 font-medium">
                     {runtime.storybook ? "Storybook" : runtime.framework}
+                    {" · "}
+                    <span className="font-mono">
+                      {runtime.command ?? (customCommand.trim() || "Not detected")}
+                    </span>
                   </p>
                 </div>
-                <div>
-                  <p className="text-muted-foreground">Command</p>
-                  <p className="mt-0.5 truncate font-mono font-medium">
-                    {runtime.command ?? (customCommand.trim() || "Not detected")}
-                  </p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-muted-foreground">Backend</p>
+                  {displayedBackend ? (
+                    <p className="mt-0.5 truncate font-medium">
+                      {displayedBackend.framework}
+                      {" · "}
+                      <span className="font-mono">{displayedBackend.command}</span>
+                    </p>
+                  ) : (
+                    <p className="mt-0.5 text-muted-foreground">Not detected</p>
+                  )}
                 </div>
               </div>
 
-              {!runtime.command && (
+              {selectedMissingBinary && (
+                <div className="mt-3 flex items-start justify-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-[11px] leading-relaxed text-destructive">
+                  <span>
+                    <span className="font-mono font-medium">
+                      {selectedMissingBinary}
+                    </span>{" "}
+                    is not installed on this machine, so this command cannot
+                    start. Install it, or enter a command below that uses a
+                    package manager you have.
+                  </span>
+                </div>
+              )}
+
+              {(!selectedCommand || selectedMissingBinary) && (
                 <div className="mt-4">
                   <label
                     htmlFor="page-preview-command"
@@ -1633,22 +1991,81 @@ export function ComponentPreviewPane({
                 <Button
                   type="button"
                   size="sm"
-                  onClick={() => void launch()}
-                  disabled={(!runtime.command && !customCommand.trim()) || launching}
+                  onClick={() =>
+                    void (backendRunning ? stopBackend() : launch())
+                  }
+                  disabled={
+                    !backendRunning &&
+                    ((!selectedCommand && !customCommand.trim()) || launching)
+                  }
                 >
-                  {launching ? (
+                  {backendRunning ? (
+                    <Square className="h-3.5 w-3.5" />
+                  ) : launching ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <Play className="h-3.5 w-3.5" />
                   )}
-                  {launching ? "Starting…" : "Start app preview"}
+                  {backendRunning
+                    ? "Stop backend"
+                    : launching
+                      ? "Starting…"
+                      : backendRuntime
+                        ? "Start backend"
+                        : "Start app preview"}
                 </Button>
-                <Button type="button" size="sm" variant="outline" onClick={useAddress}>
-                  Open running app
+                {!backendRuntime && (
+                  <Button type="button" size="sm" variant="outline" onClick={useAddress}>
+                    Open running app
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!managedTermId && !launching}
+                  onClick={() => setLogModalOpen((open) => !open)}
+                >
+                  <TerminalIcon className="h-3.5 w-3.5" />
+                  {logModalOpen ? "Hide terminal" : "View terminal"}
                 </Button>
               </div>
 
-              {!runtime.command && (
+              {logModalOpen && (
+                <div className="mt-3 overflow-hidden rounded-lg border border-border/70 bg-zinc-950">
+                  <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <TerminalIcon className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                      <span className="truncate text-[11px] font-medium text-zinc-200">
+                        {launching
+                          ? "Starting server — output updates live"
+                          : backendRuntime
+                            ? "Backend terminal"
+                            : "Preview terminal"}
+                      </span>
+                    </div>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6 shrink-0 text-zinc-400 hover:bg-white/10 hover:text-zinc-100"
+                      aria-label="Hide preview terminal"
+                      title="Hide preview terminal"
+                      onClick={() => setLogModalOpen(false)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  <pre
+                    className="h-36 overflow-auto p-3 font-mono text-[11px] leading-relaxed text-zinc-100"
+                    aria-live="polite"
+                  >
+                    {terminalLog || "Waiting for preview command output…"}
+                  </pre>
+                </div>
+              )}
+
+              {!selectedCommand && (
                 <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
                   The command runs from the workspace root and is remembered for this
                   workspace. You can also enter the URL of an already running local app above.

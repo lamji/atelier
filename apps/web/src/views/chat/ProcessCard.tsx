@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
@@ -17,6 +18,7 @@ import {
   FolderLock,
   History,
   MessageSquareText,
+  Minus,
   Network,
   Send,
   Wrench,
@@ -29,6 +31,7 @@ import { liveHeadline } from "@/lib/live-headline";
 import { STAGE_LABELS } from "@/lib/stage-labels";
 import { useElapsed } from "@/hooks/useElapsed";
 import { UnifiedDiffView } from "./UnifiedDiffView";
+import { ChatErrorModal } from "./ChatErrorModal";
 import type { PipelineStage, Plan, PlanStep } from "@atelier/protocol";
 import type { AgentAction, LiveDiff } from "@/state/sessions.store";
 import type { ChatItemVm } from "@/types";
@@ -94,7 +97,12 @@ export const ProcessCard = memo(function ProcessCard(props: ProcessCardProps) {
       exit={{ opacity: 0 }}
       className="overflow-hidden rounded-2xl bg-card"
     >
-      <div className="flex items-center gap-2 border-b border-border/70 bg-muted/35 px-4 py-3">
+      <div
+        className={cn(
+          "flex items-center gap-2 border-b border-border/70 bg-muted/35 py-3",
+          props.compact ? "px-2.5" : "px-4"
+        )}
+      >
         <span className="icon-tile icon-tile-sm">
           {props.busy ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -129,7 +137,7 @@ export const ProcessCard = memo(function ProcessCard(props: ProcessCardProps) {
         )}
       </div>
 
-      <div className="px-4 py-3">
+      <div className={cn("py-3", props.compact ? "px-2.5" : "px-4")}>
         {props.busy && props.stage && running.length > 0 && (
           <p className="mb-2 text-[11px] text-muted-foreground/60">
             {STAGE_LABELS[props.stage]}
@@ -209,6 +217,370 @@ const WorkflowTimeline = memo(function WorkflowTimeline({
   const hasUnplannedEdits = unassignedDiffs.length > 0;
   const frontendReviewPassed = /FRONTEND REVIEW:\s*PASS\b/i.test(report);
   const frontendReviewFailed = frontendReview && !frontendReviewPassed;
+  const [openSections, setOpenSections] = useState<string[]>([]);
+
+  // A run in flight has to show its steps; only a finished plan folds away.
+  useEffect(() => {
+    if (!busy) return;
+    setOpenSections((current) =>
+      current.includes("steps") ? current : [...current, "steps"]
+    );
+  }, [busy]);
+
+  // The outcome is what the run was for: once it lands, fold the steps away
+  // and stand the report open in their place.
+  useEffect(() => {
+    if (busy) return;
+    setOpenSections((current) => {
+      const next = current.filter((section) => section !== "steps");
+      return next.includes("report") ? next : [...next, "report"];
+    });
+  }, [busy]);
+
+  const toggleSection = (id: string) =>
+    setOpenSections((current) =>
+      current.includes(id)
+        ? current.filter((section) => section !== id)
+        : [...current, id]
+    );
+
+  const requestRow = (last: boolean) => (
+    <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+      {!last && <TimelineConnector complete />}
+      <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+        <MessageSquareText className="h-2.5 w-2.5" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="text-[11px] font-semibold leading-[17px] text-foreground">
+            Original request
+          </span>
+          <time className="text-[10px] tabular-nums text-muted-foreground/65">
+            {formatRequestTime(requestedAt)}
+          </time>
+        </div>
+        <p className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-muted/35 px-3 py-2 text-[11px] leading-relaxed text-foreground/80">
+          {request.trim() || "Original request text is unavailable."}
+        </p>
+        {images.length > 0 && (
+          <div className="mt-2 flex max-w-md flex-wrap items-start gap-2">
+            {images.map((src, index) => (
+              <img
+                key={`request-image:${index}`}
+                src={src}
+                alt={`Request screenshot ${index + 1}`}
+                className="block h-auto max-h-52 w-auto max-w-full rounded-lg border border-border/70 bg-muted/30 object-contain"
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </li>
+  );
+
+  const logRow = (item: ChatItemVm, last: boolean) => {
+    const Icon = workflowLogIcon(item.logTopic);
+    const warning = item.logTopic === "llm.request" && /⚠/.test(item.text);
+    return (
+      <li key={item.id} className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+        {!last && <TimelineConnector complete />}
+        <span
+          className={cn(
+            "relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full",
+            warning
+              ? "bg-destructive/12 text-destructive"
+              : "bg-primary/10 text-primary"
+          )}
+        >
+          <Icon className="h-2.5 w-2.5" />
+        </span>
+        {item.logDetail ? (
+          <LogDetailRow
+            item={item}
+            open={openSteps.includes(item.id)}
+            onToggle={() => onToggleStep(item.id)}
+          />
+        ) : (
+          <span className="min-w-0 flex-1 break-words text-[11px] leading-[17px] text-muted-foreground">
+            {item.text}
+          </span>
+        )}
+      </li>
+    );
+  };
+
+  const preparationRow = (last: boolean) => {
+    const open = openSteps.includes("preparation");
+    return (
+      <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+        {!last && <TimelineConnector complete />}
+        <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+          <Wrench className="h-2.5 w-2.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onToggleStep("preparation")}
+            aria-expanded={open}
+            className="-mt-1 h-auto min-h-7 w-full justify-start px-0 py-0.5 text-[11px] hover:bg-transparent"
+          >
+            <span className="min-w-0 flex-1 text-left">
+              <span className="block font-semibold text-foreground">Preparation & planning</span>
+              <span className="block text-[10px] font-normal text-muted-foreground/70">
+                {unassignedActions.length} tools
+              </span>
+            </span>
+            {open ? (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+            )}
+          </Button>
+          <AnimatePresence initial={false}>
+            {open && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="pt-2">
+                  <StepEvidence actions={unassignedActions} diffs={[]} />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </li>
+    );
+  };
+
+  const stepRow = (step: PlanStep, last: boolean) => {
+    const stepActions = actions.filter((action) => action.stepId === step.id);
+    const stepDiffs = diffs.filter((diff) => diff.stepId === step.id);
+    const open = openSteps.includes(step.id);
+    return (
+      <li key={step.id} className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+        {!last && <TimelineConnector complete={step.status === "done"} />}
+        <PlanStepNode status={step.status} verified={Boolean(step.verification)} />
+        <div className="min-w-0 flex-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onToggleStep(step.id)}
+            aria-expanded={open}
+            className="-mt-1 h-auto min-h-7 w-full min-w-0 justify-start whitespace-normal px-0 py-0.5 pr-1 text-left hover:bg-transparent"
+          >
+            <span className="min-w-0 flex-1 overflow-hidden">
+              <span className="block break-words text-[11px] font-semibold text-foreground">
+                {step.title}
+              </span>
+              <span className="block text-[10px] font-normal text-muted-foreground/70">
+                {stepActions.length} tools · {stepDiffs.length} edits
+              </span>
+              {step.files.length > 0 && (
+                <span className="mt-0.5 block whitespace-normal break-all font-mono text-[10px] font-normal text-muted-foreground/55">
+                  {step.files.join(", ")}
+                </span>
+              )}
+              <StepOutcomeLines step={step} />
+            </span>
+            {open ? (
+              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            )}
+          </Button>
+          <AnimatePresence initial={false}>
+            {open && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="space-y-2 pt-2">
+                  {(step.detail || step.verification || step.note) && (
+                    <div className="grid gap-1.5 rounded-lg bg-muted/35 px-3 py-2 text-[11px]">
+                      {step.detail && <DetailLine label="Purpose" value={step.detail} />}
+                      {step.verification && <DetailLine label="Verification" value={step.verification} />}
+                      {step.note && <DetailLine label="Outcome" value={step.note} />}
+                    </div>
+                  )}
+                  <StepEvidence actions={stepActions} diffs={stepDiffs} />
+                  {stepActions.length === 0 && stepDiffs.length === 0 && (
+                    <span className="text-[11px] text-muted-foreground/60">
+                      No tool calls or file edits were recorded for this step.
+                    </span>
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </li>
+    );
+  };
+
+  const unplannedRow = (last: boolean) => {
+    const open = openSteps.includes("unplanned-edits");
+    return (
+      <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+        {!last && <TimelineConnector complete={false} />}
+        <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+          <Wrench className="h-2.5 w-2.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onToggleStep("unplanned-edits")}
+            aria-expanded={open}
+            className="-mt-1 h-auto min-h-7 w-full justify-start px-0 py-0.5 text-[11px] hover:bg-transparent"
+          >
+            <span className="min-w-0 flex-1 text-left">
+              <span className="block font-semibold text-destructive">Unplanned file edits</span>
+              <span className="block text-[10px] font-normal text-muted-foreground/70">
+                {unassignedDiffs.length} {unassignedDiffs.length === 1 ? "edit" : "edits"} outside a plan step
+              </span>
+            </span>
+            {open ? (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+            )}
+          </Button>
+          <AnimatePresence initial={false}>
+            {open && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="pt-2">
+                  <StepEvidence actions={[]} diffs={unassignedDiffs} />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </li>
+    );
+  };
+
+  const busyRow = () => (
+    <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
+      <TimelineConnector complete={false} />
+      <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full border-2 border-primary bg-card text-primary ring-4 ring-primary/15">
+        <BrainCircuit className="h-2.5 w-2.5 animate-pulse" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[11px] font-semibold leading-[17px] text-foreground">
+          {thinking.trim() ? "Thinking" : "Working"}
+        </span>
+        <span className="text-shimmer block truncate text-[10px] text-muted-foreground">
+          {thinking.trim() || status}
+        </span>
+      </span>
+    </li>
+  );
+
+  const reportRow = () => (
+    <ReportRow
+      report={report}
+      frontendReview={frontendReview}
+      frontendReviewFailed={frontendReviewFailed}
+      compact={compact}
+    />
+  );
+
+  const heading = (
+    <div className="mb-3 flex items-center gap-1.5">
+      <ClipboardList className="h-3.5 w-3.5 text-primary/70" />
+      <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Execution plan
+      </span>
+      <span className="ml-auto shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground/70">
+        {done}/{steps.length}
+      </span>
+    </div>
+  );
+
+  /*
+   * In the preview sidebar the same flow is ~230px wide, where the request
+   * text, every context log and every plan step stack into a column taller
+   * than the panel — the outcome ends up below the fold of a run that is
+   * already finished. So compact folds the flow into three titled
+   * accordions and leaves only the live/closing row standing.
+   */
+  if (compact) {
+    const hasPlanRows = hasPreparation || steps.length > 0 || hasUnplannedEdits;
+    return (
+      <div>
+        {heading}
+        <div className="flex flex-col gap-1.5">
+          <TimelineSection
+            icon={MessageSquareText}
+            title="Original request"
+            open={openSections.includes("request")}
+            onToggle={() => toggleSection("request")}
+          >
+            <ol className="relative">{requestRow(true)}</ol>
+          </TimelineSection>
+          {logs.length > 0 && (
+            <TimelineSection
+              icon={Network}
+              title="Context gathered"
+              meta={String(logs.length)}
+              open={openSections.includes("context")}
+              onToggle={() => toggleSection("context")}
+            >
+              <ol className="relative">
+                {logs.map((item, index) =>
+                  logRow(item, index === logs.length - 1)
+                )}
+              </ol>
+            </TimelineSection>
+          )}
+          {hasPlanRows && (
+            <TimelineSection
+              icon={ClipboardList}
+              title="Plan steps"
+              meta={`${done}/${steps.length}`}
+              open={openSections.includes("steps")}
+              onToggle={() => toggleSection("steps")}
+            >
+              <ol className="relative">
+                {hasPreparation &&
+                  preparationRow(steps.length === 0 && !hasUnplannedEdits)}
+                {steps.map((step, index) =>
+                  stepRow(step, index === steps.length - 1 && !hasUnplannedEdits)
+                )}
+                {hasUnplannedEdits && unplannedRow(true)}
+              </ol>
+            </TimelineSection>
+          )}
+          {!busy && (
+            <TimelineSection
+              icon={FileCheck2}
+              title="Report"
+              open={openSections.includes("report")}
+              onToggle={() => toggleSection("report")}
+            >
+              <ol className="relative">{reportRow()}</ol>
+            </TimelineSection>
+          )}
+        </div>
+        {busy && <ol className="relative mt-2">{busyRow()}</ol>}
+      </div>
+    );
+  }
+
   const totalRows =
     1 +
     logs.length +
@@ -221,276 +593,86 @@ const WorkflowTimeline = memo(function WorkflowTimeline({
   let rowIndex = 0;
   return (
     <div>
-      <div className="mb-3 flex items-center gap-1.5">
-        <ClipboardList className="h-3.5 w-3.5 text-primary/70" />
-        <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Execution plan
-        </span>
-        <span className="ml-auto shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground/70">
-          {done}/{steps.length}
-        </span>
-      </div>
+      {heading}
       <ol className="relative">
-        {(() => {
-          const last = isLast(rowIndex++);
-          return (
-            <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-              {!last && <TimelineConnector complete />}
-              <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                <MessageSquareText className="h-2.5 w-2.5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-baseline gap-x-2">
-                  <span className="text-[11px] font-semibold leading-[17px] text-foreground">
-                    Original request
-                  </span>
-                  <time className="text-[10px] tabular-nums text-muted-foreground/65">
-                    {formatRequestTime(requestedAt)}
-                  </time>
-                </div>
-                <p className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-muted/35 px-3 py-2 text-[11px] leading-relaxed text-foreground/80">
-                  {request.trim() || "Original request text is unavailable."}
-                </p>
-                {images.length > 0 && (
-                  <div className="mt-2 flex max-w-md flex-wrap items-start gap-2">
-                    {images.map((src, index) => (
-                      <img
-                        key={`request-image:${index}`}
-                        src={src}
-                        alt={`Request screenshot ${index + 1}`}
-                        className="block h-auto max-h-52 w-auto max-w-full rounded-lg border border-border/70 bg-muted/30 object-contain"
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </li>
-          );
-        })()}
-        {logs.map((item) => {
-          const last = isLast(rowIndex++);
-          const Icon = workflowLogIcon(item.logTopic);
-          const warning = item.logTopic === "llm.request" && /⚠/.test(item.text);
-          return (
-            <li key={item.id} className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-              {!last && <TimelineConnector complete />}
-              <span
-                className={cn(
-                  "relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full",
-                  warning
-                    ? "bg-destructive/12 text-destructive"
-                    : "bg-primary/10 text-primary"
-                )}
-              >
-                <Icon className="h-2.5 w-2.5" />
-              </span>
-              {item.logDetail ? (
-                <LogDetailRow
-                  item={item}
-                  open={openSteps.includes(item.id)}
-                  onToggle={() => onToggleStep(item.id)}
-                />
-              ) : (
-                <span className="min-w-0 flex-1 break-words text-[11px] leading-[17px] text-muted-foreground">
-                  {item.text}
-                </span>
-              )}
-            </li>
-          );
-        })}
-        {hasPreparation && (() => {
-          const last = isLast(rowIndex++);
-          const open = openSteps.includes("preparation");
-          return (
-            <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-              {!last && <TimelineConnector complete />}
-              <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                <Wrench className="h-2.5 w-2.5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onToggleStep("preparation")}
-                  aria-expanded={open}
-                  className="-mt-1 h-auto min-h-7 w-full justify-start px-0 py-0.5 text-[11px] hover:bg-transparent"
-                >
-                  <span className="min-w-0 flex-1 text-left">
-                    <span className="block font-semibold text-foreground">Preparation & planning</span>
-                    <span className="block text-[10px] font-normal text-muted-foreground/70">
-                      {unassignedActions.length} tools
-                    </span>
-                  </span>
-                  {open ? (
-                    <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-                  )}
-                </Button>
-                <AnimatePresence initial={false}>
-                  {open && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="pt-2">
-                        <StepEvidence actions={unassignedActions} diffs={[]} />
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </li>
-          );
-        })()}
-        {steps.map((step) => {
-          const last = isLast(rowIndex++);
-          const stepActions = actions.filter((action) => action.stepId === step.id);
-          const stepDiffs = diffs.filter((diff) => diff.stepId === step.id);
-          const open = openSteps.includes(step.id);
-          return (
-            <li key={step.id} className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-              {!last && (
-                <TimelineConnector complete={step.status === "done"} />
-              )}
-              <PlanStepNode status={step.status} />
-              <div className="min-w-0 flex-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onToggleStep(step.id)}
-                  aria-expanded={open}
-                  className="-mt-1 h-auto min-h-7 w-full min-w-0 justify-start whitespace-normal px-0 py-0.5 pr-1 text-left hover:bg-transparent"
-                >
-                  <span className="min-w-0 flex-1 overflow-hidden">
-                    <span className="block break-words text-[11px] font-semibold text-foreground">
-                      {step.title}
-                    </span>
-                    <span className="block text-[10px] font-normal text-muted-foreground/70">
-                      {stepActions.length} tools · {stepDiffs.length} edits
-                    </span>
-                    {step.files.length > 0 && (
-                      <span className="mt-0.5 block whitespace-normal break-all font-mono text-[10px] font-normal text-muted-foreground/55">
-                        {step.files.join(", ")}
-                      </span>
-                    )}
-                  </span>
-                  {open ? (
-                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  )}
-                </Button>
-                <AnimatePresence initial={false}>
-                  {open && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="space-y-2 pt-2">
-                        {(step.detail || step.verification || step.note) && (
-                          <div className="grid gap-1.5 rounded-lg bg-muted/35 px-3 py-2 text-[11px]">
-                            {step.detail && <DetailLine label="Purpose" value={step.detail} />}
-                            {step.verification && <DetailLine label="Verification" value={step.verification} />}
-                            {step.note && <DetailLine label="Outcome" value={step.note} />}
-                          </div>
-                        )}
-                        <StepEvidence actions={stepActions} diffs={stepDiffs} />
-                        {stepActions.length === 0 && stepDiffs.length === 0 && (
-                          <span className="text-[11px] text-muted-foreground/60">
-                            No tool calls or file edits were recorded for this step.
-                          </span>
-                        )}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </li>
-          );
-        })}
-        {hasUnplannedEdits && (() => {
-          const last = isLast(rowIndex++);
-          const open = openSteps.includes("unplanned-edits");
-          return (
-            <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-              {!last && <TimelineConnector complete={false} />}
-              <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive">
-                <Wrench className="h-2.5 w-2.5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onToggleStep("unplanned-edits")}
-                  aria-expanded={open}
-                  className="-mt-1 h-auto min-h-7 w-full justify-start px-0 py-0.5 text-[11px] hover:bg-transparent"
-                >
-                  <span className="min-w-0 flex-1 text-left">
-                    <span className="block font-semibold text-destructive">Unplanned file edits</span>
-                    <span className="block text-[10px] font-normal text-muted-foreground/70">
-                      {unassignedDiffs.length} {unassignedDiffs.length === 1 ? "edit" : "edits"} outside a plan step
-                    </span>
-                  </span>
-                  {open ? (
-                    <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-                  )}
-                </Button>
-                <AnimatePresence initial={false}>
-                  {open && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="pt-2">
-                        <StepEvidence actions={[]} diffs={unassignedDiffs} />
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </li>
-          );
-        })()}
-        {busy && (
-          <li className="relative flex min-h-9 gap-2.5 pb-2.5 last:pb-0">
-            <TimelineConnector complete={false} />
-            <span className="relative z-10 flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full border-2 border-primary bg-card text-primary ring-4 ring-primary/15">
-              <BrainCircuit className="h-2.5 w-2.5 animate-pulse" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block text-[11px] font-semibold leading-[17px] text-foreground">
-                {thinking.trim() ? "Thinking" : "Working"}
-              </span>
-              <span className="text-shimmer block truncate text-[10px] text-muted-foreground">
-                {thinking.trim() || status}
-              </span>
-            </span>
-          </li>
-        )}
-        {!busy && (
-          <ReportRow
-            report={report}
-            frontendReview={frontendReview}
-            frontendReviewFailed={frontendReviewFailed}
-            compact={compact}
-          />
-        )}
+        {requestRow(isLast(rowIndex++))}
+        {logs.map((item) => logRow(item, isLast(rowIndex++)))}
+        {hasPreparation && preparationRow(isLast(rowIndex++))}
+        {steps.map((step) => stepRow(step, isLast(rowIndex++)))}
+        {hasUnplannedEdits && unplannedRow(isLast(rowIndex++))}
+        {busy && busyRow()}
+        {!busy && reportRow()}
       </ol>
     </div>
   );
 });
+
+/**
+ * One titled fold of the compact execution plan.
+ *
+ * The header is the whole summary of what is inside — a glyph, the section's
+ * name and its count — so a finished run reads as three lines instead of
+ * three screens, and any one part opens back into the exact same timeline
+ * rows the wide column prints.
+ */
+function TimelineSection({
+  icon: Icon,
+  title,
+  meta,
+  open,
+  onToggle,
+  children,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  title: string;
+  meta?: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="overflow-hidden rounded-lg border border-border/60 bg-muted/20">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={onToggle}
+        aria-expanded={open}
+        className={cn(
+          "flex h-auto min-h-8 w-full items-center justify-start gap-1.5 rounded-none px-2 py-1.5 text-left",
+          open && "border-b border-border/50"
+        )}
+      >
+        <Icon className="h-3 w-3 shrink-0 text-primary/70" />
+        <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {title}
+        </span>
+        {meta && (
+          <span className="shrink-0 text-[10px] font-medium tabular-nums text-muted-foreground/65">
+            {meta}
+          </span>
+        )}
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        )}
+      </Button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="px-2 pb-2 pt-1.5">{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </section>
+  );
+}
 
 /**
  * The turn's closing row.
@@ -829,21 +1011,51 @@ function EvidenceSection({
   value: string;
   error?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   return (
     <section className="min-w-0 rounded-lg bg-muted/25 px-2.5 py-2">
       <span className="block text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/55">
         {label}
       </span>
-      <pre
-        className={cn(
-          "mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed",
-          error ? "text-destructive" : "text-foreground/70"
-        )}
-      >
-        {value}
-      </pre>
+      {/*
+       * A failure is an interruption, not evidence to scroll through. A
+       * provider crash dumps its whole raw transcript here, which buried the
+       * timeline under a wall of red in the sidebar — so the headline stays
+       * inline and the dump opens as a modal alert.
+       */}
+      {error ? (
+        <div className="mt-1 flex items-center justify-between gap-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-[10px] leading-relaxed text-destructive">
+            {firstLine(value)}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setOpen(true)}
+            className="h-auto shrink-0 px-1.5 py-0.5 text-[10px] text-destructive hover:text-destructive"
+          >
+            View error
+          </Button>
+          <ChatErrorModal
+            error={open ? value : null}
+            title={label}
+            onDismiss={() => setOpen(false)}
+          />
+        </div>
+      ) : (
+        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground/70">
+          {value}
+        </pre>
+      )}
     </section>
   );
+}
+
+/** The failure's headline — the rest of a crash dump belongs in the modal. */
+function firstLine(value: string): string {
+  const line = value.trim().split("\n")[0]?.trim() ?? "";
+  return line || "Failed";
 }
 
 function DiffEvidence({
@@ -972,17 +1184,84 @@ function LogDetailRow({
 }
 
 /**
+ * What a step says about itself, always visible under its title.
+ *
+ * These used to show only when the row was expanded, which is exactly
+ * when nobody looks: a checkmark reads as "done" on its own, and the note
+ * that says "[unverified — model-asserted]" is the one line that can
+ * contradict it. So proof and outcome sit inline, next to the mark.
+ */
+function StepOutcomeLines({ step }: { step: PlanStep }) {
+  if (!step.verification && !step.note) return null;
+  return (
+    <>
+      {step.verification && (
+        <span className="mt-0.5 block whitespace-normal break-words text-[10px] font-normal text-success/90">
+          Verified: {step.verification}
+        </span>
+      )}
+      {step.note && (
+        <span
+          className={cn(
+            "mt-0.5 block whitespace-normal break-words text-[10px] font-normal",
+            isUnverifiedNote(step.note)
+              ? "text-warning"
+              : "text-muted-foreground/80"
+          )}
+        >
+          {step.note}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** The tracker's marker for a done-note nothing observed backed. */
+function isUnverifiedNote(note: string): boolean {
+  return note.includes("[unverified");
+}
+
+/**
  * One node on the plan rail. Every state is the same 17px circle so the rail
  * stays straight — only the fill, the border and the glyph change.
+ *
+ * A done step is drawn two ways: solid when something observed backed it
+ * (verification recorded), hollow when the checkmark is the model's own
+ * word. Same colour, so the rail still reads as progress — but the eye can
+ * tell a tested step from an asserted one without opening the row.
  */
-function PlanStepNode({ status }: { status: PlanStep["status"] }) {
+function PlanStepNode({
+  status,
+  verified,
+}: {
+  status: PlanStep["status"];
+  verified?: boolean;
+}) {
   const base =
     "relative z-10 mt-px flex h-[17px] w-[17px] shrink-0 items-center justify-center rounded-full";
 
   if (status === "done") {
     return (
-      <span className={cn(base, "bg-success text-white")}>
+      <span
+        className={cn(
+          base,
+          verified
+            ? "bg-success text-white"
+            : "border-2 border-success bg-card text-success"
+        )}
+        title={verified ? "Verified" : "Done — model-asserted, not verified"}
+      >
         <Check className="h-2.5 w-2.5" strokeWidth={3} />
+      </span>
+    );
+  }
+  if (status === "skipped") {
+    return (
+      <span
+        className={cn(base, "border border-muted-foreground/50 bg-card text-muted-foreground")}
+        title="Skipped"
+      >
+        <Minus className="h-2.5 w-2.5" strokeWidth={3} />
       </span>
     );
   }

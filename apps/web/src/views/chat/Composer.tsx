@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  Code2,
   Cpu,
   FileCode2,
   FileText,
@@ -15,6 +16,7 @@ import {
   ImagePlus,
   ListPlus,
   Loader2,
+  MessageCircleQuestion,
   Paperclip,
   Palette,
   Plus,
@@ -24,7 +26,12 @@ import {
   Square,
   X,
 } from "lucide-react";
-import type { MarkdownFile, ModelOption, SlashCommand } from "@atelier/protocol";
+import type {
+  MarkdownFile,
+  ModelOption,
+  SlashCommand,
+  TurnMode,
+} from "@atelier/protocol";
 import { cn } from "@/lib/cn";
 import {
   BACKEND_ENGINEER_CHOICE,
@@ -38,6 +45,7 @@ import {
   type MentionEntry,
 } from "@/lib/mention-tree";
 import { Tooltip } from "@/components/ui/tooltip";
+import { ChatErrorModal } from "./ChatErrorModal";
 import { NoProviderModal } from "./NoProviderModal";
 import { OllamaVisionModal } from "./OllamaVisionModal";
 import { useMarkdownStore } from "@/state/markdown.store";
@@ -490,13 +498,6 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   /** Per-turn switches: pills in the full composer, rows in the sidebar. */
   const turnItems: CheckItem[] = [
     {
-      key: "plan",
-      label: "Plan",
-      hint: "The agent proposes a plan for approval before touching files",
-      checked: vm.planMode,
-      onChange: vm.setPlanMode,
-    },
-    {
       key: "knowledge",
       label: "Knowledge",
       hint: "System knowledge: retrieval, impact, plan, review and session memory",
@@ -548,16 +549,8 @@ export const Composer = memo(function Composer(props: ComposerProps) {
         }}
         onSelectModel={selectVisionModel}
       />
+      <ChatErrorModal error={vm.error} title="Composer error" />
       <div className="w-full">
-        {vm.error && (
-          <motion.p
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-2 rounded-2xl bg-destructive/10 px-4 py-2.5 text-xs text-destructive"
-          >
-            {vm.error}
-          </motion.p>
-        )}
         {vm.attachments.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
             {vm.attachments.map((path) => (
@@ -815,6 +808,8 @@ export const Composer = memo(function Composer(props: ComposerProps) {
                       effort={vm.effort}
                       effortOptions={reasoningOptions}
                       onEffort={(v) => vm.changeEffort(v as EffortChoice)}
+                      turnMode={vm.turnMode}
+                      onTurnMode={vm.setTurnMode}
                       switches={turnItems}
                       modes={modeItems}
                     />
@@ -835,12 +830,9 @@ export const Composer = memo(function Composer(props: ComposerProps) {
                       onChange={vm.setPromptFile}
                     />
                     <span className="mx-1 h-3.5 w-px shrink-0 bg-border" />
-                    <ComposerToggle
-                      icon={ClipboardList}
-                      label="Plan"
-                      active={vm.planMode}
-                      onToggle={vm.setPlanMode}
-                      tooltip="Plan mode: the agent proposes a plan for approval before touching files"
+                    <ComposerModePicker
+                      value={vm.turnMode}
+                      onChange={vm.setTurnMode}
                     />
                     <ComposerToggle
                       icon={Brain}
@@ -1116,10 +1108,175 @@ function isSeparator(
   return !Array.isArray(option) && option.separator;
 }
 
+interface TurnModeOption {
+  value: TurnMode;
+  label: string;
+  icon: typeof Brain;
+  hint: string;
+}
+
 /**
- * Ghost-pill toggle for the composer's mode switches (Plan / Knowledge /
- * Vibe). Lit with the primary tint while active — same state, same
- * handlers as the old checkboxes, just IDE-style chrome.
+ * What a turn is for, in the order a piece of work moves through them:
+ * ask about it, plan it, build it. Code is the default and the one that
+ * behaves exactly as every turn did before this picker existed.
+ */
+const CODE_MODE: TurnModeOption = {
+  value: "code",
+  label: "Code",
+  icon: Code2,
+  hint: "Does the work: edits, verifies, and reports what changed",
+};
+
+const TURN_MODES: TurnModeOption[] = [
+  {
+    value: "ask",
+    label: "Ask",
+    icon: MessageCircleQuestion,
+    hint: "Answers in prose. Reads and read-only checks only, never an edit",
+  },
+  {
+    value: "plan",
+    label: "Plan",
+    icon: ClipboardList,
+    hint: "Proposes a plan for approval before touching files",
+  },
+  CODE_MODE,
+];
+
+/** Falls back to Code, which is what an unknown value should behave as. */
+function turnModeOption(value: TurnMode): TurnModeOption {
+  return TURN_MODES.find((mode) => mode.value === value) ?? CODE_MODE;
+}
+
+/**
+ * The composer's Ask / Plan / Code picker.
+ *
+ * These three were never independent switches — a turn is exactly one of
+ * them — but Plan used to be a lone toggle and the other two were left to
+ * the agent's intent classifier to guess from the prompt. The guess is
+ * usually right and wrong in the two ways that cost the most: a question
+ * answered with unrequested edits, and a build request answered with
+ * prose. One picker, one active value, and the user gets to say which.
+ *
+ * Only a non-default pick is tinted. Code is where the app sits, and a
+ * permanently lit pill is a pill nobody reads.
+ */
+function ComposerModePicker(props: {
+  value: TurnMode;
+  onChange: (value: TurnMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissOnOutside(open, rootRef, () => setOpen(false));
+  const active = turnModeOption(props.value);
+  const Icon = active.icon;
+
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <Tooltip content={`${active.label} mode: ${active.hint}`}>
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className={cn(
+            "flex h-6 select-none items-center gap-1 rounded-md px-1.5",
+            "text-[11px] font-medium transition-colors",
+            props.value !== "code"
+              ? "bg-primary/15 text-primary"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            open && props.value === "code" && "bg-accent text-foreground"
+          )}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          {active.label}
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 opacity-60 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </Tooltip>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            role="menu"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.12 }}
+            className={cn(
+              "absolute bottom-full left-0 z-50 mb-1 w-64 rounded-lg",
+              "border border-border bg-card p-1 shadow-pop"
+            )}
+          >
+            {TURN_MODES.map((mode) => (
+              <TurnModeRow
+                key={mode.value}
+                mode={mode}
+                active={mode.value === props.value}
+                onPick={() => {
+                  props.onChange(mode.value);
+                  setOpen(false);
+                }}
+              />
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** One line of the picker: icon, label, the why underneath, and a tick. */
+function TurnModeRow(props: {
+  mode: TurnModeOption;
+  active: boolean;
+  onPick: () => void;
+}) {
+  const Icon = props.mode.icon;
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={props.active}
+      onClick={props.onPick}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-md px-2 py-1.5",
+        "text-left transition-colors hover:bg-accent/60",
+        props.active && "bg-primary/10"
+      )}
+    >
+      <Icon
+        className={cn(
+          "mt-px h-3.5 w-3.5 shrink-0",
+          props.active ? "text-primary" : "text-muted-foreground"
+        )}
+      />
+      <span className="min-w-0 flex-1">
+        <span
+          className={cn(
+            "block text-[11px]",
+            props.active ? "text-primary" : "text-foreground"
+          )}
+        >
+          {props.mode.label}
+        </span>
+        <span className="block text-[10px] leading-tight text-muted-foreground">
+          {props.mode.hint}
+        </span>
+      </span>
+      {props.active && <Check className="mt-px h-3 w-3 shrink-0 text-primary" />}
+    </button>
+  );
+}
+
+/**
+ * Ghost-pill toggle for the composer's mode switches (Knowledge / Vibe).
+ * Lit with the primary tint while active — same state, same handlers as
+ * the old checkboxes, just IDE-style chrome.
  */
 function ComposerToggle(props: {
   icon: typeof Brain;
@@ -1271,7 +1428,9 @@ function ComposerOptions(props: {
   effort: string;
   effortOptions: PickerOption[];
   onEffort: (value: string) => void;
-  /** Picks that apply to the next turn (plan, knowledge). */
+  turnMode: TurnMode;
+  onTurnMode: (value: TurnMode) => void;
+  /** Picks that apply to the next turn (knowledge). */
   switches: CheckItem[];
   /** How the agent works on the project (vibe, review, validate). */
   modes: CheckItem[];
@@ -1284,7 +1443,8 @@ function ComposerOptions(props: {
   // anything switched on here stays visible while the panel is shut.
   const onCount =
     [...props.switches, ...props.modes].filter((item) => item.checked).length +
-    (props.effort === "default" ? 0 : 1);
+    (props.effort === "default" ? 0 : 1) +
+    (props.turnMode === "code" ? 0 : 1);
 
   return (
     <div ref={rootRef} className="relative shrink-0">
@@ -1352,6 +1512,14 @@ function ComposerOptions(props: {
             <p className="px-2 pb-0.5 text-[10px] font-semibold text-muted-foreground/60">
               This turn
             </p>
+            {TURN_MODES.map((mode) => (
+              <TurnModeRow
+                key={mode.value}
+                mode={mode}
+                active={mode.value === props.turnMode}
+                onPick={() => props.onTurnMode(mode.value)}
+              />
+            ))}
             {props.switches.map((item) => (
               <CheckRow key={item.key} item={item} />
             ))}

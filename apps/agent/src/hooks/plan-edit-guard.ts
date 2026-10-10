@@ -1,5 +1,8 @@
 import type { EventBus } from "../events/event-bus.js";
-import type { PlanTracker } from "../orchestrator/plan-tracker.js";
+import {
+  isClosedStep,
+  type PlanTracker,
+} from "../orchestrator/plan-tracker.js";
 import type {
   HookDecision,
   HookGuardContext,
@@ -34,7 +37,10 @@ export class PlanEditGuard {
     const active = plan?.steps.find((step) => step.status === "in-progress");
     if (active) return undefined;
 
-    const next = plan?.steps.find((step) => step.status !== "done");
+    // A skipped or cancelled step (wrong target, noted) is behind the
+    // model: naming it as "the current step" would point it back at the
+    // file it just left.
+    const next = plan?.steps.find((step) => !isClosedStep(step));
     const reason = !plan
       ? "Publish the ordered execution flow with set_plan before editing, then mark its first step in-progress."
       : next

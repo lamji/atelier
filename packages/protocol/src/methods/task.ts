@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TaskInfo } from "../models/conversation.js";
+import { TaskInfo, TurnMode } from "../models/conversation.js";
 import { ReasoningEffort } from "../models/model-option.js";
 import { EventFrame } from "../envelope.js";
 
@@ -20,6 +20,13 @@ export const taskMethods = {
       model: z.string().optional(),
       effort: ReasoningEffort.optional(),
       planMode: z.boolean().optional(),
+      /**
+       * The composer's Ask / Plan / Code pick. Absent means `code` — an
+       * older client that does not send it keeps the behaviour it had.
+       * `planMode` is still sent alongside it and still honoured, so the
+       * two never have to be reconciled at the boundary.
+       */
+      turnMode: TurnMode.optional(),
       /** Vibe coding: autonomous product-builder mode for this task. */
       vibe: z.boolean().optional(),
       /**

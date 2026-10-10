@@ -5,7 +5,7 @@ import type { DockTile } from "./dock-items";
 import { useDockViewModel, type DockProps } from "./useDockViewModel";
 import { UsageModal } from "./UsageModal";
 
-const GROUP_LABELS = ["Workspace views", "Agent provider", "Workspace layout", "Application"];
+const GROUP_LABELS = ["Workspace views", "Workspace layout", "Application"];
 
 /**
  * The dock: every icon control in the app, gathered into one rail down the
@@ -14,8 +14,8 @@ const GROUP_LABELS = ["Workspace views", "Agent provider", "Workspace layout", "
  * wider than it is tall, so the edge with room to spare is the side one, and
  * the status text gets its strip back.
  *
- * Reading order runs top to bottom: destinations, the provider pair, the
- * workbench toggles, and — pinned to the foot of the rail, the way Ubuntu
+ * Reading order runs top to bottom: destinations, workbench toggles,
+ * and — pinned to the foot of the rail, the way Ubuntu
  * pins its applications button — the tiles that configure the app itself.
  *
  * Tiles do not grow under the cursor. The magnification was a toy on a rail

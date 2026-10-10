@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bot, Check, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Bot, Check, History, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
+import type { CliHistoryEntry } from "@atelier/protocol";
 import { ListSearch, ListSearchEmpty } from "@/components/ui/list-search";
 import { cn } from "@/lib/cn";
+import { loadFirstCliHistory, loadMoreCliHistory, useCliConsoleStore } from "@/services/cli-console";
+import { CliProviderLogo } from "@/views/cli/CliProviderLogo";
 import type { SessionVm } from "@/state/sessions.store";
 
 /**
@@ -28,21 +31,79 @@ function matches(session: SessionVm, query: string): boolean {
 export interface SessionListPanelProps {
   sessions: SessionVm[];
   selectedId: string | null;
+  showCliHistory: boolean;
+  selectedCliHistoryId: string | null;
+  onShowCliHistory: (show: boolean) => void | Promise<void>;
   onSelect: (conversationId: string) => void;
   onCreate: () => void;
   onRename: (conversationId: string, title: string) => void;
   onDelete: (conversationId: string) => void;
+  onResumeCliHistory: (entry: CliHistoryEntry) => Promise<void>;
 }
 
 /** Agent-session switcher: one row per parallel agent run. */
 export function SessionListPanel(props: SessionListPanelProps) {
   const [query, setQuery] = useState("");
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyClosing, setHistoryClosing] = useState(false);
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const history = useCliConsoleStore((s) => s.history);
+  const historyHasMore = useCliConsoleStore((s) => s.historyHasMore);
+  const cliChats = useCliConsoleStore((s) => s.chats);
+  const showCliHistory = props.showCliHistory;
   const total = props.sessions.length;
   const shown = useMemo(
     () => props.sessions.filter((session) => matches(session, query)),
     [props.sessions, query]
   );
   const filtering = query.trim().length > 0;
+  const shownHistory = useMemo(() => {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    return history.filter((entry) =>
+      terms.every((term) =>
+        `${entry.title} ${entry.providerId} ${entry.cwd}`.toLowerCase().includes(term)
+      )
+    );
+  }, [history, query]);
+
+  const toggleCliHistory = () => {
+    if (showCliHistory) {
+      setHistoryClosing(true);
+      void Promise.resolve(props.onShowCliHistory(false))
+        .catch((error) => setHistoryError(error instanceof Error ? error.message : String(error)))
+        .finally(() => setHistoryClosing(false));
+      setQuery("");
+      return;
+    }
+    props.onShowCliHistory(true);
+    setQuery("");
+    setHistoryError(null);
+    setHistoryBusy(true);
+    void loadFirstCliHistory()
+      .catch((error) => setHistoryError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setHistoryBusy(false));
+  };
+
+  const loadMoreHistory = () => {
+    setHistoryError(null);
+    setHistoryBusy(true);
+    void loadMoreCliHistory()
+      .catch((error) => setHistoryError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setHistoryBusy(false));
+  };
+
+  const openHistory = async (entry: CliHistoryEntry) => {
+    setOpeningId(`${entry.providerId}:${entry.id}`);
+    setHistoryError(null);
+    try {
+      await props.onResumeCliHistory(entry);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpeningId(null);
+    }
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -50,29 +111,90 @@ export function SessionListPanel(props: SessionListPanelProps) {
         <span className="icon-tile icon-tile-sm">
           <Bot className="h-3.5 w-3.5" />
         </span>
-        <span className="island-title">Agents</span>
+        <span className="island-title">{showCliHistory ? "CLI history" : "Agents"}</span>
         <button
           type="button"
-          title="New agent session"
-          aria-label="New agent session"
-          onClick={props.onCreate}
+          title={showCliHistory ? "Back to agents" : "Claude and Codex session history"}
+          aria-label={showCliHistory ? "Back to agents" : "Claude and Codex session history"}
+          aria-pressed={showCliHistory}
+          disabled={openingId !== null || historyClosing}
+          onClick={toggleCliHistory}
           className="tool-btn ml-auto"
+        >
+          {showCliHistory ? <X className="h-4 w-4" /> : <History className="h-4 w-4" />}
+        </button>
+        <button
+          type="button"
+          title="Open Claude or Codex CLI"
+          aria-label="Open Claude or Codex CLI"
+          onClick={props.onCreate}
+          className="tool-btn"
         >
           <Plus className="h-4 w-4" />
         </button>
       </div>
-      {total > 0 && (
+      {(showCliHistory ? history.length > 0 : total > 0) && (
         <div className="px-2 pb-2">
           <ListSearch
             value={query}
             onChange={setQuery}
-            total={total}
-            shown={shown.length}
-            placeholder={`Search ${total} session${total === 1 ? "" : "s"}…`}
+            total={showCliHistory ? history.length : total}
+            shown={showCliHistory ? shownHistory.length : shown.length}
+            placeholder={showCliHistory ? "Search CLI history…" : `Search ${total} session${total === 1 ? "" : "s"}…`}
           />
         </div>
       )}
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
+        {showCliHistory ? (
+          <>
+            {historyBusy && history.length === 0 && (
+              <p className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />Loading sessions…
+              </p>
+            )}
+            {historyError && <p role="alert" className="px-2 py-2 text-xs text-destructive">{historyError}</p>}
+            {!historyBusy && shownHistory.length === 0 && !historyHasMore && !historyError && (
+              <p className="px-2 py-3 text-xs text-muted-foreground">No saved CLI sessions for this workspace.</p>
+            )}
+            {shownHistory.map((entry) => (
+              <button
+                key={`${entry.providerId}:${entry.id}`}
+                type="button"
+                disabled={openingId !== null || historyClosing}
+                onClick={() => void openHistory(entry)}
+                aria-current={props.selectedCliHistoryId === `${entry.providerId}:${entry.id}`}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left hover:bg-accent/60 disabled:opacity-60",
+                  props.selectedCliHistoryId === `${entry.providerId}:${entry.id}` && "bg-primary/12 ring-1 ring-primary/30"
+                )}
+                title={`${entry.providerId === "claude" ? "Claude" : "Codex"}: ${entry.title || entry.id}`}
+              >
+                <span className="icon-tile icon-tile-sm shrink-0">
+                  <CliProviderLogo providerId={entry.providerId} className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{entry.title || "Untitled session"}</span>
+                  <span className="block truncate text-[11px] text-muted-foreground">
+                    {entry.providerId === "claude" ? "Claude" : "Codex"} · {new Date(entry.updatedAt).toLocaleString()}
+                  </span>
+                </span>
+                {openingId === `${entry.providerId}:${entry.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              </button>
+            ))}
+            {historyHasMore && (
+              <button
+                type="button"
+                disabled={historyBusy || historyClosing || openingId !== null}
+                onClick={loadMoreHistory}
+                className="flex w-full items-center justify-center gap-2 rounded-xl px-2 py-2 text-xs text-muted-foreground hover:bg-accent/60 disabled:opacity-60"
+              >
+                {historyBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {historyBusy ? "Loading more…" : "Load more sessions"}
+              </button>
+            )}
+          </>
+        ) : (
+          <>
         {filtering && shown.length === 0 && (
           <ListSearchEmpty
             query={query}
@@ -85,6 +207,7 @@ export function SessionListPanel(props: SessionListPanelProps) {
             <SessionRow
               key={session.conversation.id}
               session={session}
+              providerId={cliChats[session.conversation.id]?.providerId ?? null}
               active={session.conversation.id === props.selectedId}
               onClick={() => props.onSelect(session.conversation.id)}
               onRename={props.onRename}
@@ -92,6 +215,8 @@ export function SessionListPanel(props: SessionListPanelProps) {
             />
           ))}
         </AnimatePresence>
+          </>
+        )}
       </div>
     </div>
   );
@@ -123,12 +248,16 @@ export function StatusDot({
 
 function SessionRow(props: {
   session: SessionVm;
+  providerId: string | null;
   active: boolean;
   onClick: () => void;
   onRename: (conversationId: string, title: string) => void;
   onDelete: (conversationId: string) => void;
 }) {
   const { session } = props;
+  const providerLabel = props.providerId === "claude"
+    ? "Claude CLI"
+    : props.providerId === "codex" ? "Codex CLI" : null;
   const id = session.conversation.id;
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -140,7 +269,7 @@ function SessionRow(props: {
       ? "Working…"
       : session.status === "error"
         ? (session.lastError ?? "Error")
-        : (preview ?? "No messages yet");
+        : (providerLabel ?? preview ?? "No messages yet");
 
   // A row that scrolls out of view mid-confirm must not keep a live "delete"
   // armed for whenever it comes back.
@@ -186,7 +315,11 @@ function SessionRow(props: {
               : { duration: 0.16 }
           }
         >
-          <Bot className="h-3.5 w-3.5" />
+          {props.providerId ? (
+            <CliProviderLogo providerId={props.providerId} className="h-4 w-4" />
+          ) : (
+            <Bot className="h-3.5 w-3.5" />
+          )}
         </motion.span>
         <StatusDot
           status={session.status}

@@ -12,8 +12,6 @@ import {
   Webhook,
   type LucideIcon,
 } from "lucide-react";
-import type { ComponentType, SVGProps } from "react";
-import { ClaudeMark, CodexMark } from "./ProviderMarks";
 import type { RightTab } from "@/state/workspace.store";
 import type { Theme } from "@/state/theme.store";
 import type { UsageVm } from "@/hooks/useUsageViewModel";
@@ -29,16 +27,6 @@ export type ActivityView =
   | "hooks";
 
 /**
- * A glyph the dock can render. Lucide icons are the common case; the two
- * provider tiles instead carry a brand mark (ClaudeMark / CodexMark) that
- * accepts the same `className`/`size` props so the dock renders them
- * identically.
- */
-export type DockIcon =
-  | LucideIcon
-  | ComponentType<SVGProps<SVGSVGElement> & { size?: string | number }>;
-
-/**
  * One dock tile. `tab` tiles navigate (aria-selected, running dot); `toggle`
  * tiles flip a piece of app state (aria-pressed, no dot) — the same split the
  * header made with a hairline, kept so the dock never implies that toggling
@@ -46,7 +34,7 @@ export type DockIcon =
  */
 export interface DockTile {
   id: string;
-  icon: DockIcon;
+  icon: LucideIcon;
   label: string;
   kind: "tab" | "toggle";
   active: boolean;
@@ -91,14 +79,6 @@ export interface DockInput {
   conflictCount: number;
   /** Live terminals, badged onto the terminal toggle. */
   terminalCount: number;
-  /** CLI mode is showing a Claude session. */
-  claudeActive: boolean;
-  /** CLI mode is showing a Codex session. */
-  codexActive: boolean;
-  /** Enter CLI mode and activate a Claude session. */
-  onSelectClaude: () => void;
-  /** Enter CLI mode and activate a Codex session. */
-  onSelectCodex: () => void;
   bottomOpen: boolean;
   theme: Theme;
   /** Live plan usage, behind the dock's gauge tile. */
@@ -128,31 +108,6 @@ export function buildDockGroups(input: DockInput): DockTile[][] {
       : {}),
     onSelect: () => input.onSelectView(item.id),
   }));
-
-  // Provider quick-switch: two tab tiles that replace the Atelier chat flow
-  // with the selected provider's real CLI and its session rail. They are tabs,
-  // not toggles, because picking one moves the conversation to that provider.
-  // The session currently visible in the CLI decides which tile is active.
-  const providers: DockTile[] = [
-    {
-      id: "claude",
-      icon: ClaudeMark,
-      label: "Claude",
-      kind: "tab",
-      active: input.claudeActive,
-      badge: null,
-      onSelect: input.onSelectClaude,
-    },
-    {
-      id: "codex",
-      icon: CodexMark,
-      label: "Codex",
-      kind: "tab",
-      active: input.codexActive,
-      badge: null,
-      onSelect: input.onSelectCodex,
-    },
-  ];
 
   const workbench: DockTile[] = [
     {
@@ -198,7 +153,7 @@ export function buildDockGroups(input: DockInput): DockTile[][] {
     },
   ];
 
-  return [destinations, providers, workbench, app];
+  return [destinations, workbench, app];
 }
 
 function badgeFor(id: ActivityView, input: DockInput): number | null {

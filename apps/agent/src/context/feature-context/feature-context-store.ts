@@ -15,6 +15,19 @@ const MAX_RENDERED_IMPORTS = 32;
 const MAX_RENDERED_FLOWS = 12;
 const MAX_RENDERED_FLOW_DEPTH = CALL_DEPTH * 2 + 1;
 
+/** Entry-point candidates offered for one screen. */
+const MAX_ENTRY_POINTS = 8;
+/** The radius walks further than /context: it is read once, not per turn. */
+const RADIUS_CALL_DEPTH = 6;
+const RADIUS_MAX_SYMBOLS = 400;
+
+/** Files whose name says they render or route a screen. */
+const ENTRY_FILE = /(^|\/)(pages?|views?|screens?|routes?|app|features?)(\/|$)/i;
+/** Symbols whose name says the same. */
+const ENTRY_SYMBOL = /(page|view|screen|route|router|layout|panel|dashboard)$/i;
+/** Files that are never a screen's entry point, however well they match. */
+const NOT_ENTRY = /(\.test\.|\.spec\.|__tests__|\.stories\.|\.d\.ts$)/i;
+
 interface SymbolRow {
     id: number;
     fileId: number;
@@ -40,6 +53,20 @@ interface CallRow {
 interface ImportRow {
     fromId: number;
     toId: number;
+}
+
+/** A ranked candidate for the symbol that renders a marked screen. */
+export interface EntryPointMatch extends SymbolRow {
+    score: number;
+}
+
+/** Everything reachable from a screen's entry points, both directions. */
+export interface ImpactRadius {
+    symbols: SymbolRow[];
+    files: FileRow[];
+    calls: CallRow[];
+    imports: ImportRow[];
+    roles: Map<number, string>;
 }
 
 export interface SessionFeatureContext {
@@ -178,7 +205,26 @@ function featureFileList(paths: string[], max = 6): string {
  * Codex, and local providers all receive the same compiled block.
  */
 export class FeatureContextStore {
+    /**
+     * Entry points the last /entry_point pinned, per conversation.
+     *
+     * Deliberately in memory: it is a hand-off between two commands the
+     * user runs back to back, not a fact about the workspace worth a
+     * migration. /impact_radius re-derives from its own screenshot whenever
+     * one rides along, so losing this on restart costs nothing but a
+     * re-run of /entry_point.
+     */
+    private lastEntries = new Map<string, number[]>();
+
     constructor(private db: Db) { }
+
+    rememberEntryPoints(conversationId: string, symbolIds: number[]): void {
+        this.lastEntries.set(conversationId, symbolIds);
+    }
+
+    lastEntryPoints(conversationId: string): number[] {
+        return this.lastEntries.get(conversationId) ?? [];
+    }
 
     activate(
         conversationId: string,
@@ -200,10 +246,22 @@ export class FeatureContextStore {
         this.addExistingFeatureSeeds(name, terms, fileWeights, symbolSeeds);
 
         if (symbolSeeds.size === 0 && fileWeights.size === 0) {
+            // Nothing matched even ONE term now, so this is a real miss
+            // rather than the old all-terms gate failing on a conjunction.
+            // Name what the index does have nearby: "no match" with no
+            // alternatives reads as "your feature does not exist", which is
+            // what it wrongly said about a page the user was looking at.
+            const near = this.nearestIndexed(terms);
             throw new Error(
-                'No indexed tree-sitter symbols or files matched "' +
+                'Nothing in the tree-sitter index matched "' +
                 name +
-                '". Wait for indexing to finish or use a more specific feature name.'
+                '".' +
+                (near.length > 0
+                    ? " Closest indexed paths: " + near.join(", ") + "."
+                    : "") +
+                " Try a single distinctive word from the feature, or a file " +
+                "name from it. If the workspace was just opened, indexing " +
+                "may still be running."
             );
         }
 
@@ -464,18 +522,63 @@ export class FeatureContextStore {
         }));
     }
 
-    render(context: SessionFeatureContext): string {
-        return (
-            "SESSION FEATURE CONTEXT — " +
-            context.name +
-            "\n" +
-            "This conversation is pinned to one compiled tree-sitter flow. Use the " +
-            "files, symbols, and edges below as the starting point; do not text-search " +
-            "the workspace merely to rediscover this feature. Search only when the " +
-            "current question needs evidence not present here. The user can run " +
-            "/context_update to rebuild the map.\n\n" +
-            context.detail
+    /**
+     * Compact provider-facing form of a pinned feature. The detailed report
+     * remains the user-facing /context result and stays in the knowledge
+     * store; sending that entire graph on every follow-up duplicated retrieval
+     * and could consume thousands of tokens.
+     */
+    render(context: SessionFeatureContext, relevantPaths: string[] = []): string {
+        const relevant = new Set(relevantPaths);
+        const matched = context.files.filter((file) => relevant.has(file));
+        const files = (matched.length > 0 ? matched : context.files).slice(0, 12);
+        const selected = new Set(files);
+        const symbols = context.symbols
+            .filter((symbol) => selected.has(symbol.path))
+            .slice(0, 12);
+
+        const parts = [
+            "SESSION FEATURE CONTEXT — " + context.name,
+            context.summary,
+            "Use this compact index as a lead. The full compiled flow remains " +
+                "available through retrieve_knowledge or query_knowledge_graph; " +
+                "do not text-search merely to rediscover it.",
+        ];
+        if (files.length > 0) {
+            parts.push(
+                "Relevant feature files for this turn:",
+                ...files.map((file) => "- " + file)
+            );
+        }
+        if (symbols.length > 0) {
+            parts.push(
+                "Relevant symbols:",
+                ...symbols.map(
+                    (symbol) =>
+                        "- " +
+                        symbol.name +
+                        " (" +
+                        symbol.kind +
+                        ", " +
+                        symbol.role +
+                        ") [" +
+                        symbol.path +
+                        ":" +
+                        symbol.row +
+                        "]"
+                )
+            );
+        }
+        if (context.files.length > files.length) {
+            parts.push(
+                String(context.files.length - files.length) +
+                    " additional feature files omitted; retrieve them on demand."
+            );
+        }
+        parts.push(
+            "Run /context_update after a large code change if this pinned map is stale."
         );
+        return parts.join("\n");
     }
 
     private conversationExists(conversationId: string): boolean {
@@ -483,6 +586,115 @@ export class FeatureContextStore {
             this.db.prepare("SELECT 1 FROM conversations WHERE id = ?").get(conversationId) !==
             undefined
         );
+    }
+
+    /**
+     * The symbols that RENDER a screen, ranked.
+     *
+     * A screenshot's strongest identifier is the route it was taken on, so
+     * a path segment counts for more than a word read off the page, and a
+     * symbol living in a router/page/view file counts for more than one of
+     * the same name buried in a util. Nothing here reads the image: the
+     * route and the labels come from the preview block the composer already
+     * attaches, which is why this behaves identically on Codex and Claude.
+     */
+    entryPoints(terms: string[], routeTerms: string[]): EntryPointMatch[] {
+        if (terms.length === 0) return [];
+        const where = terms
+            .map(() => "(lower(s.name) LIKE ? OR lower(f.path) LIKE ?)")
+            .join(" OR ");
+        const args = terms
+            .slice(0, 8)
+            .flatMap((term) => ["%" + term + "%", "%" + term + "%"]);
+        const rows = this.db
+            .prepare(
+                "SELECT s.id, s.file_id AS fileId, f.path, s.name, s.kind, " +
+                "s.signature, s.start_row AS startRow FROM symbols s " +
+                "JOIN files f ON f.id = s.file_id WHERE " +
+                terms.slice(0, 8).map(() => "(lower(s.name) LIKE ? OR lower(f.path) LIKE ?)").join(" OR ") +
+                " LIMIT 900"
+            )
+            .all(...args) as SymbolRow[];
+        const scored = rows
+            .map((row) => ({ row, score: entryScore(row, terms, routeTerms) }))
+            .filter((entry) => entry.score > 0)
+            .sort(
+                (a, b) =>
+                    b.score - a.score ||
+                    a.row.path.localeCompare(b.row.path) ||
+                    a.row.startRow - b.row.startRow
+            );
+        return scored
+            .slice(0, MAX_ENTRY_POINTS)
+            .map((entry) => ({ ...entry.row, score: entry.score }));
+    }
+
+    /** Re-loads remembered entry points, so a second command can walk them. */
+    entryPointsByIds(symbolIds: number[]): EntryPointMatch[] {
+        return this.loadSymbols(symbolIds).map((row) => ({ ...row, score: 0 }));
+    }
+
+    /**
+     * Everything reachable from a set of entry symbols, both directions.
+     *
+     * /context answers "what is this feature?" and is deliberately bounded
+     * so it can ride in every prompt. This answers a different question —
+     * "if I change this screen, what else is involved?" — so it walks
+     * deeper and reports the whole reachable set rather than a compact
+     * index. Callers are included as well as callees: a function this
+     * screen depends on matters, and so does one that depends on it.
+     */
+    impactRadius(entryIds: number[]): ImpactRadius {
+        const seeds = new Map<number, SymbolRow>(
+            this.loadSymbols(entryIds).map((row) => [row.id, row])
+        );
+        if (seeds.size === 0) {
+            return { symbols: [], files: [], calls: [], imports: [], roles: new Map() };
+        }
+        const expanded = this.expandCalls(seeds, RADIUS_CALL_DEPTH, RADIUS_MAX_SYMBOLS);
+        const symbols = this.loadSymbols([...expanded.roles.keys()]);
+        const fileWeights = new Map<number, number>();
+        for (const symbol of symbols) {
+            const weight = expanded.roles.get(symbol.id) === "seed" ? 4 : 2;
+            fileWeights.set(
+                symbol.fileId,
+                Math.max(fileWeights.get(symbol.fileId) ?? 0, weight)
+            );
+        }
+        const imports = this.expandImports(fileWeights);
+        for (const edge of imports) {
+            if (!fileWeights.has(edge.toId)) fileWeights.set(edge.toId, 1);
+            if (!fileWeights.has(edge.fromId)) fileWeights.set(edge.fromId, 1);
+        }
+        return {
+            symbols,
+            files: this.loadFiles([...fileWeights.keys()]),
+            calls: expanded.calls,
+            imports,
+            roles: expanded.roles,
+        };
+    }
+
+    /**
+     * Indexed paths that share a PREFIX of one of the terms, for the
+     * not-found message. Deliberately looser than the seed match — its job
+     * is to tell the user what vocabulary the index actually has, so a
+     * failed /context ends in a next thing to try rather than a dead end.
+     */
+    private nearestIndexed(terms: string[]): string[] {
+        const stems = terms
+            .map((term) => term.slice(0, Math.max(4, term.length - 2)))
+            .filter((stem) => stem.length >= 3);
+        if (stems.length === 0) return [];
+        const where = stems.map(() => "lower(path) LIKE ?").join(" OR ");
+        const rows = this.db
+            .prepare(
+                "SELECT path FROM files WHERE parse_status = 'ok' AND (" +
+                where +
+                ") LIMIT 5"
+            )
+            .all(...stems.map((stem) => "%" + stem + "%")) as FileRow[];
+        return rows.map((row) => row.path);
     }
 
     private symbolSeeds(name: string, terms: string[]): Map<number, SymbolRow> {
@@ -499,14 +711,16 @@ export class FeatureContextStore {
                 " LIMIT 800"
             )
             .all(...args) as SymbolRow[];
-        rows.sort(
-            (a, b) =>
-                relevance(b.name + " " + b.path, name, terms) -
-                relevance(a.name + " " + a.path, name, terms) ||
-                a.path.localeCompare(b.path) ||
-                a.startRow - b.startRow
+        const coherent = rankCandidates(
+            rows,
+            (row) => row.name + " " + row.path,
+            name,
+            terms,
+            (a, b) => a.path.localeCompare(b.path) || a.startRow - b.startRow
         );
-        return new Map(rows.slice(0, MAX_SEED_SYMBOLS).map((row) => [row.id, row]));
+        return new Map(
+            coherent.slice(0, MAX_SEED_SYMBOLS).map((row) => [row.id, row])
+        );
     }
 
     private fileSeeds(name: string, terms: string[]): Map<number, number> {
@@ -518,12 +732,16 @@ export class FeatureContextStore {
                 ") LIMIT 600"
             )
             .all(...terms.map((term) => "%" + term + "%")) as FileRow[];
-        rows.sort(
-            (a, b) =>
-                relevance(b.path, name, terms) - relevance(a.path, name, terms) ||
-                a.path.localeCompare(b.path)
+        const coherent = rankCandidates(
+            rows,
+            (row) => row.path,
+            name,
+            terms,
+            (a, b) => a.path.localeCompare(b.path)
         );
-        return new Map(rows.slice(0, MAX_SEED_FILES).map((row) => [row.id, 4]));
+        return new Map(
+            coherent.slice(0, MAX_SEED_FILES).map((row) => [row.id, 4])
+        );
     }
 
     private addExistingFeatureSeeds(
@@ -543,12 +761,13 @@ export class FeatureContextStore {
                 ") AND COALESCE(model_version, '') NOT LIKE 'session-context-%' LIMIT 20"
             )
             .all(...args) as Array<{ id: number; name: string; slug: string }>;
-        features.sort(
-            (a, b) =>
-                relevance(b.name + " " + b.slug, name, terms) -
-                relevance(a.name + " " + a.slug, name, terms)
+        const coherent = rankCandidates(
+            features,
+            (feature) => feature.name + " " + feature.slug,
+            name,
+            terms
         );
-        for (const feature of features.slice(0, 3)) {
+        for (const feature of coherent.slice(0, 3)) {
             const files = this.db
                 .prepare(
                     "SELECT file_id FROM feature_files WHERE feature_id = ? " +
@@ -597,7 +816,9 @@ export class FeatureContextStore {
     }
 
     private expandCalls(
-        seeds: Map<number, SymbolRow>
+        seeds: Map<number, SymbolRow>,
+        depthLimit = CALL_DEPTH,
+        symbolLimit = MAX_SYMBOLS
     ): { roles: Map<number, string>; calls: CallRow[] } {
         const roles = new Map<number, string>(
             [...seeds.keys()].map((id) => [id, "seed"])
@@ -605,7 +826,7 @@ export class FeatureContextStore {
         const calls = new Map<string, CallRow>();
         let frontier = [...seeds.keys()];
 
-        for (let depth = 0; depth < CALL_DEPTH && frontier.length > 0; depth += 1) {
+        for (let depth = 0; depth < depthLimit && frontier.length > 0; depth += 1) {
             const placeholders = frontier.map(() => "?").join(",");
             const rows = this.db
                 .prepare(
@@ -632,7 +853,7 @@ export class FeatureContextStore {
                     frontierSet.has(row.callerId) &&
                     row.calleeId !== null &&
                     !roles.has(row.calleeId) &&
-                    roles.size < MAX_SYMBOLS
+                    roles.size < symbolLimit
                 ) {
                     roles.set(row.calleeId, "callee");
                     next.push(row.calleeId);
@@ -641,7 +862,7 @@ export class FeatureContextStore {
                     row.calleeId !== null &&
                     frontierSet.has(row.calleeId) &&
                     !roles.has(row.callerId) &&
-                    roles.size < MAX_SYMBOLS
+                    roles.size < symbolLimit
                 ) {
                     roles.set(row.callerId, "caller");
                     next.push(row.callerId);
@@ -726,10 +947,65 @@ function added(before: string[], next: string[]): string[] {
     return next.filter((value) => !known.has(value));
 }
 
-function featureTerms(value: string): string[] {
-    return [
+/**
+ * Words that join a product feature's name without naming anything in it.
+ *
+ * "Budgets and Alerts" is how the page is labelled in the UI, and it used
+ * to fail: every term had to appear, "and" was a term, and no symbol is
+ * called anything-and-anything. The conjunction has to go before the terms
+ * are used for matching.
+ */
+const NAME_STOPWORDS = new Set([
+    "and", "or", "the", "a", "an", "of", "for", "in", "on", "to", "with",
+    "by", "at", "from", "into", "page", "screen", "view", "feature",
+]);
+
+export function featureTerms(value: string): string[] {
+    const words = [
         ...new Set(value.toLowerCase().match(/[a-z0-9_]{2,}/g) ?? []),
-    ].slice(0, 6);
+    ];
+    const meaningful = words.filter((word) => !NAME_STOPWORDS.has(word));
+    // "The View" is a poor feature name but it is the one the user typed;
+    // stripping it to nothing would be worse than matching it literally.
+    return (meaningful.length > 0 ? meaningful : words).slice(0, 6);
+}
+
+/** How many of the search terms appear in this candidate. */
+function termHits(haystack: string, terms: string[]): number {
+    const hay = haystack.toLowerCase();
+    return terms.filter((term) => hay.includes(term)).length;
+}
+
+/**
+ * Candidates worth seeding a feature from, best first.
+ *
+ * This replaces an all-terms filter that could not express what a PRODUCT
+ * feature is. "Budgets and Alerts" spans `BudgetsPage.tsx` and
+ * `AlertsList.tsx`, and no single symbol or path contains both words — so
+ * requiring every term in one haystack rejected the entire feature and
+ * reported it as not existing, on a workspace where the user was looking
+ * straight at it.
+ *
+ * So a candidate qualifies on ONE term and is then ranked: whole-phrase
+ * matches first, then by how many terms it carries (see relevance), then
+ * by path. Precision comes from the ranking and the cap the caller
+ * applies, which is how the rest of Atelier's retrieval works — not from
+ * an all-or-nothing gate that fails closed on the app's own vocabulary.
+ */
+export function rankCandidates<T>(
+    rows: T[],
+    haystackOf: (row: T) => string,
+    name: string,
+    terms: string[],
+    tieBreak: (a: T, b: T) => number = () => 0
+): T[] {
+    return rows
+        .filter((row) => termHits(haystackOf(row), terms) > 0)
+        .sort(
+            (a, b) =>
+                relevance(haystackOf(b), name, terms) -
+                relevance(haystackOf(a), name, terms) || tieBreak(a, b)
+        );
 }
 
 function relevance(haystack: string, name: string, terms: string[]): number {
@@ -739,6 +1015,40 @@ function relevance(haystack: string, name: string, terms: string[]): number {
     for (const term of terms) {
         if (hay.includes(term)) score += 3;
     }
+    return score;
+}
+
+/**
+ * How strongly one symbol looks like the thing that renders a given screen.
+ *
+ * Route segments outrank page text because a URL is chosen by the code and
+ * a label is chosen by a designer; `/budgets-and-alerts` is far more likely
+ * to appear in the router than the words on the heading are. File shape
+ * then breaks ties: a match inside `src/pages/` is an entry point, the same
+ * match inside `src/lib/format.ts` is a coincidence.
+ */
+export function entryScore(
+    row: { name: string; path: string; kind: string },
+    terms: string[],
+    routeTerms: string[]
+): number {
+    if (NOT_ENTRY.test(row.path)) return 0;
+    const name = row.name.toLowerCase();
+    const path = row.path.toLowerCase();
+    let score = 0;
+    for (const term of routeTerms) {
+        if (path.includes(term)) score += 6;
+        if (name.includes(term)) score += 5;
+    }
+    for (const term of terms) {
+        if (routeTerms.includes(term)) continue;
+        if (path.includes(term)) score += 2;
+        if (name.includes(term)) score += 2;
+    }
+    if (score === 0) return 0;
+    if (ENTRY_FILE.test(row.path)) score += 4;
+    if (ENTRY_SYMBOL.test(row.name)) score += 3;
+    if (row.kind === "component" || row.kind === "function") score += 1;
     return score;
 }
 

@@ -5,6 +5,16 @@ export const Settings = z.object({
   model: z.string().optional(),
   ignoreGlobs: z.array(z.string()).default([]),
   disabledSkills: z.array(z.string()).default([]),
+  /**
+   * Branches the agent may not edit on, as exact names or globs
+   * ("main", "release/*").
+   *
+   * A workspace setting rather than a per-repo one: the same rule —
+   * never let an agent write while the checkout is on main — is the one
+   * the user means for every checkout in the folder, and per-repo lists
+   * would have to be re-stated for each of them.
+   */
+  protectedBranches: z.array(z.string()).default([]),
   /** Experimental: let promoted sessions participate in cross-session RAG. */
   globalSessionKnowledge: z.boolean().default(false),
   maxValidationRetries: z.number().default(2),

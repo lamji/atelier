@@ -266,8 +266,8 @@ function honestExits(): void {
     "NO CHANGE NEEDED: is recognised only as a line"
   );
   check(
-    completionStopHookDecision(open, false).decision === "block",
-    "an ordinary report is still refused while the gate is open"
+    completionStopHookDecision(open, false).decision === undefined,
+    "an ordinary report is released even while the gate is open (advisory gate)"
   );
   check(
     completionStopHookDecision(open, false, "NO CHANGE NEEDED: nothing to do").decision ===

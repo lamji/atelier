@@ -25,6 +25,10 @@ export const IPC_CHANNELS = {
   pickFolder: "atelier:pick-folder",
   captureRegion: "atelier:capture-region",
   previewContext: "atelier:preview-context",
+  /** renderer -> main; reads the signed-in session behind the preview iframe. */
+  previewSession: "atelier:preview-session",
+  /** renderer -> main; drives one interaction into the live preview iframe. */
+  previewAct: "atelier:preview-act",
   openExternal: "atelier:open-external",
   exportPdf: "atelier:export-pdf",
   windowMinimize: "atelier:window:minimize",
@@ -114,6 +118,41 @@ export interface DesktopCaptureResult {
   frameUrl: string | null;
 }
 
+/**
+ * One interaction driven into the live preview iframe by the frontend-review
+ * test runner. Screenshots are NOT here — the renderer captures those through
+ * the existing region-capture path; everything that touches the DOM runs in
+ * the frame from the privileged main process, which can reach across the
+ * preview's origin boundary.
+ */
+export type DesktopPreviewActStep =
+  | { action: "navigate"; target: string }
+  | { action: "click"; selector?: string; text?: string }
+  | { action: "fill"; selector: string; value: string }
+  | { action: "press"; key: string; selector?: string }
+  | {
+      action: "waitFor";
+      selector?: string;
+      text?: string;
+      state?: "visible" | "hidden";
+      timeoutMs?: number;
+    }
+  | {
+      action: "assert";
+      description: string;
+      selector?: string;
+      text?: string;
+      notText?: string;
+      visible?: boolean;
+      absent?: boolean;
+    };
+
+export interface DesktopPreviewActResult {
+  ok: boolean;
+  detail: string;
+  error?: string;
+}
+
 export interface DesktopPreviewConsoleEntry {
   level: "warning" | "error";
   message: string;
@@ -139,6 +178,43 @@ export interface DesktopPreviewInteractiveElement {
   };
 }
 
+/**
+ * A region of the preview the user highlighted on a screenshot, in the
+ * iframe's own CSS pixels (viewport coordinates, the same space
+ * getBoundingClientRect reports). The renderer maps the normalized
+ * screenshot highlights into this space before asking.
+ */
+export interface DesktopPreviewFocusRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DesktopPreviewContextOptions {
+  /** Highlighted regions; each gets its own pass over the DOM. */
+  focus?: DesktopPreviewFocusRect[];
+}
+
+/** An element found under one highlighted region. */
+export interface DesktopPreviewFocusedElement {
+  /** 1-based index of the focus rect this element was found under. */
+  region: number;
+  selector: string;
+  tag: string;
+  /** Visible text (innerText, or an input's value/placeholder), <= 200 chars. */
+  text: string;
+  ariaLabel: string | null;
+  rect: { x: number; y: number; width: number; height: number };
+}
+
+/** document.activeElement of the preview, when it is a real element. */
+export interface DesktopPreviewActiveElement {
+  selector: string;
+  tag: string;
+  text: string;
+}
+
 /** Live runtime evidence from the exact iframe currently shown in Page preview. */
 export interface DesktopPreviewContextResult {
   url: string;
@@ -147,6 +223,48 @@ export interface DesktopPreviewContextResult {
   css: string;
   interactive: DesktopPreviewInteractiveElement[];
   console: DesktopPreviewConsoleEntry[];
+  capturedAt: number;
+  /** Elements under the requested focus rects; absent when none were asked for. */
+  focused?: DesktopPreviewFocusedElement[];
+  /** Null when focus sits on body/html, i.e. nothing is really focused. */
+  activeElement?: DesktopPreviewActiveElement | null;
+  /** window.getSelection() of the preview document, <= 300 chars. */
+  selectionText?: string;
+  /** document.body.innerText, whitespace-collapsed, <= 4000 chars. */
+  visibleText?: string;
+}
+
+/** One cookie of the preview origin, already shaped for Playwright. */
+export interface DesktopPreviewSessionCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  /** Unix seconds; -1 for a session cookie, matching Playwright. */
+  expires: number;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: "Strict" | "Lax" | "None";
+}
+
+export interface DesktopPreviewStorageEntry {
+  name: string;
+  value: string;
+}
+
+/**
+ * The authenticated browser state sitting behind Page preview.
+ *
+ * This is credential material: it is handed straight to the review browser
+ * and must never be written to a transcript, a log or a prompt.
+ */
+export interface DesktopPreviewSessionResult {
+  /** Live frame URL, including the client-side route. */
+  url: string;
+  origin: string;
+  cookies: DesktopPreviewSessionCookie[];
+  localStorage: DesktopPreviewStorageEntry[];
+  sessionStorage: DesktopPreviewStorageEntry[];
   capturedAt: number;
 }
 
@@ -201,8 +319,22 @@ export interface AtelierDesktopApi {
   pickFolder(): Promise<string | null>;
   /** Captures a renderer-relative rectangle and its live preview route. */
   captureRegion(request: DesktopCaptureRequest): Promise<DesktopCaptureResult | null>;
-  /** Reads the DOM, authored CSS and diagnostics from the displayed preview iframe. */
-  getPreviewContext(previewUrl: string): Promise<DesktopPreviewContextResult | null>;
+  /**
+   * Reads the DOM, authored CSS and diagnostics from the displayed preview
+   * iframe. `options.focus` adds a pass that names the elements under the
+   * user's screenshot highlights; the one-argument call still works.
+   */
+  getPreviewContext(
+    previewUrl: string,
+    options?: DesktopPreviewContextOptions
+  ): Promise<DesktopPreviewContextResult | null>;
+  /** Reads cookies + web storage of the signed-in preview iframe. */
+  getPreviewSession(previewUrl: string): Promise<DesktopPreviewSessionResult | null>;
+  /** Drives one test-case interaction into the live preview iframe. */
+  previewAct(
+    previewUrl: string,
+    step: DesktopPreviewActStep
+  ): Promise<DesktopPreviewActResult | null>;
   /** Filesystem path of a dropped File (null if unavailable). */
   pathForFile(file: File): string | null;
   openExternal(url: string): Promise<void>;

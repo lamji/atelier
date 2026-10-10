@@ -9,6 +9,27 @@ export const Conversation = z.object({
 });
 export type Conversation = z.infer<typeof Conversation>;
 
+/**
+ * What the user is asking this turn to BE, chosen in the composer rather
+ * than inferred from the prompt.
+ *
+ * The pipeline classifies intent itself and is usually right, but "usually"
+ * is the problem: the two failure modes — a question answered with
+ * unrequested edits, and a request to build something answered with prose —
+ * are both the classifier overruling a user who already knew which one they
+ * wanted. This is that user saying so. `code` is the default and leaves the
+ * classifier alone; `ask` and `plan` are explicit overrides.
+ */
+export const TurnMode = z.enum([
+  /** Answer in prose. Reads and read-only checks only, never an edit. */
+  "ask",
+  /** Propose a plan and wait for approval before touching files. */
+  "plan",
+  /** Do the work. Intent classification decides as it always has. */
+  "code",
+]);
+export type TurnMode = z.infer<typeof TurnMode>;
+
 export const TaskStatus = z.enum([
   /** Typed while another task held the conversation; runs when that one ends. */
   "queued",

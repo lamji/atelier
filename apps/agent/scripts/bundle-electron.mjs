@@ -1,5 +1,5 @@
 // Bundles the agent's utilityProcess entry for the desktop app.
-// Output: dist-electron/{utility-main.mjs, parse-worker.mjs, schema.sql}
+// Output: dist-electron/{utility-main.mjs, parse-worker.mjs, embed-worker.mjs, schema.sql}
 // Externals stay in node_modules (native modules + heavyweight deps), so in
 // dev the bundle resolves them from apps/agent/node_modules; the packaged
 // app installs them into resources/agent (see desktop build-backend.mjs).
@@ -37,6 +37,7 @@ const options = {
   entryPoints: {
     "utility-main": path.join(root, "src", "utility-main.ts"),
     "parse-worker": path.join(root, "src", "knowledge", "parsing", "parse-worker.ts"),
+    "embed-worker": path.join(root, "src", "knowledge", "embeddings", "embed-worker.mjs"),
     // Stdio MCP server Codex spawns; must sit beside utility-main.mjs.
     "codex-mcp": path.join(root, "src", "providers", "codex", "mcp-main.ts"),
   },
@@ -55,7 +56,7 @@ fs.cpSync(path.join(root, "skills"), path.join(outDir, "skills"), {
 if (watch) {
   const ctx = await esbuild.context(options);
   await ctx.watch();
-  console.log("[agent] esbuild watching utility-main + parse-worker");
+  console.log("[agent] esbuild watching utility-main + parse-worker + embed-worker");
 } else {
   await esbuild.build(options);
 }

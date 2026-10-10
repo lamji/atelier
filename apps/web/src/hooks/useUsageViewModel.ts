@@ -17,9 +17,6 @@ export interface UsageVm {
   refresh: () => void;
 }
 
-/** How often the usage is re-probed while the app is open. */
-const AUTO_REFRESH_MS = 2 * 60_000;
-
 /** 5-hour and weekly windows lead; per-model windows follow. */
 const WINDOW_ORDER = ["five_hour", "seven_day"];
 
@@ -34,8 +31,8 @@ function rank(kind: string): number {
 
 /**
  * ViewModel for live plan usage. Events (usage.updated) push new numbers
- * during tasks; on top of that this re-probes every 2 minutes (to catch
- * spend from other machines / claude.ai) and on demand via refresh().
+ * during tasks. The backend owns periodic probing; refresh() remains an
+ * explicit on-demand probe. A second UI timer spawned redundant SDK sessions.
  */
 export function useUsageViewModel(): UsageVm {
   const connected = useConnectionStore((s) => s.state === "connected");
@@ -53,13 +50,10 @@ export function useUsageViewModel(): UsageVm {
       });
   }, []);
 
-  // Seed on connect, then re-probe on an interval so the numbers stay fresh
-  // even between task-driven rate_limit_events.
+  // Seed from the cached snapshot; usage.updated carries later changes.
   useEffect(() => {
     if (!connected) return;
     probe(false);
-    const timer = setInterval(() => probe(true), AUTO_REFRESH_MS);
-    return () => clearInterval(timer);
   }, [connected, probe]);
 
   const refresh = useCallback(() => {

@@ -15,10 +15,15 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
+        // Do not absorb shared React/runtime helpers into a lazy heavyweight:
+        // that makes the app entry import the whole heavyweight eagerly.
+        onlyExplicitManualChunks: true,
         // The heavyweights ship in their own chunks so the login/picker
         // entry stays small and the workspace chunk parallelizes.
         manualChunks(id: string) {
-          if (id.includes("monaco-editor")) return "monaco";
+          // Keep the small React loader out of the editor-core chunk, or
+          // importing the wrapper eagerly pulls the entire editor with it.
+          if (id.includes("/monaco-editor/")) return "monaco";
           if (id.includes("@xterm")) return "xterm";
           if (
             id.includes("three") ||

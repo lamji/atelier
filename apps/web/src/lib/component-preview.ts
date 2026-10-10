@@ -1,6 +1,17 @@
 import type { FileTreeNode } from "@atelier/protocol";
 import { bridge } from "@/services/bridge-client";
 
+export interface BackendProjectRuntime {
+  projectDir: string;
+  projectName: string;
+  framework: string;
+  packageManager: "pnpm" | "npm" | "yarn" | "bun";
+  /** An existing package.json script. Never synthesized. */
+  script: string;
+  command: string;
+  missingBinary?: string;
+}
+
 export interface ComponentPreviewRuntime {
   projectDir: string;
   projectName: string;
@@ -25,6 +36,44 @@ export interface ComponentPreviewRuntime {
   prepareCommand?: string;
   /** Why that command is there, for the launch message. */
   prepareReason?: string;
+  /**
+   * The binary this command starts with, when it is NOT installed on this
+   * machine. Set means the command is still the right one for the project
+   * but cannot run here — the UI says so rather than letting the launch sit
+   * at "Starting…" until it times out on a shell not-found error.
+   */
+  missingBinary?: string;
+}
+
+/**
+ * Which binaries resolve on the machine's PATH, asked once per name.
+ *
+ * A preview resolve runs on every manifest in the workspace, so a monorepo
+ * would otherwise ask about `pnpm` once per package.
+ */
+const binaryProbes = new Map<string, Promise<boolean>>();
+
+function hasBinary(name: string): Promise<boolean> {
+  const cached = binaryProbes.get(name);
+  if (cached) return cached;
+  const probe = bridge
+    .rpc("terminal.hasCommand", { commands: [name] })
+    .then((result) => result.available[name] ?? false)
+    // A bridge without the handler (older agent, browser-only run) must not
+    // make every command look missing.
+    .catch(() => true);
+  binaryProbes.set(name, probe);
+  return probe;
+}
+
+/** Forget the probe results, for when the user installs something mid-session. */
+export function resetBinaryProbes(): void {
+  binaryProbes.clear();
+}
+
+/** The binary a command line actually invokes, for the not-installed check. */
+function commandBinary(command: string): string {
+  return command.trim().split(/\s+/)[0] ?? "";
 }
 
 interface PreviewPackageManifest {
@@ -43,6 +92,43 @@ interface PreviewPackageManifest {
  * only ever show a connection error. A dev script says something runs; it
  * does not say a browser can look at it.
  */
+const BACKEND_DEPS = [
+  "express",
+  "@nestjs/core",
+  "fastify",
+  "koa",
+  "@hapi/hapi",
+  "@adonisjs/core",
+  "@feathersjs/feathers",
+  "@loopback/core",
+  "apollo-server",
+  "@apollo/server",
+  "graphql-yoga",
+  "hono",
+] as const;
+
+const BACKEND_SCRIPT_PRIORITY = [
+  "dev:server",
+  "server:dev",
+  "start:dev",
+  "backend:dev",
+  "api:dev",
+  "dev",
+  "server",
+  "backend",
+  "api",
+  "start",
+] as const;
+
+/**
+ * Existing script commands that are strong backend evidence even when the
+ * package uses an unlisted server framework (or only Node's built-in HTTP
+ * server). This keeps detection grounded in a command the project actually
+ * declares instead of guessing from its folder name.
+ */
+const BACKEND_COMMAND_PATTERN =
+  /(?:^|\s)(?:node|nodemon|tsx|ts-node|nest|fastify|adonis|hono|bun|deno)(?:\s|$)|(?:^|[\\/])(?:server|api|backend)(?:[.\\/]|$)/i;
+
 const WEB_DEPS = [
   "next",
   "nuxt",
@@ -230,6 +316,87 @@ function previewStorageKey(workspaceRoot: string | null, projectDir: string): st
   )}`;
 }
 
+function projectPath(projectDir: string, file: string): string {
+  return projectDir ? `${projectDir}/${file}` : file;
+}
+
+function validPreviewPort(value: string | undefined): number | null {
+  if (!value) return null;
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535 ? port : null;
+}
+
+async function configuredPreviewPort(
+  projectDir: string,
+  scriptBody: string
+): Promise<number | null> {
+  const scriptPort = validPreviewPort(
+    scriptBody.match(/(?:--port(?:=|\s+)|\s-p\s+)(\d{1,5})/i)?.[1]
+  );
+  if (scriptPort !== null) return scriptPort;
+
+  // Match the same precedence used by common dev servers: local development
+  // overrides first, then the general project environment.
+  const envFiles = [
+    ".env.development.local",
+    ".env.local",
+    ".env.development",
+    ".env",
+  ];
+  for (const file of envFiles) {
+    try {
+      const { content } = await bridge.rpc("fs.readFile", {
+        path: projectPath(projectDir, file),
+      });
+      const envPort = validPreviewPort(
+        content.match(/^\s*(?:export\s+)?PORT\s*=\s*["']?(\d{1,5})["']?\s*(?:#.*)?$/m)?.[1]
+      );
+      if (envPort !== null) return envPort;
+    } catch {
+      // This project does not provide this environment layer.
+    }
+  }
+
+  const configFiles = [
+    "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mts",
+    "vite.config.mjs",
+    "vite.config.cts",
+    "vite.config.cjs",
+    "astro.config.ts",
+    "astro.config.js",
+    "vue.config.js",
+    "angular.json",
+  ];
+  for (const file of configFiles) {
+    try {
+      const { content } = await bridge.rpc("fs.readFile", {
+        path: projectPath(projectDir, file),
+      });
+      const configPort = validPreviewPort(
+        content.match(
+          /["']?(?:server|devServer|serve)["']?\s*[:=]\s*\{[\s\S]{0,4000}?["']?port["']?\s*:\s*(\d{1,5})/i
+        )?.[1]
+      );
+      if (configPort !== null) return configPort;
+    } catch {
+      // Only the config owned by this project is relevant.
+    }
+  }
+
+  return null;
+}
+
+function packageScriptCommand(
+  packageManager: ComponentPreviewRuntime["packageManager"],
+  script: string
+): string {
+  return packageManager === "npm" || packageManager === "bun"
+    ? `${packageManager} run ${script}`
+    : `${packageManager} ${script}`;
+}
+
 /** Apply an allocated port using the invocation style the runtime accepts. */
 export function previewCommandAtPort(
   runtime: ComponentPreviewRuntime,
@@ -376,6 +543,7 @@ async function flutterCandidate(
       portStrategy: "flutter",
       storageKey: previewStorageKey(workspaceRoot, projectDir),
       storybook: false,
+      ...((await hasBinary("flutter")) ? {} : { missingBinary: "flutter" }),
       ...(hasWebDir
         ? {}
         : {
@@ -397,6 +565,10 @@ async function detectPackageManager(
     declared === "yarn" ||
     declared === "bun"
   ) {
+    // An explicit `packageManager` field is the project's own instruction:
+    // honour it even when the binary is missing, and let the caller surface
+    // the missing binary instead of quietly running a different manager
+    // against a lockfile it did not write.
     return declared;
   }
 
@@ -419,10 +591,17 @@ async function detectPackageManager(
       const lockPath = ancestor ? `${ancestor}/${lock.file}` : lock.file;
       try {
         await bridge.rpc("fs.stat", { path: lockPath });
-        return lock.manager;
       } catch {
         // Monorepos commonly keep the package-manager lockfile above the app.
+        continue;
       }
+      /*
+       * A lockfile says how the project was installed, not what is on this
+       * machine. A `bun.lock` committed by a teammate must not turn into a
+       * `bun run dev` here when bun was never installed — keep walking, and
+       * fall through to npm, which ships with Node.
+       */
+      if (await hasBinary(lock.manager)) return lock.manager;
     }
   }
 
@@ -477,17 +656,19 @@ export async function resolveComponentPreviews(
         "Web";
       const storybook = script === "storybook" || script === "storybook:dev";
       const scriptBody = scripts[script] ?? "";
-      const explicitPort =
-        scriptBody.match(/(?:--port(?:=|\s+)|\s-p\s+)(\d{2,5})/i)?.[1] ?? null;
-      const defaultPort = explicitPort
-        ? Number(explicitPort)
-        : storybook
+      const configuredPort = await configuredPreviewPort(
+        projectDir,
+        scriptBody
+      );
+      const defaultPort =
+        configuredPort ??
+        (storybook
           ? 6006
           : framework === "Angular"
             ? 4200
             : framework.includes("Vite")
               ? 5173
-              : 3000;
+              : 3000);
       /*
        * One path for every cross-platform toolkit; see MOBILE_TOOLKITS.
        *
@@ -522,12 +703,11 @@ export async function resolveComponentPreviews(
         packageManager
       );
       const command =
-        webCommand ??
-        (packageManager === "npm" || packageManager === "bun"
-          ? `${packageManager} run ${script}`
-          : `${packageManager} ${script}`);
+        webCommand ?? packageScriptCommand(packageManager, script);
       const prepareCommand = toolkit?.web?.prepare?.(deps, runner);
       const prepareReason = prepareCommand ? toolkit?.web?.reason : undefined;
+      const binary = commandBinary(command);
+      const missingBinary = (await hasBinary(binary)) ? undefined : binary;
       const projectName =
         manifest.name?.trim() ||
         projectDir.split("/").filter(Boolean).at(-1) ||
@@ -576,8 +756,8 @@ export async function resolveComponentPreviews(
           packageManager,
           script: webScript,
           command,
-          defaultUrl: `http://localhost:${toolkit?.web?.port ?? defaultPort}`,
-          defaultPort: toolkit?.web?.port ?? defaultPort,
+          defaultUrl: `http://localhost:${configuredPort ?? toolkit?.web?.port ?? defaultPort}`,
+          defaultPort: configuredPort ?? toolkit?.web?.port ?? defaultPort,
           portStrategy:
             toolkit?.id === "expo"
               ? "direct"
@@ -587,6 +767,7 @@ export async function resolveComponentPreviews(
           storageKey: previewStorageKey(workspaceRoot, projectDir),
           storybook,
           ...(prepareCommand ? { prepareCommand, prepareReason } : {}),
+          ...(missingBinary ? { missingBinary } : {}),
         } satisfies ComponentPreviewRuntime,
       };
     })
@@ -599,6 +780,85 @@ export async function resolveComponentPreviews(
   );
 
   return [...candidates, ...flutter]
+    .filter((candidate) => candidate !== null)
+    .sort((a, b) => b.score - a.score)
+    .map((candidate) => candidate.runtime);
+}
+
+/**
+ * Finds backend packages and reports the command their own package.json
+ * declares. A known server dependency or an unmistakable server command
+ * establishes that a package is a backend; folder names only affect ranking.
+ */
+export async function resolveBackendProjects(
+  tree: FileTreeNode,
+  workspaceRoot: string | null
+): Promise<BackendProjectRuntime[]> {
+  const candidates = await Promise.all(
+    packageManifestPaths(tree).map(async (manifestPath) => {
+      let manifest: PreviewPackageManifest;
+      try {
+        const result = await bridge.rpc("fs.readFile", { path: manifestPath });
+        manifest = JSON.parse(result.content) as PreviewPackageManifest;
+      } catch {
+        return null;
+      }
+
+      const deps = { ...manifest.dependencies, ...manifest.devDependencies };
+      const backendDep = BACKEND_DEPS.find((dep) => deps[dep] !== undefined);
+      const scripts = manifest.scripts ?? {};
+      const script = BACKEND_SCRIPT_PRIORITY.find(
+        (name) => typeof scripts[name] === "string"
+      );
+      if (!script) return null;
+
+      const scriptBody = scripts[script];
+      if (typeof scriptBody !== "string") return null;
+      if (!backendDep && !BACKEND_COMMAND_PATTERN.test(scriptBody)) return null;
+
+      const projectDir = manifestPath.includes("/")
+        ? manifestPath.slice(0, manifestPath.lastIndexOf("/"))
+        : "";
+      const packageManager = await detectPackageManager(manifest, projectDir);
+      const command = packageScriptCommand(packageManager, script);
+      const binary = commandBinary(command);
+      const framework =
+        (deps["@nestjs/core"] && "NestJS") ||
+        (deps["fastify"] && "Fastify") ||
+        (deps["express"] && "Express") ||
+        (deps["koa"] && "Koa") ||
+        (deps["@hapi/hapi"] && "Hapi") ||
+        (deps["@adonisjs/core"] && "AdonisJS") ||
+        (deps["hono"] && "Hono") ||
+        (deps["@loopback/core"] && "LoopBack") ||
+        ((deps["@apollo/server"] || deps["apollo-server"]) && "Apollo Server") ||
+        (deps["graphql-yoga"] && "GraphQL Yoga") ||
+        (deps["@feathersjs/feathers"] && "Feathers") ||
+        backendDep ||
+        "Node.js backend";
+      const projectName =
+        manifest.name?.trim() ||
+        projectDir.split("/").filter(Boolean).at(-1) ||
+        workspaceProjectName(workspaceRoot);
+      let score = 100 - BACKEND_SCRIPT_PRIORITY.indexOf(script) * 5;
+      if (/(^|\/)(api|backend|server)(\/|$)/i.test(projectDir)) score += 50;
+
+      return {
+        score,
+        runtime: {
+          projectDir,
+          projectName,
+          framework,
+          packageManager,
+          script,
+          command,
+          ...((await hasBinary(binary)) ? {} : { missingBinary: binary }),
+        } satisfies BackendProjectRuntime,
+      };
+    })
+  );
+
+  return candidates
     .filter((candidate) => candidate !== null)
     .sort((a, b) => b.score - a.score)
     .map((candidate) => candidate.runtime);

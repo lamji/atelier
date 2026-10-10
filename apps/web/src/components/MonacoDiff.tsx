@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef } from "react";
-import { DiffEditor, type Monaco } from "@monaco-editor/react";
+import type { Monaco } from "@monaco-editor/react";
+import { MonacoDiffEditor as DiffEditor } from "./LazyMonaco";
 import type { editor as MonacoEditor } from "monaco-editor";
 
 type DiffEditorProps = React.ComponentProps<typeof DiffEditor>;

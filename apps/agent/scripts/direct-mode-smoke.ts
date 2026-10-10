@@ -27,7 +27,15 @@ import { ToolRegistry } from "../src/tools/registry.js";
 import {
   DIRECT_RULES,
   DIRECT_TOOLS,
+  EXECUTION_CHECKPOINT_MAX_CHARS,
+  LIGHT_APPEND_CHARS,
+  LIGHT_CONTEXT_MAX_CHARS,
+  LIGHT_LAYOUT_CHARS,
+  LIGHT_USER_RULE_CHARS,
+  LIGHT_VIBE_CHARS,
+  clipLightContext,
   isDirectMode,
+  renderExecutionCheckpoint,
   renderPriorTurns,
 } from "../src/orchestrator/direct-mode.js";
 import { FAST_RULES } from "../src/orchestrator/pipeline-executor.js";
@@ -65,9 +73,11 @@ function sdkToolNames(): Set<string> {
 }
 
 function checkFlag(): void {
-  check("absent flag runs the pipeline", !isDirectMode({}));
-  check("systemKnowledge: true runs the pipeline", !isDirectMode({ systemKnowledge: true }));
-  check("systemKnowledge: false is direct", isDirectMode({ systemKnowledge: false }));
+  check("every turn is one direct loop", isDirectMode({}) && isDirectMode({ systemKnowledge: true }));
+  check("systemKnowledge: false is direct too", isDirectMode({ systemKnowledge: false }));
+  process.env.ATELIER_FULL_PIPELINE = "1";
+  check("legacy env cannot re-enable retrieval", isDirectMode({}));
+  delete process.env.ATELIER_FULL_PIPELINE;
 }
 
 function checkTools(): void {
@@ -90,12 +100,57 @@ function checkRules(): void {
       !DIRECT_RULES.includes(phrase)
     );
   }
-  check("rules keep the git-flow gate", DIRECT_RULES.includes("GIT FLOW RULE"));
-  check("rules keep the DB approval gate", DIRECT_RULES.includes("DATABASE RULE"));
+  check("rules describe the agent, not a mode", DIRECT_RULES.startsWith("ATELIER:"));
+  check("rules promise no refusals", !/refus/i.test(DIRECT_RULES));
+  check("rules keep the git-flow boundary", DIRECT_RULES.includes("Never commit"));
+  check("rules keep approval modals", DIRECT_RULES.includes("approval modal"));
+  check("rules keep workspace confinement", DIRECT_RULES.includes("active scope"));
+}
+
+function checkLightCompression(): void {
+  const clipped = clipLightContext(`head\n\n\n${"x".repeat(2_000)}`, 120);
+  check("light compression is local and bounded", clipped.length <= 120);
+  check("clipped light context is explicit", clipped.endsWith("…"));
+  check("redundant blank lines are compressed", !clipped.includes("\n\n\n"));
   check(
-    "rules keep workspace confinement",
-    DIRECT_RULES.includes("STRICT WORKSPACE CONFINEMENT")
+    "all light sections fit the hard context cap",
+    DIRECT_RULES.length +
+      LIGHT_LAYOUT_CHARS +
+      LIGHT_USER_RULE_CHARS +
+      LIGHT_APPEND_CHARS +
+      LIGHT_VIBE_CHARS <=
+      LIGHT_CONTEXT_MAX_CHARS
   );
+}
+
+function checkExecutionCheckpoint(): void {
+  const checkpoint = renderExecutionCheckpoint({
+    request: `fix timeline execution ${"request ".repeat(500)}`,
+    outstanding: "Finish the implementation and verify the edited files.",
+    goal: "Bound automated continuation context without losing execution state.",
+    steps: [
+      {
+        title: "Gather the exact evidence",
+        status: "done",
+        files: ["apps/agent/src/orchestrator/pipeline-executor.ts"],
+      },
+      {
+        title: "Apply the bounded continuation",
+        status: "in-progress",
+        files: ["apps/agent/src/orchestrator/direct-mode.ts"],
+      },
+      { title: "Run the narrow smoke test", status: "pending" },
+    ],
+    changedFiles: ["apps/agent/src/orchestrator/direct-mode.ts"],
+  });
+  check(
+    "execution checkpoint is hard bounded",
+    checkpoint.length <= EXECUTION_CHECKPOINT_MAX_CHARS
+  );
+  check("checkpoint keeps exact outstanding work", checkpoint.includes("Finish the implementation"));
+  check("checkpoint keeps live plan state", checkpoint.includes("[in-progress] Apply the bounded continuation"));
+  check("checkpoint keeps changed files", checkpoint.includes("apps/agent/src/orchestrator/direct-mode.ts"));
+  check("checkpoint prevents broad reinvestigation", checkpoint.includes("Do not repeat broad investigation"));
 }
 
 /**
@@ -125,6 +180,43 @@ function checkPipelineArmsGuards(): void {
     "pipeline rules state the targeted-edit hook",
     FAST_RULES.includes("replace_code")
   );
+  check(
+    "full mode keeps the current executor contract and rules",
+    source.includes("ATELIER_EXECUTOR_CONTRACT + FAST_RULES + userRules")
+  );
+  check(
+    "Claude agent mode omits the SDK turn ceiling",
+    source.includes("...(!direct ? { maxTurns: opts.maxTurns ?? claudeTurnBudget(purpose) } : {})")
+  );
+  check(
+    "turn-limit continuation starts from a compact checkpoint",
+    source.includes("const checkpoint = this.executionCheckpoint(ctx, prompt)") &&
+      source.includes("resume: false")
+  );
+  check(
+    "repeated gate retries do not resume the native transcript",
+    source.includes("resume: !checkpointed")
+  );
+  // Continuity in light mode: the same provider-neutral block the pipeline
+  // carries, the same working memory recorded, a local summary written.
+  check(
+    "every task runs through the turn runner",
+    source.includes("await this.turns.run(ctx, (c, prompt, context, images) =>")
+  );
+  check(
+    "a stopped turn is remembered as stopped",
+    source.includes("this.turns.saveSummary(ctx, ctx.collectedText, status)")
+  );
+  check(
+    "native tools ride beside the MCP tools",
+    source.includes("...CLAUDE_NATIVE_TOOLS,") &&
+      source.includes("hooks: this.nativeToolHooks(ctx),") &&
+      source.includes("DISABLED_BUILTINS.filter((name) => !CLAUDE_NATIVE_TOOLS.some((native) => native === name))")
+  );
+  check(
+    "native shell commands go through the user's run_terminal hooks",
+    source.includes('"run_terminal",\n          { command },')
+  );
 }
 
 function checkTranscript(): void {
@@ -138,7 +230,16 @@ function checkTranscript(): void {
   ];
   const rendered = renderPriorTurns(turns);
   check("recent turns ride verbatim", rendered.includes("User: five"));
-  check("only the last four ride", !rendered.includes("one"));
+  check("only the last two ride", !rendered.includes("three"));
+  check("older turns are omitted", !rendered.includes("one"));
+  // The carried block is now built by SharedSessionContextBuilder within
+  // its own token budget; the hard cap here is a backstop, and it must be
+  // wide enough that a block the builder fitted is never cut a second time.
+  check(
+    "light append cap holds the builder's largest block",
+    LIGHT_APPEND_CHARS >= 3200 * 4,
+    `${LIGHT_APPEND_CHARS} chars`
+  );
 }
 
 /**
@@ -207,9 +308,11 @@ async function main(): Promise<void> {
   checkFlag();
   checkTools();
   checkRules();
+  checkLightCompression();
+  checkExecutionCheckpoint();
   checkPipelineArmsGuards();
   checkTranscript();
-  await checkGuardBypass();
+  if (!process.argv.includes("--light-only")) await checkGuardBypass();
 
   console.log(fail === 0 ? "\nDirect-mode smoke OK" : `\n${fail} check(s) failed`);
   process.exit(fail === 0 ? 0 : 1);

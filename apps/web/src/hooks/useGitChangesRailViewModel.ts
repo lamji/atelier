@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { totalStat, type FileChange } from "@/lib/file-changes";
 import { countChanges } from "@/lib/unified-diff";
 import {
@@ -45,11 +45,13 @@ export function useGitChangesRailViewModel(
   const [changes, setChanges] = useState<FileChange[]>([]);
   const [pinned, setPinned] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const previousChanges = useRef(new Map<string, FileChange>());
 
   // Another session's files are not this one's, and neither are another
   // project's. Drop them the moment either changes instead of letting them
   // sit until the refetch lands.
   useEffect(() => {
+    previousChanges.current.clear();
     setChanges([]);
     setPinned(null);
   }, [sessionId, workspaceEpoch]);
@@ -108,18 +110,28 @@ export function useGitChangesRailViewModel(
           // Persistence failure must not hide the live diff from this window.
         }
       }
-      const loaded = mergeSessionChanges(stored, captured).map((change) => ({
-        path: change.path,
-        before: change.before,
-        after: change.after,
-        ...countChanges(change.before, change.after),
-        // Only sessions still in the list get named — a closed one's id
-        // means nothing to the reader.
-        sharedWith: change.alsoTouchedBy
-          .map((id) => label.get(id))
-          .filter((name): name is string => !!name),
-      }));
+      // Persistence above remains valid even if another update superseded
+      // this request. Discard its rendering work once it is no longer current.
+      if (cancelled) return;
+      const loaded = mergeSessionChanges(stored, captured).map((change) => {
+        const previous = previousChanges.current.get(change.path);
+        const stat = previous?.before === change.before && previous.after === change.after
+          ? { added: previous.added, removed: previous.removed }
+          : countChanges(change.before, change.after);
+        return {
+          path: change.path,
+          before: change.before,
+          after: change.after,
+          ...stat,
+          // Only sessions still in the list get named — a closed one's id
+          // means nothing to the reader.
+          sharedWith: change.alsoTouchedBy
+            .map((id) => label.get(id))
+            .filter((name): name is string => !!name),
+        };
+      });
       if (!cancelled) {
+        previousChanges.current = new Map(loaded.map((change) => [change.path, change]));
         setChanges(loaded);
         setLoading(false);
       }

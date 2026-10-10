@@ -10,7 +10,9 @@ import {
   GitPullRequest,
   Loader2,
   ShieldAlert,
+  ChevronRight,
   Square,
+  TriangleAlert,
   Wand2,
   X,
 } from "lucide-react";
@@ -23,6 +25,12 @@ import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { GitModelSelect } from "./GitModelSelect";
+import {
+  AUTOMATIC_CREDENTIAL,
+  credentialHint,
+  credentialLabel,
+} from "@/lib/forge-credentials";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { GitFlowRequest } from "@atelier/protocol";
@@ -39,7 +47,9 @@ const STAGE_TITLES: Record<FlowStage, string> = {
   push: "Push to origin",
   "push-fix": "Push failed",
   "pr-ask": "Create a pull request?",
+  "pr-compare": "New pull request",
   "pr-describe": "Pull request details",
+  "pr-push-check": "This branch is not fully pushed",
   "pr-conflicts": "Checking mergeability",
   "conflict-fix": "Resolve merge conflicts",
   "pr-create": "Creating pull request…",
@@ -191,6 +201,10 @@ function StageBody({
       );
     case "pr-ask":
       return <PrAskStage vm={vm} />;
+    case "pr-compare":
+      return <PrCompareStage vm={vm} />;
+    case "pr-push-check":
+      return <PrPushCheckStage vm={vm} />;
     case "pr-describe":
       return <PrDescribeStage vm={vm} />;
     case "pr-conflicts":
@@ -370,14 +384,188 @@ function PrAskStage({ vm }: { vm: GitFlowViewModel }) {
   );
 }
 
-function PrDescribeStage({ vm }: { vm: GitFlowViewModel }) {
+/**
+ * The push check, as its own screen.
+ *
+ * It replaces the compare form rather than sitting under it because the
+ * two answers lead to different pull requests: push, and the request
+ * contains the work; proceed, and it contains whatever the remote already
+ * had. Offered as a choice — GitHub compares what it HAS, and plenty of
+ * requests are opened from a branch whose author is still working — but
+ * offered where it cannot be walked past without being read.
+ */
+function PrPushCheckStage({ vm }: { vm: GitFlowViewModel }) {
   const { flow } = vm;
   return (
     <div className="space-y-3">
+      <p className="flex items-start gap-2 rounded-lg bg-warning/10 px-2.5 py-2 text-xs text-warning">
+        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">
+          {flow.prWarnings.map((warning) => (
+            <span key={warning} className="block">
+              {warning}
+            </span>
+          ))}
+        </span>
+      </p>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        GitHub compares{" "}
+        <span className="font-mono">{flow.prHead}</span> as it exists on the
+        remote against <span className="font-mono">{flow.prBase}</span>. Push
+        first and the request contains this work; proceed and it contains
+        whatever origin already has.
+      </p>
+      {flow.output && (
+        <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-black/25 px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-neutral-300">
+          {flow.output}
+        </pre>
+      )}
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={flow.running}
+          onClick={vm.backToCompare}
+        >
+          Back
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="ml-auto"
+          disabled={flow.running}
+          onClick={vm.skipPushAndDraft}
+        >
+          Proceed anyway
+        </Button>
+        {/* Only when pushing would actually change the answer. With just
+            uncommitted work there is nothing to send, and a button that
+            does nothing is worse than no button. */}
+        {flow.prWarnings.some((w) => /pushed/.test(w)) && (
+          <Button
+            size="sm"
+            disabled={flow.running}
+            onClick={() => void vm.pushThenDraft()}
+          >
+            {flow.running ? (
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <GitBranch className="mr-1.5 h-3.5 w-3.5" />
+            )}
+            Push now
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Step 1 — which two branches.
+ *
+ * Only the two pickers and one button. Everything that follows depends on
+ * this answer: the push check is about the head, and the description is
+ * about the range between them. Showing the title and body fields here as
+ * well — as this screen first did — turns a sequence into a form and
+ * invites the description to be written before the question it answers.
+ */
+function PrCompareStage({ vm }: { vm: GitFlowViewModel }) {
+  const { flow } = vm;
+  const head = flow.prHead || (flow.info?.branch ?? "");
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-muted-foreground">
+        Choose what to merge, and where into.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Select
+          value={head}
+          onChange={vm.setPrHead}
+          className="h-7 font-mono"
+          searchable
+          searchPlaceholder="Filter branches…"
+          options={headChoices(flow).map((b) => ({
+            value: b,
+            label: b === flow.info?.branch ? `${b}  (current)` : b,
+          }))}
+        />
+        <span className="text-muted-foreground">→</span>
+        <Select
+          value={flow.prBase}
+          onChange={vm.setPrBase}
+          className="h-7 font-mono"
+          searchable
+          searchPlaceholder="Filter branches…"
+          options={flow.remoteBranches
+            .filter((b) => b !== head)
+            .map((b) => ({ value: b, label: b }))}
+        />
+      </div>
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          disabled={!flow.prBase || !head || flow.prBase === head}
+          onClick={vm.generatePr}
+        >
+          Continue
+          <ChevronRight className="ml-1 h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Step 3 — the description, for a comparison that is already settled.
+ *
+ * No pickers here. Changing the branches means going back a step, which is
+ * what "Change branches" does; leaving them editable beside a finished
+ * draft is how a description ends up describing a different pair.
+ */
+function PrDescribeStage({ vm }: { vm: GitFlowViewModel }) {
+  const { flow } = vm;
+  const drafted = flow.prDraftedFor !== "";
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="truncate font-mono text-[11px] text-muted-foreground">
+          {flow.prHead || flow.info?.branch} → {flow.prBase}
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-1.5 text-[10px]"
+          disabled={flow.prDrafting}
+          onClick={vm.backToCompare}
+        >
+          Change branches
+        </Button>
+        {/* The provider/model the description is drafted on — shared with
+            the commit-message draft. Beside Generate so a regenerate on a
+            different model is one pick and one click. */}
+        <GitModelSelect
+          disabled={flow.prDrafting}
+          className="ml-auto h-7 w-44 rounded-md border border-border/70 bg-background/70 px-2"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7"
+          disabled={flow.prDrafting}
+          onClick={vm.generatePr}
+        >
+          {flow.prDrafting ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {flow.prDrafting ? "Drafting…" : drafted ? "Regenerate" : "Generate"}
+        </Button>
+      </div>
       {flow.prDrafting && (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Drafting description from your commits…
+          Reading the commits between these two branches…
         </p>
       )}
       <Input
@@ -397,31 +585,107 @@ function PrDescribeStage({ vm }: { vm: GitFlowViewModel }) {
         className="resize-none text-xs"
         disabled={flow.prDrafting}
       />
-      <div className="flex items-center gap-2 text-xs">
-        <span className="text-muted-foreground">
-          <span className="font-mono">{flow.info?.branch}</span> →
-        </span>
-        <Select
-          value={flow.prBase}
-          onChange={vm.setPrBase}
-          className="h-7 font-mono"
-          disabled={flow.prDrafting}
-          options={flow.remoteBranches
-            .filter((b) => b !== flow.info?.branch)
-            .map((b) => ({ value: b, label: b }))}
-        />
+      <PrAccountPicker vm={vm} />
+      <div className="flex justify-end">
         <Button
           size="sm"
-          className="ml-auto"
           disabled={flow.prDrafting || !flow.prTitle.trim()}
           onClick={() => void vm.validatePr()}
         >
-          Validate & create
+          Validate &amp; create
         </Button>
       </div>
     </div>
   );
 }
+
+/**
+ * Which account opens the pull request.
+ *
+ * On a machine with two GitHub logins the answer is not obvious and the
+ * cost of getting it wrong is opaque: the branch pushes as one account
+ * while `gh` asks GitHub as another, and GitHub replies "Could not resolve
+ * to a Repository" — which reads as a missing repo, not a wrong identity.
+ * Atelier pre-selects the account this checkout actually pushes as; the
+ * picker is here so that choice is visible and overridable rather than
+ * silent.
+ */
+function PrAccountPicker({ vm }: { vm: GitFlowViewModel }) {
+  const { flow } = vm;
+  if (flow.prCredentials.length === 0) return null;
+
+  const selected = flow.prCredentialId
+    ? flow.prCredentials.find(
+        (credential) => credential.id === flow.prCredentialId
+      )
+    : undefined;
+  const matchesCheckout =
+    Boolean(flow.prIdentity) &&
+    Boolean(selected?.login) &&
+    selected?.login?.toLowerCase() === flow.prIdentity.toLowerCase();
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <label className="text-[11px] text-muted-foreground">Open as</label>
+        {flow.prIdentity && (
+          <span className="text-[10px] text-muted-foreground/70">
+            this branch pushes as @{flow.prIdentity}
+          </span>
+        )}
+      </div>
+      <Select
+        value={flow.prCredentialId ?? AUTOMATIC_CREDENTIAL}
+        onChange={(value) =>
+          vm.selectPrCredential(
+            value === AUTOMATIC_CREDENTIAL ? undefined : value
+          )
+        }
+        options={[
+          {
+            value: AUTOMATIC_CREDENTIAL,
+            label: "Automatic",
+            hint: "Match the account this checkout pushes as",
+          },
+          ...flow.prCredentials.map((credential) => ({
+            value: credential.id,
+            label: credentialLabel(credential, "github"),
+            hint: credentialHint(credential),
+          })),
+        ]}
+        disabled={flow.prDrafting}
+        className="h-7 w-full justify-between px-2 text-[11px]"
+        menuClassName="min-w-56"
+      />
+      {selected && flow.prIdentity && !matchesCheckout && (
+        <p className="text-[10px] text-amber-500/90">
+          This account is not the one that pushed the branch. If it cannot
+          see the repository, GitHub answers &ldquo;could not resolve&rdquo;.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Head branches worth offering: everything on the remote, plus the branch
+ * you are standing on even when it has never been pushed.
+ *
+ * The unpushed one is included on purpose. Leaving it out would answer
+ * "why can't I pick my own branch?" with silence; including it and warning
+ * that GitHub cannot see it yet answers the question.
+ */
+function headChoices(flow: {
+  remoteBranches: string[];
+  info?: { branch: string } | null;
+}): string[] {
+  const current = flow.info?.branch;
+  const all = current
+    ? [current, ...flow.remoteBranches.filter((b) => b !== current)]
+    : flow.remoteBranches;
+  return [...new Set(all.filter(Boolean))];
+}
+
 
 function PrConflictsStage({ vm }: { vm: GitFlowViewModel }) {
   const { flow } = vm;

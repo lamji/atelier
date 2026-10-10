@@ -121,12 +121,57 @@ export type GitPullMode = z.infer<typeof GitPullMode>;
 
 export const GitCommit = z.object({
   hash: z.string(),
+  /** Subject line only — what the log rows show. */
   message: z.string(),
+  /**
+   * Everything after the subject's blank line, verbatim.
+   *
+   * Carried because a commit message is often where the real account of a
+   * change lives — GitHub shows it behind the "…" next to the subject —
+   * and Atelier's own generated messages are release notes with sections
+   * and migration paths in exactly this field. Without it the log could
+   * only ever show the first line of what it wrote.
+   */
+  body: z.string().optional(),
   author: z.string(),
+  /** Author's email, for the avatar/identity line in the detail view. */
+  email: z.string().optional(),
   date: z.string(),
   refs: z.string().optional(),
+  /**
+   * Full hashes of the parent commits, first parent first. The History
+   * graph draws its lanes from these; a merge has two or more.
+   */
+  parents: z.array(z.string()).optional(),
 });
 export type GitCommit = z.infer<typeof GitCommit>;
+
+/** One file a commit touched, relative to its first parent. */
+export const GitCommitFile = z.object({
+  /** Repo-relative path after the commit. */
+  path: z.string(),
+  /** Repo-relative path before the commit, for a rename or copy. */
+  oldPath: z.string().optional(),
+  /** git's name-status letter: A, M, D, R, C or T. */
+  status: z.string(),
+  added: z.number(),
+  removed: z.number(),
+  binary: z.boolean().optional(),
+});
+export type GitCommitFile = z.infer<typeof GitCommitFile>;
+
+/** One line of `git blame`, with the commit that last changed it. */
+export const GitBlameLine = z.object({
+  /** 1-based line number in the blamed revision. */
+  line: z.number(),
+  hash: z.string(),
+  author: z.string(),
+  email: z.string().optional(),
+  date: z.string(),
+  summary: z.string(),
+  content: z.string(),
+});
+export type GitBlameLine = z.infer<typeof GitBlameLine>;
 
 export const GitBranch = z.object({
   name: z.string(),
@@ -210,8 +255,29 @@ export const GitForgeAuthSource = z.enum([
   "cli-token",
   /** git's own credential helper — the same login that pushes. */
   "credential-helper",
+  /**
+   * A token the user added through the Requests pane, kept by Atelier.
+   *
+   * Its own source because it is the only one Atelier is responsible for:
+   * every other entry is discovered from somewhere the user already
+   * manages, and this is the one they can expect the app to remember.
+   */
+  "stored",
 ]);
 export type GitForgeAuthSource = z.infer<typeof GitForgeAuthSource>;
+
+/**
+ * One API-capable credential discovered on this machine. The id is opaque
+ * and process-local: it lets the UI choose a credential without sending a
+ * token across the bridge.
+ */
+export const GitForgeCredential = z.object({
+  id: z.string(),
+  source: GitForgeAuthSource,
+  /** Account volunteered by gh/glab/git credential, when available. */
+  login: z.string().optional(),
+});
+export type GitForgeCredential = z.infer<typeof GitForgeCredential>;
 
 /**
  * One open pull request (GitHub) or merge request (GitLab). Deliberately
@@ -260,6 +326,27 @@ export const GitFlowRequest = z.object({
 export type GitFlowRequest = z.infer<typeof GitFlowRequest>;
 
 /** Everything the commit→push→PR wizard needs to pick its starting stage. */
+/**
+ * What the current branch owns relative to its base — the facts the commit
+ * box needs to decide between amending the branch's single commit and
+ * starting a new one.
+ */
+export const GitBranchState = z.object({
+  branch: z.string(),
+  /** The branch this one will merge into ("main", "develop", …). */
+  base: z.string(),
+  /** Commits on this branch that are not on the base. */
+  ahead: z.number(),
+  /** True when HEAD is the base branch itself — never amend there. */
+  onBase: z.boolean(),
+  /** Amending something already pushed needs a force push. */
+  hasUpstream: z.boolean(),
+  headSubject: z.string(),
+  /** Full message of HEAD, so an amend can start from what it already says. */
+  headMessage: z.string(),
+});
+export type GitBranchState = z.infer<typeof GitBranchState>;
+
 export const GitFlowInfo = z.object({
   /**
    * The checkout this flow acts on, workspace-relative ("." when the

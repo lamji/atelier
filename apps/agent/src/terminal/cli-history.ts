@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline";
 import type { CliHistoryEntry } from "@atelier/protocol";
+import { conversationTitle } from "@atelier/shared";
 
 /**
  * The past sessions of the provider CLIs, read from the transcripts they
@@ -20,10 +21,7 @@ import type { CliHistoryEntry } from "@atelier/protocol";
  * rather than failing the call.
  */
 
-/** Newest transcripts whose head is parsed, per provider. */
-const MAX_FILES_PARSED = 250;
-/** Ceiling on the directory walk, so a huge history cannot stall the call. */
-const MAX_FILES_WALKED = 1500;
+const WALK_CACHE_MS = 30_000;
 /**
  * Bytes read from the front of each transcript. Enough for the session
  * header plus the environment preamble plus the first real prompt, which is
@@ -35,6 +33,7 @@ const HEAD_BYTES = 64 * 1024;
  * Scan farther for that prompt, but keep the work bounded per transcript.
  */
 const CODEX_HEAD_BYTES = 512 * 1024;
+const CONTEXT_TAIL_BYTES = 2 * 1024 * 1024;
 /** Row labels are truncated in the UI; this only stops absurd strings. */
 const MAX_TITLE_CHARS = 200;
 
@@ -43,17 +42,20 @@ interface WalkedFile {
   mtime: number;
 }
 
+const walkCache = new Map<string, { expiresAt: number; files: WalkedFile[] }>();
+
 /**
  * JSONL files under `root`, newest first.
  *
  * Directories are visited in reverse name order, which for Codex's
- * `YYYY/MM/DD` layout means the newest days are walked first — so the cap
- * cuts off ancient sessions rather than recent ones.
+ * `YYYY/MM/DD` layout means the newest days are walked first.
  */
-async function walkJsonl(root: string): Promise<WalkedFile[]> {
+async function walkJsonl(root: string, refresh = false): Promise<WalkedFile[]> {
+  const cached = walkCache.get(root);
+  if (!refresh && cached && cached.expiresAt > Date.now()) return cached.files;
   const out: WalkedFile[] = [];
   const stack = [root];
-  while (stack.length > 0 && out.length < MAX_FILES_WALKED) {
+  while (stack.length > 0) {
     const dir = stack.pop()!;
     let entries;
     try {
@@ -74,14 +76,14 @@ async function walkJsonl(root: string): Promise<WalkedFile[]> {
           // vanished mid-walk — the CLI rotates its own files
         }
       }
-      if (out.length >= MAX_FILES_WALKED) break;
     }
     // Ascending push, LIFO pop: the newest-named directory comes out first.
     dirs.sort();
     stack.push(...dirs);
   }
   out.sort((a, b) => b.mtime - a.mtime);
-  return out.slice(0, MAX_FILES_PARSED);
+  walkCache.set(root, { expiresAt: Date.now() + WALK_CACHE_MS, files: out });
+  return out;
 }
 
 /** The first {@link HEAD_BYTES} of a file, as text. */
@@ -190,13 +192,95 @@ function contentText(content: unknown): string {
  * "user_message",message}}`, and the older un-enveloped records. Unknown
  * lines simply contribute nothing.
  */
-function codexUserText(record: Record<string, unknown>): string {
+function codexRawUserText(record: Record<string, unknown>): string {
   const payload = asRecord(record.payload) ?? record;
   if (payload.type === "user_message" && typeof payload.message === "string") {
-    return cleanUserText(payload.message);
+    return payload.message;
   }
-  if (payload.role === "user") return cleanUserText(contentText(payload.content));
+  if (payload.role === "user") return contentText(payload.content);
   return "";
+}
+
+function codexUserText(record: Record<string, unknown>): string {
+  return cleanUserText(codexRawUserText(record));
+}
+
+/** A bounded suffix of the current transcript, omitting a partial first line. */
+async function readContextTail(file: string): Promise<string> {
+  const handle = await fs.open(file, "r");
+  try {
+    const { size } = await handle.stat();
+    const start = Math.max(0, size - CONTEXT_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    return start === 0 ? text : text.slice(text.indexOf("\n") + 1);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Derive a concise label from the latest meaningful user request. */
+export function titleFromCliTranscript(providerId: string, text: string): string {
+  const requests: string[] = [];
+  for (const line of text.split("\n")) {
+    let record: Record<string, unknown> | null;
+    try {
+      record = asRecord(JSON.parse(line));
+    } catch {
+      continue;
+    }
+    if (!record) continue;
+    let request = "";
+    if (providerId === "codex") {
+      request = codexRawUserText(record);
+    } else if (providerId === "claude" && record.type === "user" &&
+               !record.isMeta && !record.isSidechain) {
+      request = contentText(asRecord(record.message)?.content);
+    }
+    request = cleanUserText(request
+      .replace(/<image\b[^>]*>/gi, " ")
+      .replace(/\[Image #[^\]]+\]/gi, " "))
+      .replace(/^(?:next|please|now|i need|can you|could you)(?:\s+|:\s*|,\s*|-\s+)/i, "")
+      .trim();
+    if (!request || request.startsWith("/") ||
+        /^(?:continue|yes|ok|okay|go ahead|do it|fix it|keep going|try again)[.!? ]*$/i.test(request)) {
+      continue;
+    }
+    if (requests.at(-1) !== request) requests.push(request);
+  }
+  const recent = requests.slice(-12).reverse();
+  const meaningful = recent.find((request) => request.length >= 12 && request.split(/\s+/).length >= 3);
+  return conversationTitle(meaningful ?? recent[0] ?? "");
+}
+
+/** Find the active provider transcript by its native resume ID. */
+export async function suggestCliSessionTitle(
+  workspaceRoot: string,
+  providerId: string,
+  sessionId: string
+): Promise<string> {
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return "";
+  let file: string | undefined;
+  if (providerId === "claude") {
+    file = path.join(claudeProjectDir(workspaceRoot), `${sessionId}.jsonl`);
+  } else if (providerId === "codex") {
+    const root = path.join(os.homedir(), ".codex", "sessions");
+    const matchesId = (entry: WalkedFile) =>
+      path.basename(entry.file).toLowerCase().endsWith(`-${sessionId.toLowerCase()}.jsonl`);
+    file = (await walkJsonl(root)).find(matchesId)?.file;
+    if (!file) file = (await walkJsonl(root, true)).find(matchesId)?.file;
+    if (file) {
+      const metadata = parseCodexRollout(await readCodexHead(file), file, 0);
+      if (!metadata?.cwd || !sameDir(metadata.cwd, workspaceRoot)) return "";
+    }
+  }
+  if (!file) return "";
+  try {
+    return titleFromCliTranscript(providerId, await readContextTail(file));
+  } catch {
+    return "";
+  }
 }
 
 function parseCodexRollout(
@@ -245,11 +329,16 @@ function parseCodexRollout(
   };
 }
 
-async function codexHistory(workspaceRoot: string): Promise<CliHistoryEntry[]> {
+interface HistoryScan {
+  entries: CliHistoryEntry[];
+  hasMore: boolean;
+}
+
+async function codexHistory(workspaceRoot: string, offset: number, limit: number): Promise<HistoryScan> {
   const root = path.join(os.homedir(), ".codex", "sessions");
-  const files = await walkJsonl(root);
+  const files = await walkJsonl(root, offset === 0);
   const entries: CliHistoryEntry[] = [];
-  for (const { file, mtime } of files) {
+  for (const { file, mtime } of files.slice(offset, offset + limit)) {
     try {
       const entry = parseCodexRollout(await readCodexHead(file), file, mtime);
       // A rollout with no cwd predates the field; it cannot be claimed for
@@ -261,7 +350,7 @@ async function codexHistory(workspaceRoot: string): Promise<CliHistoryEntry[]> {
       // unreadable transcript — skip this one, keep the rest
     }
   }
-  return entries;
+  return { entries, hasMore: files.length > offset + limit };
 }
 
 // --------------------------------------------------------------- claude
@@ -318,11 +407,11 @@ function parseClaudeTranscript(
   };
 }
 
-async function claudeHistory(workspaceRoot: string): Promise<CliHistoryEntry[]> {
+async function claudeHistory(workspaceRoot: string, offset: number, limit: number): Promise<HistoryScan> {
   const dir = claudeProjectDir(workspaceRoot);
-  const files = await walkJsonl(dir);
+  const files = await walkJsonl(dir, offset === 0);
   const entries: CliHistoryEntry[] = [];
-  for (const { file, mtime } of files) {
+  for (const { file, mtime } of files.slice(offset, offset + limit)) {
     try {
       const entry = parseClaudeTranscript(await readHead(file), file, mtime);
       // The directory already IS this workspace, so an entry whose lines
@@ -334,12 +423,12 @@ async function claudeHistory(workspaceRoot: string): Promise<CliHistoryEntry[]> 
       // unreadable transcript — skip
     }
   }
-  return entries;
+  return { entries, hasMore: files.length > offset + limit };
 }
 
 const READERS: Record<
   string,
-  (workspaceRoot: string) => Promise<CliHistoryEntry[]>
+  (workspaceRoot: string, offset: number, limit: number) => Promise<HistoryScan>
 > = {
   codex: codexHistory,
   claude: claudeHistory,
@@ -349,24 +438,26 @@ const READERS: Record<
  * This workspace's CLI sessions as the providers themselves recorded them,
  * newest first, capped per provider.
  */
-export async function listCliHistory(
+export async function scanCliHistoryPage(
   workspaceRoot: string,
   providerId?: string,
-  limit = 20
-): Promise<CliHistoryEntry[]> {
+  offset = 0,
+  limit = 30
+): Promise<HistoryScan> {
   const wanted = providerId ? [providerId] : Object.keys(READERS);
   const perProvider = await Promise.all(
     wanted.map(async (id) => {
       const read = READERS[id];
-      if (!read) return [];
+      if (!read) return { entries: [], hasMore: false };
       try {
-        const entries = await read(workspaceRoot);
-        entries.sort((a, b) => b.updatedAt - a.updatedAt);
-        return entries.slice(0, Math.max(1, limit));
+        return await read(workspaceRoot, offset, limit);
       } catch {
-        return [];
+        return { entries: [], hasMore: false };
       }
     })
   );
-  return perProvider.flat().sort((a, b) => b.updatedAt - a.updatedAt);
+  return {
+    entries: perProvider.flatMap((result) => result.entries).sort((a, b) => b.updatedAt - a.updatedAt),
+    hasMore: perProvider.some((result) => result.hasMore),
+  };
 }

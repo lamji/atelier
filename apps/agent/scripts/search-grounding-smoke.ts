@@ -1,10 +1,12 @@
 /**
- * Search-grounding smoke: the model may not grep for terms it made up.
+ * Search-grounding smoke: unseen text terms are blocked until a tool
+ * returns them, including in direct mode.
  *
  * Reproduces the observed failure — a turn asked to fix the chat timeline
  * searched a VS Code fork for "DIRECT EXECUTION" and "ACTIVE WORKFLOW",
  * two rule-heading-shaped phrases that exist nowhere in it — and pins the
- * behaviour that replaced it.
+ * grounding behaviour: known terms run, unknown terms return actionable
+ * feedback, and repeating a blocked query does not bypass the guard.
  *
  *   pnpm --filter @atelier/agent smoke:grounding
  */
@@ -14,7 +16,6 @@ import path from "node:path";
 import { openDb } from "../src/storage/db.js";
 import { EventBus } from "../src/events/event-bus.js";
 import { HooksEngine } from "../src/hooks/hooks-engine.js";
-import { DirectTaskRegistry } from "../src/hooks/direct-tasks.js";
 import {
   SearchGroundingGuard,
   SEARCH_GROUNDING_HOOK_ID,
@@ -52,13 +53,8 @@ async function main(): Promise<void> {
     action: "block",
     argument: "Search for words from the turn, not invented ones",
   });
-  const directTasks = new DirectTaskRegistry();
   const guard = new SearchGroundingGuard(bus);
-  hooks.registerGuard(SEARCH_GROUNDING_HOOK_ID, (ctx) =>
-    directTasks.has(ctx.taskId)
-      ? Promise.resolve(undefined)
-      : guard.check(ctx)
-  );
+  hooks.registerGuard(SEARCH_GROUNDING_HOOK_ID, (ctx) => guard.check(ctx));
 
   const registry = new ToolRegistry(bus);
   registry.setGate(hooks);
@@ -67,34 +63,48 @@ async function main(): Promise<void> {
   registry.register("read_file", async (input: unknown) => input);
   const abort = new AbortController();
 
-  /** Runs a model-chosen query; true when the hook refused it. */
+  const notes: string[] = [];
+  bus.subscribe((event) => {
+    if (
+      event.topic === "hook.completed" &&
+      (event.payload as { hookId: string }).hookId === SEARCH_GROUNDING_HOOK_ID
+    ) {
+      notes.push((event.payload as { output?: string }).output ?? "");
+    }
+  });
+
+  /**
+   * True when a model-chosen query is blocked or noted as ungrounded.
+   */
   const search = async (
     taskId: string,
     query: string,
     toolName = "search_text"
   ): Promise<boolean> => {
+    const before = notes.length;
     try {
       await registry.run(toolName, { query }, taskId, abort.signal);
-      return false;
     } catch (error) {
-      return String(error).includes("Blocked by hook");
+      if (!String(error).includes("Blocked by hook")) throw error;
+      return true;
     }
+    return notes.length > before;
   };
 
   const task = "t-pipeline";
   guard.seed(task, [PROMPT, CONTEXT]);
 
-  console.log("invented terms");
+  console.log("invented text terms are blocked");
   check(
-    'refuses "DIRECT EXECUTION"',
+    'blocks "DIRECT EXECUTION"',
     await search(task, "DIRECT EXECUTION")
   );
   check(
-    'refuses "ACTIVE WORKFLOW"',
+    'blocks "ACTIVE WORKFLOW"',
     await search(task, "ACTIVE WORKFLOW")
   );
   check(
-    "retrieve_knowledge cannot bypass grounding",
+    "retrieve_knowledge is noted too",
     await search(
       task,
       "real FinTrack app icon generated base64",
@@ -117,22 +127,21 @@ async function main(): Promise<void> {
     !(await search(task, "chatbox timeline", "retrieve_knowledge"))
   );
 
-  console.log("\nit is a speed bump, not a wall");
+  console.log("\nrepeated searches do not bypass grounding");
   check(
-    "the same invented search goes through on the retry",
-    !(await search(task, "DIRECT EXECUTION"))
+    "the same unknown search remains blocked",
+    await search(task, "DIRECT EXECUTION")
   );
 
   console.log("\nwhat tools return becomes searchable");
   check(
-    "a symbol nobody mentioned is refused first",
+    "a symbol nobody mentioned is blocked first",
     await search(task, "ChatRequestParser")
   );
   guard.note(task, "export class ChatRequestParser { parse() {} }");
   check(
     "…and allowed once a tool has returned it",
-    !(await search("t-second", "ChatRequestParser")) ||
-      !(await search(task, "ChatRequestParser")),
+    !(await search(task, "ChatRequestParser")),
     "seen in a tool result"
   );
 
@@ -142,13 +151,12 @@ async function main(): Promise<void> {
     "a turn with no vocabulary is not policed",
     !(await search(unseeded, "ANYTHING AT ALL"))
   );
-  directTasks.mark("t-direct");
   guard.seed("t-direct", [PROMPT]);
   check(
-    "system-knowledge-off turns are not policed",
-    !(await search("t-direct", "DIRECT EXECUTION"))
+    "direct turns also require observed terms",
+    await search("t-direct", "DIRECT EXECUTION")
   );
-  directTasks.release("t-direct");
+  guard.release("t-direct");
 
   console.log(
     `\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}`

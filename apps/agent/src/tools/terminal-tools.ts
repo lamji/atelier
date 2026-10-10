@@ -24,7 +24,10 @@ export function assertCommandConfined(
 ): void {
   const rootLower = path.resolve(workspaceRoot).toLowerCase();
 
-  const drivePaths = command.match(/[A-Za-z]:[\\/][^\s"'`;|&<>)]*/g) ?? [];
+  // A URI scheme such as `http://` contains the drive-like substring
+  // `p:/`. A real drive path begins outside the URI-scheme character set.
+  const drivePaths =
+    command.match(/(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/][^\s"'`;|&<>)]*/g) ?? [];
   for (const raw of drivePaths) {
     const resolved = path.resolve(raw).toLowerCase();
     const inRoot =

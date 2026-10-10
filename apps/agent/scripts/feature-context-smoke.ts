@@ -51,6 +51,13 @@ try {
     createdAt: now,
     updatedAt: now,
   });
+  conversations.create({
+    id: "conv-multi",
+    title: "Multi-word feature",
+    sdkSessionId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
 
   // Mirrors the UI flow: create a session, then rename it before equipping it.
   conversations.setTitle("conv-login", "login");
@@ -165,11 +172,22 @@ try {
   const authFile = addFile(db, "src/auth/auth-service.ts");
   const usersFile = addFile(db, "src/data/users.ts");
   const billingFile = addFile(db, "src/billing/checkout.ts");
+  const pushFile = addFile(db, "src/storage/push.ts");
+  const notificationFile = addFile(db, "src/alerts/notification.ts");
+  const emailFile = addFile(db, "src/jobs/email.ts");
 
   const loginRoute = addSymbol(db, loginFile, "loginRoute", 4);
   const authenticateUser = addSymbol(db, authFile, "authenticateUser", 12);
   const findUser = addSymbol(db, usersFile, "findUser", 20);
   const checkout = addSymbol(db, billingFile, "checkout", 7);
+  const push = addSymbol(db, pushFile, "push", 9);
+  const notification = addSymbol(db, notificationFile, "notification", 11);
+  const sendEmailNotification = addSymbol(
+    db,
+    emailFile,
+    "sendEmailNotification",
+    13
+  );
 
   addCall(db, loginRoute, authenticateUser, "authenticateUser", 8);
   addCall(db, authenticateUser, findUser, "findUser", 17);
@@ -185,8 +203,45 @@ try {
   );
   addChunk(db, usersFile, findUser, "export async function findUser() {}");
   addChunk(db, billingFile, checkout, "export async function checkout() {}");
+  addChunk(db, pushFile, push, "export function push() {}");
+  addChunk(
+    db,
+    notificationFile,
+    notification,
+    "export function notification() {}"
+  );
+  addChunk(
+    db,
+    emailFile,
+    sendEmailNotification,
+    "export function sendEmailNotification() {}"
+  );
 
   const store = new FeatureContextStore(db);
+
+  // Separate generic matches must not be combined into a feature the workspace
+  // does not implement. This previously fabricated a 40-file report for
+  // "push notification" from unrelated push() and notification symbols.
+  assert.throws(
+    () => store.activate("conv-other", "push notification"),
+    /matched every term in "push notification".*may not exist/
+  );
+  assert.equal(store.get("conv-other"), null);
+  const falseFeature = db
+    .prepare("SELECT COUNT(*) count FROM features WHERE slug = ?")
+    .get("context:push-notification") as { count: number };
+  assert.equal(falseFeature.count, 0);
+
+  // A real multi-word feature still activates when one indexed symbol or path
+  // coherently contains every requested term.
+  const coherentMulti = store.activate("conv-multi", "email notification");
+  assert.ok(
+    coherentMulti.context.symbols.some(
+      (symbol) => symbol.name === "sendEmailNotification"
+    )
+  );
+  assert.ok(coherentMulti.context.files.includes("src/jobs/email.ts"));
+
   const activated = store.activate("conv-login", "login");
   const compiled = activated.context;
 
@@ -280,8 +335,18 @@ try {
   assert.ok(chunks.some((chunk) => chunk.path === "src/auth/auth-service.ts"));
   assert.ok(chunks.some((chunk) => chunk.path === "src/data/users.ts"));
   assert.ok(!chunks.some((chunk) => chunk.path.includes("billing")));
-  assert.match(store.render(compiled), /SESSION FEATURE CONTEXT — login/);
-  assert.match(store.render(compiled), /do not text-search/);
+  const rendered = store.render(compiled);
+  assert.match(rendered, /SESSION FEATURE CONTEXT — login/);
+  assert.match(rendered, /do not text-search/);
+  assert.doesNotMatch(rendered, /### End-to-end flow graph/);
+  assert.ok(rendered.length < compiled.detail.length);
+
+  const relevantRender = store.render(compiled, ["src/auth/auth-service.ts"]);
+  assert.match(relevantRender, /src\/auth\/auth-service\.ts/);
+  assert.match(relevantRender, /authenticateUser/);
+  assert.doesNotMatch(relevantRender, /src\/routes\/login\.ts/);
+  assert.doesNotMatch(relevantRender, /src\/data\/users\.ts/);
+  assert.match(relevantRender, /2 additional feature files omitted/);
 
   // Re-running the command refreshes the closure and discovers a new caller
   // whose own name/path does not contain "login".

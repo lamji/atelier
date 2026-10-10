@@ -8,6 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { useConnectionStore } from "@/state/connection.store";
 import { useWorkspaceStore } from "@/state/workspace.store";
 import { useGitStore } from "@/state/git.store";
+import { confirmDialog } from "@/state/confirm.store";
 
 function errText(e: unknown): string {
   return String((e as { message?: string })?.message ?? e);
@@ -87,11 +88,15 @@ export function RulesTab() {
       });
   };
 
-  const remove = (rule: UserRule) => {
-    const ok = window.confirm(
-      `Delete the rule "${rule.title}"?\n\n` +
-        `${rule.path} is removed from the workspace. This cannot be undone.`
-    );
+  const remove = async (rule: UserRule) => {
+    const ok = await confirmDialog({
+      title: "Delete rule",
+      message:
+        `Delete the rule "${rule.title}"?\n\n` +
+        `${rule.path} is removed from the workspace. This cannot be undone.`,
+      confirmLabel: "Delete",
+      destructive: true,
+    });
     if (!ok) return;
     void bridge
       .rpc("rules.delete", { path: rule.path })
@@ -187,7 +192,7 @@ export function RulesTab() {
                 variant="ghost"
                 size="icon"
                 title="Delete rule"
-                onClick={() => remove(rule)}
+                onClick={() => void remove(rule)}
                 className="!h-6 !w-6 shrink-0 text-muted-foreground hover:text-destructive"
               >
                 <Trash2 className="h-3 w-3" />

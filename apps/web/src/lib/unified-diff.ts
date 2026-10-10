@@ -51,13 +51,15 @@ function diffOps(a: string[], b: string[]): DiffOp[] | null {
   const n = a.length;
   const m = b.length;
   const max = Math.min(n + m, MAX_MYERS_D);
-  const offset = max;
-  const trace: number[][] = [];
-  const v: number[] = new Array(2 * max + 1).fill(0);
+  const offset = max + 1;
+  const trace: Int32Array[] = [];
+  const v = new Int32Array(2 * max + 3);
 
   let reachedEnd = false;
   outer: for (let d = 0; d <= max; d++) {
-    trace.push(v.slice());
+    // Backtracking only reads this round's diagonals and their neighbours.
+    // Copying the full maximum-width frontier every round wastes memory.
+    trace.push(v.slice(offset - d - 1, offset + d + 2));
     for (let k = -d; k <= d; k += 2) {
       let x: number;
       if (k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!)) {
@@ -86,10 +88,10 @@ function diffOps(a: string[], b: string[]): DiffOp[] | null {
     const vd = trace[d]!;
     const k = x - y;
     const prevK =
-      k === -d || (k !== d && vd[offset + k - 1]! < vd[offset + k + 1]!)
+      k === -d || (k !== d && vd[d + k]! < vd[d + k + 2]!)
         ? k + 1
         : k - 1;
-    const prevX = vd[offset + prevK]!;
+    const prevX = vd[d + 1 + prevK]!;
     const prevY = prevX - prevK;
     // The diagonal run that ends this round: lines both sides share.
     while (x > prevX && y > prevY) {
@@ -131,22 +133,47 @@ function multisetStat(
   return { added, removed };
 }
 
-/** Line delta for a tab's badge, from the same script the rows are built from. */
+/**
+ * Counts need only Myers' final edit distance, not a retained edit script.
+ * Keep one frontier (at most 32 KB) instead of allocating a trace per round.
+ */
+function editDistance(a: string[], b: string[]): number | null {
+  const n = a.length;
+  const m = b.length;
+  const max = Math.min(n + m, MAX_MYERS_D);
+  const offset = max + 1;
+  const v = new Int32Array(2 * max + 3);
+  for (let d = 0; d <= max; d++) {
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!)
+        ? v[offset + k + 1]!
+        : v[offset + k - 1]! + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) return d;
+    }
+  }
+  return null;
+}
+
+/** Line delta for a tab's badge, with the same edit-distance cap as the rows. */
 export function countChanges(
   before: string,
   after: string
 ): { added: number; removed: number } {
+  if (before === after) return { added: 0, removed: 0 };
   const a = before.split("\n");
   const b = after.split("\n");
-  const ops = diffOps(a, b);
-  if (ops === null) return multisetStat(a, b);
-  let added = 0;
-  let removed = 0;
-  for (const op of ops) {
-    if (op.kind === "add") added++;
-    else if (op.kind === "del") removed++;
-  }
-  return { added, removed };
+  const distance = editDistance(a, b);
+  if (distance === null) return multisetStat(a, b);
+  return {
+    added: (distance + b.length - a.length) / 2,
+    removed: (distance + a.length - b.length) / 2,
+  };
 }
 
 /** Every unchanged line close enough to a change to be worth keeping. */

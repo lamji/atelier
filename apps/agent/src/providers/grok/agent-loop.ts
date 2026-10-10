@@ -12,7 +12,6 @@ import {
 import { recordGrokUsage } from "./usage.js";
 
 const IDLE_TIMEOUT_MS = 120_000;
-const MAX_TURNS = 30;
 
 interface GrokFunctionCall {
   id: string;
@@ -52,7 +51,8 @@ export async function runGrokAgentLoop(
   const tools = atelierToolsFor(opts.toolNames);
   let text = "";
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
+  for (;;) {
+    opts.signal.throwIfAborted();
     const message = await streamRound(opts, messages, tools, (delta) => {
       text += delta;
       opts.emitText(delta);
@@ -69,7 +69,6 @@ export async function runGrokAgentLoop(
       messages.push({ role: "tool", tool_call_id: call.id, content: result });
     }
   }
-  throw new Error(`Grok agent loop exceeded ${MAX_TURNS} turns`);
 }
 
 async function streamRound(

@@ -53,9 +53,10 @@ check(
 );
 
 // ── resume exists, but only INSIDE one task ──────────────────────────────
-// The gate retries, the repair round and the turn-ceiling continuation all
-// carry on the same session on purpose: they are one prompt's work. What
-// must never happen is a session id outliving the task that minted it.
+// The initial plan-to-execute transition and immediate repair may carry on
+// the same session so freshly gathered evidence is not discarded. What must
+// never happen is a session id outliving the task that minted it; longer
+// automated continuations are bounded separately below.
 const resumeSites = pipeline.match(/resume:\s*ctx\.sdkSessionId/g) ?? [];
 check(
   "resume reads only the task's own in-memory id",
@@ -65,6 +66,27 @@ check(
 check(
   "the id is assigned on the task context, never stored",
   /ctx\.sdkSessionId = sid/.test(pipeline)
+);
+
+// ── automated continuations are fresh and bounded ────────────────────────
+// The first plan-to-execute transition may resume so the evidence gathered
+// by that plan is not lost. Once a turn ceiling or repeated completion-gate
+// retry is reached, the pipeline starts fresh from Atelier's compact live
+// checkpoint. The original append context still rides along, preserving the
+// selected source evidence without replaying the provider's tool transcript.
+check(
+  "turn-ceiling continuation starts from a compact checkpoint",
+  pipeline.includes(
+    "const checkpoint = this.executionCheckpoint(ctx, prompt)"
+  ) &&
+    /this\.streamSession\(\s*ctx,\s*checkpoint,\s*appendContext[\s\S]*?resume:\s*false/.test(
+      pipeline
+    )
+);
+check(
+  "repeated completion retries leave the native transcript behind",
+  pipeline.includes("const checkpointed = opts.gateRetry === true") &&
+    pipeline.includes("resume: !checkpointed")
 );
 
 // ── the non-Claude providers are one-shot per prompt ─────────────────────
@@ -90,12 +112,12 @@ check(
 );
 check(
   "session memory is recalled into that block",
-  /recallSession\(ctx, retrieval, intent\.kind\)/.test(pipeline)
+  /await this\.recallSession\(ctx, retrieval\)/.test(pipeline)
 );
 
 console.log(
   failed === 0
-    ? "\nsession isolation holds: one provider session per prompt"
+    ? "\nsession isolation holds: provider state is task-local and continuations are bounded"
     : `\n${failed} check(s) failed`
 );
 process.exit(failed === 0 ? 0 : 1);

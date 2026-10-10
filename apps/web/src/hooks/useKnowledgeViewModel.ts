@@ -11,7 +11,7 @@ import { useWorkspaceStore } from "@/state/workspace.store";
  * ViewModel for the Knowledge side panel and the Graph pane: index stats,
  * indexing progress, re-index action, and graph scope/loading.
  */
-export function useKnowledgeViewModel() {
+export function useKnowledgeViewModel(observe = true) {
   // Per-field selectors: indexing progress ticks several times a second
   // during a scan, and only the progress readouts should follow it.
   const stats = useKnowledgeStore((s) => s.stats);
@@ -36,7 +36,7 @@ export function useKnowledgeViewModel() {
 
   // Stats follow connection + knowledge.updated events.
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !observe) return;
     let cancelled = false;
     void bridge
       .rpc("knowledge.stats", {})
@@ -65,13 +65,13 @@ export function useKnowledgeViewModel() {
     return () => {
       cancelled = true;
     };
-  }, [connected, statsVersion]);
+  }, [connected, statsVersion, observe]);
 
   // While indexing, poll stats so `queued` (and the welcome/status-bar
   // indicator) update smoothly even between knowledge.updated flushes.
   const indexingActiveNow = indexing !== null || (stats?.queued ?? 0) > 0;
   useEffect(() => {
-    if (!connected || !indexingActiveNow) return;
+    if (!connected || !observe || !indexingActiveNow) return;
     const timer = setInterval(() => {
       void bridge
         .rpc("knowledge.stats", {})
@@ -79,7 +79,7 @@ export function useKnowledgeViewModel() {
         .catch(() => undefined);
     }, 1500);
     return () => clearInterval(timer);
-  }, [connected, indexingActiveNow]);
+  }, [connected, indexingActiveNow, observe]);
 
   const reindex = useCallback(async (force = false) => {
     await bridge.rpc("knowledge.indexWorkspace", { force }).catch(() => undefined);
@@ -150,11 +150,11 @@ export function useKnowledgeViewModel() {
   // visible, and re-pull it when the knowledge index changes underneath
   // (statsVersion moves on every knowledge.updated event).
   useEffect(() => {
-    if (!connected || rightTab !== "graph") return;
+    if (!connected || !observe || rightTab !== "graph") return;
     const s = useKnowledgeStore.getState();
     if (s.graphLoading) return;
     void loadGraph(s.graphScope, s.graphTarget || undefined);
-  }, [connected, rightTab, statsVersion, loadGraph]);
+  }, [connected, rightTab, statsVersion, loadGraph, observe]);
 
   return {
     connected,

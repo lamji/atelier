@@ -4,6 +4,7 @@ import type {
   ImageAttachment,
   LlmRequest,
   ReasoningEffort,
+  TurnMode,
 } from "@atelier/protocol";
 import {
   conversationTitle,
@@ -26,6 +27,7 @@ import {
   type TaskContext,
 } from "./pipeline-executor.js";
 import type { PlanTracker } from "./plan-tracker.js";
+import { EMPTY_NAMED_TARGETS } from "./named-targets.js";
 import { EMPTY_SCOPE } from "../workspace/scope/index.js";
 
 interface RunningTask {
@@ -67,6 +69,11 @@ export interface TaskOptions {
   model?: string;
   effort?: ReasoningEffort;
   planMode?: boolean;
+  /**
+   * The composer's Ask / Plan / Code pick. Absent means `code`, which is
+   * what every turn was before the selector existed.
+   */
+  turnMode?: TurnMode;
   /** Vibe coding: autonomous product-builder mode for this task. */
   vibe?: boolean;
   /**
@@ -85,9 +92,8 @@ export interface TaskOptions {
    */
   autoValidate?: boolean;
   /**
-   * System knowledge — the full pipeline (retrieval, plan, validation,
-   * review, session memory). Absent means ON: only an explicit `false`
-   * drops the task to a plain Claude/Codex agent loop.
+   * Legacy client flag. Agent turns always use one direct provider loop
+   * with filesystem search; this flag no longer enables knowledge retrieval.
    */
   systemKnowledge?: boolean;
   /**
@@ -142,6 +148,11 @@ export class Orchestrator {
     // survive a hydrate (session reload / reconnect), matching what the
     // live transcript already shows while the task is running.
     this.bus.subscribe((event) => this.onEvent(event));
+  }
+
+  /** Diff-based size of a running task's change, for the change-scale guard. */
+  changeScaleOf(taskId: string) {
+    return this.pipeline.changeScaleOf(taskId);
   }
 
   private onEvent(event: PublishedEvent): void {
@@ -229,7 +240,9 @@ export class Orchestrator {
       startedAt: Date.now(),
       endedAt: null,
     });
-    this.planTracker.bindTask(conversationId, taskId, prompt);
+    // The checkpoint's "original request" is written into the workspace's
+    // .atelier/plans; it gets the user's words, not the page dump.
+    this.planTracker.bindTask(conversationId, taskId, visible);
     this.conversations.addMessage({
       id: newId("msg"),
       conversationId,
@@ -502,6 +515,13 @@ export class Orchestrator {
       taskId,
       conversationId,
       prompt,
+      // The pipeline's first step derives all four from the prompt; these
+      // are the safe defaults if it never gets there.
+      humanPrompt: stripHiddenContext(prompt),
+      previewText: "",
+      named: EMPTY_NAMED_TARGETS,
+      stance: "fresh",
+      changeScale: null,
       recoveryPlan:
         isResumePrompt(prompt) && previousTaskId
           ? this.planTracker.resumeContext(conversationId, previousTaskId)

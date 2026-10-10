@@ -7,7 +7,8 @@ import {
   useRef,
   useState,
 } from "react";
-import Editor, { type Monaco } from "@monaco-editor/react";
+import type { Monaco } from "@monaco-editor/react";
+import Editor from "@/components/LazyMonaco";
 import { MonacoDiff } from "@/components/MonacoDiff";
 import {
   Activity,
@@ -26,7 +27,6 @@ import { isImagePath } from "@/lib/image-file";
 import { Tooltip } from "@/components/ui/tooltip";
 import { TimelinePanel } from "@/views/timeline/TimelinePanel";
 import { ProcessConsolePanel } from "@/views/console/ProcessConsolePanel";
-import { GraphPane } from "@/views/knowledge/GraphPane";
 import { RagInspectorPane } from "@/views/knowledge/RagInspectorPane";
 import { languageForPath } from "@/lib/diff-view";
 import {
@@ -45,6 +45,9 @@ import type { RightTab } from "@/state/workspace.store";
 import type { GitDiffView } from "@/state/git.store";
 import type { TimelineEntryVm } from "@/types";
 import type { ProcessConsoleVm } from "@/hooks/useProcessConsoleViewModel";
+
+const GraphPane = lazy(() => import("@/views/knowledge/GraphPane")
+  .then((module) => ({ default: module.GraphPane })));
 
 export interface RightDockProps {
   /** Which pane is visible; the tab bar itself lives in the app header. */
@@ -143,7 +146,8 @@ const SEARCH_DECORATION_ACTIVE = {
  */
 export function RightDock(props: RightDockProps) {
   const { rightTab } = props;
-  const knowledgeVm = useKnowledgeViewModel();
+  // AppShell owns background refreshes; this pane consumes the shared data.
+  const knowledgeVm = useKnowledgeViewModel(false);
   const ragVm = useRagInspectorViewModel();
   // A conflicted file opened from the explorer takes over the editor pane
   // the same way a git diff does — and outranks it, since a merge conflict
@@ -184,7 +188,9 @@ export function RightDock(props: RightDockProps) {
         </Pane>
 
         <Pane active={rightTab === "graph"}>
-          <GraphPane vm={knowledgeVm} theme={props.appTheme} />
+          <Suspense fallback={<Empty icon={Activity} text="Loading graph…" />}>
+            <GraphPane vm={knowledgeVm} theme={props.appTheme} active={rightTab === "graph"} />
+          </Suspense>
         </Pane>
 
         <Pane active={rightTab === "rag"}>
@@ -773,7 +779,12 @@ function Pane(props: {
   children: React.ReactNode;
 }) {
   const keep = props.mountWhenHidden ?? true;
-  if (!props.active && !keep) return null;
+  const [visited, setVisited] = useState(props.active);
+  useEffect(() => {
+    if (props.active) setVisited(true);
+  }, [props.active]);
+  // Retain editor/graph state after first use, without mounting them at startup.
+  if (!props.active && (!keep || !visited)) return null;
   return (
     <div className={cn("absolute inset-0", !props.active && "hidden")}>
       {props.children}

@@ -8,6 +8,7 @@ import {
   CLI_PROVIDERS,
   cliSessionTitle,
   closeCliSession,
+  loadMoreCliHistory,
   refreshCliHistory,
   renameCliSession,
   resumableCliHistory,
@@ -45,6 +46,7 @@ export function CliSessionListPanel(props: {
   const selectedId = useCliConsoleStore((s) => s.selectedId);
   const titles = useCliConsoleStore((s) => s.titles);
   const history = useCliConsoleStore((s) => s.history);
+  const historyHasMore = useCliConsoleStore((s) => s.historyHasMore);
   const resumed = useCliConsoleStore((s) => s.resumed);
   const processing = useCliConsoleStore((s) => s.processing);
   const bootstrapped = useCliConsoleStore((s) => s.bootstrapped);
@@ -55,6 +57,8 @@ export function CliSessionListPanel(props: {
   /** The row being resumed, if any — resuming spawns a pty and takes time. */
   const [resuming, setResuming] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [providerFilter, setProviderFilter] = useState<string>("all");
 
   // The CLIs write their transcripts as they run, and one can be started
@@ -136,7 +140,8 @@ export function CliSessionListPanel(props: {
             </p>
           </div>
         ) : (
-          CLI_PROVIDERS.filter(
+          <>
+          {CLI_PROVIDERS.filter(
             (provider) =>
               providerFilter === "all" || provider.id === providerFilter
           ).map((provider) => (
@@ -159,7 +164,27 @@ export function CliSessionListPanel(props: {
               resuming={resuming}
               onResume={resume}
             />
-          ))
+          ))}
+          {historyError && <p role="alert" className="px-2 py-2 text-xs text-destructive">{historyError}</p>}
+          {historyHasMore && (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={loadingMoreHistory}
+              onClick={() => {
+                setHistoryError(null);
+                setLoadingMoreHistory(true);
+                void loadMoreCliHistory()
+                  .catch((error) => setHistoryError(error instanceof Error ? error.message : String(error)))
+                  .finally(() => setLoadingMoreHistory(false));
+              }}
+              className="w-full text-xs text-muted-foreground"
+            >
+              {loadingMoreHistory && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {loadingMoreHistory ? "Loading more…" : "Load more sessions"}
+            </Button>
+          )}
+          </>
         )}
       </div>
     </div>

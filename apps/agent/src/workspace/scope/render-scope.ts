@@ -1,13 +1,14 @@
 import type { SessionScope } from "./session-scope.js";
 
 /**
- * The lock, stated as a hard boundary rather than a hint.
+ * The working set, stated as the subject of the turn.
  *
- * This block is deliberately absolute. The soft version ("prefer these
- * folders") is what the layout block already tried, and a strong layout
- * prior beat it every time — the agent read badge.tsx out of two projects
- * the user never named. A rule the model can satisfy by reading "just one
- * more file elsewhere" is not a lock.
+ * This block once opened with "SESSION SCOPE — LOCKED TO <roots>" and a
+ * guard behind it. Project locking was removed on 2026-08-29 (see
+ * SessionScopeStore): the lock kept binding conversations to the wrong
+ * project and the model reported the lock as its blocker. What is left is
+ * the part that was always right — which files the user named and which
+ * this conversation is already working on.
  *
  * `working` is this turn's live working set (see workingSet()), NOT the raw
  * anchor list. The two differ on exactly the turns that matter: a session
@@ -16,37 +17,9 @@ import type { SessionScope } from "./session-scope.js";
  * than buried among them.
  */
 export function renderScope(scope: SessionScope, working: string[]): string {
-  if (scope.roots.length === 0 && working.length === 0) return "";
+  if (working.length === 0) return "";
 
   const lines: string[] = [];
-
-  if (scope.roots.length > 0) {
-    const list = scope.roots.map((root) => `${root}/`).join(", ");
-    lines.push(
-      `SESSION SCOPE — LOCKED TO ${list}`,
-      "Every path you read, search, edit, or run git against should start " +
-        `with ${scope.roots.length === 1 ? "this prefix" : "one of these prefixes"}. ` +
-        "A same-named file in another project is that project's copy, " +
-        "never the one to read or edit — the guard refuses it. An existing " +
-        "file outside the lock with NO same-named twin inside it is let " +
-        "through when the work needs it (this is reported); creating files " +
-        "outside the lock is refused.",
-      "If the guard refuses a path the work genuinely needs, do not retry " +
-        "it — finish everything else and name it as a blocker in the report."
-    );
-    if (scope.source === "inherited") {
-      lines.push(
-        "This lock came from an earlier turn and still applies — the user " +
-          "does not have to repeat it on every message."
-      );
-    } else if (scope.source === "feature") {
-      lines.push(
-        "This lock came from the active feature matched in this session. " +
-          "Keep follow-up work on that feature unless the user explicitly " +
-          "names another feature or path."
-      );
-    }
-  }
 
   // Named this turn: the subject, stated as such. Anything else in the
   // working set is a lead, and saying so is the point — the old block made

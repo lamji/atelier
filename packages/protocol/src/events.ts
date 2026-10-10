@@ -15,6 +15,7 @@ import { ContextRequestStats } from "./models/context.js";
 import { LlmRequest } from "./models/llm-request.js";
 import { ValidationKind, ValidationResult } from "./models/validation.js";
 import { ProjectInfo } from "./methods/projects.js";
+import { PreviewTestStep } from "./methods/preview.js";
 
 /**
  * The stages a task can report.
@@ -112,6 +113,18 @@ export const eventPayloads = {
     targets: z.array(z.string()).default([]),
     constraints: z.array(z.string()).default([]),
   }),
+  /**
+   * How a turn relates to the one before it, and what the user named in
+   * it. `correct` means the carried findings are hints, not the answer.
+   */
+  "turn.stance": z.object({
+    stance: z.enum(["continue", "correct", "fresh"]),
+    reasons: z.array(z.string()).default([]),
+    namedPaths: z.array(z.string()).default([]),
+    namedLiterals: z.array(z.string()).default([]),
+    previousTaskId: z.string().nullable().default(null),
+    previousStatus: z.string().nullable().default(null),
+  }),
   "knowledge.retrieved": RetrievalResult,
   /**
    * The conversation's working-set lock for this turn. Published whenever a
@@ -156,6 +169,8 @@ export const eventPayloads = {
     summaries: z.number(),
     /** Prior user/assistant turns replayed verbatim in the memory block. */
     turns: z.number(),
+    /** Earlier tasks whose edits/commands/reads are listed in the block. */
+    actions: z.number().default(0),
     /** Approximate token cost of everything above. */
     tokens: z.number(),
     /** Short labels for the recalled work, newest first. */
@@ -180,6 +195,10 @@ export const eventPayloads = {
     paths: z.array(z.string()).default([]),
     /** Owner files pulled in from a matched feature-wiki page. */
     seeded: z.number().default(0),
+    /** Reads of tasks the user stopped: listed, never inlined. */
+    demoted: z.number().default(0),
+    /** Files earlier searches located for this turn's literals, inlined. */
+    located: z.number().default(0),
   }),
   /**
    * Feature-wiki pages carried into this turn's context: compiled
@@ -194,6 +213,14 @@ export const eventPayloads = {
         status: z.string(),
         /** Sources changed since verification; empty when fresh. */
         moved: z.array(z.string()).default([]),
+        /** Why the page matched: prompt words, named files, touched files. */
+        matchedBy: z
+          .object({
+            terms: z.array(z.string()).default([]),
+            named: z.array(z.string()).default([]),
+            files: z.array(z.string()).default([]),
+          })
+          .optional(),
       })
     ),
     tokens: z.number(),
@@ -250,6 +277,12 @@ export const eventPayloads = {
     stepId: z.string(),
     status: PlanStepStatus,
     note: z.string().optional(),
+    /**
+     * Observed proof the step holds (a clean test/typecheck run, a
+     * validation pass). Absent on a done step means the checkmark is the
+     * model's own word, and the UI draws it hollow for that reason.
+     */
+    verification: z.string().optional(),
   }),
 
   // hooks
@@ -319,6 +352,42 @@ export const eventPayloads = {
   }),
   /** The agent tried to commit/push/open a PR — the user must confirm. */
   "git.flow.requested": GitFlowRequest,
+
+  // preview bridge
+  /**
+   * The agent wants the in-app Page preview's own console. The renderer
+   * answers over `preview.capture.resolve`; nothing about this waits on
+   * the user, so it is a request, not an approval.
+   */
+  "preview.capture.requested": z.object({
+    id: z.string(),
+    /** Route the agent asked about, or null for whatever is displayed. */
+    url: z.string().nullable(),
+    expiresAt: z.number(),
+  }),
+  "preview.capture.resolved": z.object({
+    id: z.string(),
+    ok: z.boolean(),
+    reason: z.string().optional(),
+  }),
+  /**
+   * The agent asked the renderer to run an authored test case against the
+   * live in-app preview iframe. The renderer drives it through the desktop
+   * bridge and answers over `preview.test.resolve`.
+   */
+  "preview.test.requested": z.object({
+    id: z.string(),
+    title: z.string(),
+    url: z.string().nullable(),
+    steps: z.array(PreviewTestStep),
+    expiresAt: z.number(),
+  }),
+  "preview.test.resolved": z.object({
+    id: z.string(),
+    ok: z.boolean(),
+    status: z.string(),
+    reason: z.string().optional(),
+  }),
 
   // validation
   "validation.started": z.object({ kind: ValidationKind }),

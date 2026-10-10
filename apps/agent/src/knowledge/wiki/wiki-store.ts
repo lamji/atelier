@@ -15,6 +15,25 @@ export const WIKI_DIR = ".atelier/wiki";
 export const WIKI_FEATURES_DIR = `${WIKI_DIR}/features`;
 export const WIKI_SCHEMA_FILE = `${WIKI_DIR}/SCHEMA.md`;
 
+/** Source hits a page needs when nothing but touched files points at it. */
+const MIN_FILE_ONLY_HITS = 3;
+
+/** What pulled a page in, so the pipeline can log the reason beside it. */
+export interface WikiMatchedBy {
+  /** Prompt terms / multi-word aliases found in the page's names. */
+  terms: string[];
+  /** Page sources the user named or the intent targets. */
+  named: string[];
+  /** Page sources the turn merely touched (anchors, retrieval hits). */
+  files: string[];
+}
+
+export interface WikiMatch {
+  page: WikiPage;
+  score: number;
+  matchedBy: WikiMatchedBy;
+}
+
 /**
  * The feature wiki on disk: one markdown page per feature under
  * `.atelier/wiki/features/`, plus the schema page that says how pages are
@@ -117,31 +136,53 @@ export class WikiStore {
     /** Files the user named or the intent targets: strong on their own. */
     namedFiles?: string[];
     limit?: number;
-  }): Array<{ page: WikiPage; score: number }> {
+  }): WikiMatch[] {
     const files = new Set(input.files.map((f) => toPosix(f)));
     const named = new Set((input.namedFiles ?? []).map((f) => toPosix(f)));
     const terms = input.terms.map((t) => t.toLowerCase()).filter(Boolean);
-    const scored: Array<{ page: WikiPage; score: number }> = [];
+    const scored: WikiMatch[] = [];
     for (const page of this.list()) {
       let score = 0;
+      const matchedBy: WikiMatchedBy = { terms: [], named: [], files: [] };
       const names = [page.title, page.slug, ...page.aliases]
         .join(" ")
         .toLowerCase();
       for (const term of terms) {
-        if (names.includes(term)) score += 3;
+        if (names.includes(term)) {
+          score += 3;
+          matchedBy.terms.push(term);
+        }
       }
       // A multi-word alias/title fully present in the prompt is a stronger
       // signal than the sum of its words.
       const prompt = terms.join(" ");
       for (const alias of [page.title, ...page.aliases]) {
         const lower = alias.toLowerCase();
-        if (lower.split(/\s+/).length > 1 && prompt.includes(lower)) score += 4;
+        if (lower.split(/\s+/).length > 1 && prompt.includes(lower)) {
+          score += 4;
+          matchedBy.terms.push(lower);
+        }
       }
       for (const source of page.sources) {
-        if (named.has(source.path)) score += 3;
-        else if (files.has(source.path)) score += 2;
+        if (named.has(source.path)) {
+          score += 3;
+          matchedBy.named.push(source.path);
+        } else if (files.has(source.path)) {
+          score += 2;
+          matchedBy.files.push(source.path);
+        }
       }
-      if (score >= 3) scored.push({ page, score });
+      // Two incidental file hits used to be enough on their own, and the
+      // anchors of a stopped attempt are exactly two incidental hits: the
+      // wrong file it read and the wrong file it edited. A page reached by
+      // files alone now needs three of its sources on the table; a name hit
+      // or a user-named file still qualifies at the old bar.
+      const byFilesOnly =
+        matchedBy.terms.length === 0 && matchedBy.named.length === 0;
+      const qualifies = byFilesOnly
+        ? matchedBy.files.length >= MIN_FILE_ONLY_HITS
+        : score >= 3;
+      if (qualifies) scored.push({ page, score, matchedBy });
     }
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, input.limit ?? 2);

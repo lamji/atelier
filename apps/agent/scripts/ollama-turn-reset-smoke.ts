@@ -1,5 +1,5 @@
 /**
- * Proves that Ollama's tool budget is per prompt and that its completion
+ * Proves that Ollama can continue beyond the old tool budget and its completion
  * boundary refuses a premature report until the live work is finished.
  */
 import { EventBus } from "../src/events/event-bus.js";
@@ -51,7 +51,7 @@ globalThis.fetch = async (_input, init) => {
     }
     return stream({ role: "assistant", content: "finished:completion-gate" });
   }
-  if ((body.tools?.length ?? 0) === 0) {
+  if (round > 45) {
     return stream({ role: "assistant", content: `finished:${prompt}` });
   }
   return stream({
@@ -115,10 +115,10 @@ async function main(): Promise<void> {
       resetOk =
         first === "finished:first" &&
         followUp === "finished:follow-up" &&
-        chatRounds.get("first") === 31 &&
-        chatRounds.get("follow-up") === 31;
+        chatRounds.get("first") === 46 &&
+        chatRounds.get("follow-up") === 46;
       console.log(
-        `${resetOk ? "ok" : "FAIL"} Ollama follow-up starts with a fresh 30-round tool budget`
+        `${resetOk ? "ok" : "FAIL"} Ollama first and follow-up turns both finish after 45 tool rounds`
       );
     }
 

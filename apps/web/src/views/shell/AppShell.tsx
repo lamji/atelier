@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { newId } from "@atelier/shared";
-import type { ModelOption } from "@atelier/protocol";
+import type { CliHistoryEntry, ModelOption } from "@atelier/protocol";
 import { AnimatePresence } from "framer-motion";
-import { Bot, Plus, Trash2, X } from "lucide-react";
+import { Bot, Loader2, Plus, Search, Trash2, X } from "lucide-react";
 import {
   Panel,
   PanelGroup,
@@ -16,13 +16,16 @@ import { EditorTabBar } from "./EditorTabBar";
 import { RailStatus } from "./RailStatus";
 import { UserProfile } from "./UserProfile";
 import { ChangelogModal } from "./ChangelogModal";
+import { ForceUpdateScreen } from "./ForceUpdateScreen";
 import { useUpdatesViewModel } from "@/hooks/useUpdatesViewModel";
 import { useWebTargetViewModel } from "@/hooks/useWebTargetViewModel";
 import { BrandMark } from "@/components/BrandMark";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Select } from "@/components/ui/select";
 import { Dock } from "./dock/Dock";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { CliConsolePane } from "@/views/cli/CliConsolePane";
+import { CliRecoveryPane } from "@/views/cli/CliRecoveryPane";
 import { CliProviderModal } from "@/views/cli/CliProviderModal";
 import { CliSessionListPanel } from "@/views/cli/CliSessionListPanel";
 import { FileTreePanel } from "@/views/explorer/FileTreePanel";
@@ -32,6 +35,7 @@ import { GitFlowHost } from "@/views/git/GitFlowHost";
 import { MergeConflictHost } from "@/views/git/MergeConflictHost";
 import { GitSyncModal } from "@/views/git/GitSyncModal";
 import { AlertHost } from "./AlertHost";
+import { ConfirmHost } from "@/components/ConfirmHost";
 import {
   RenameField,
   SessionListPanel,
@@ -67,9 +71,15 @@ import { useContextStatsViewModel } from "@/hooks/useContextStatsViewModel";
 import { useCommandRegistry } from "@/hooks/useCommandRegistry";
 import { bridge } from "@/services/bridge-client";
 import { setActivePreviewUrl } from "@/services/preview-context";
+import { publishPreviewSession } from "@/services/preview-session";
 import {
+  cliProvider,
+  closeCliSession,
   createCliSession,
   ensureCliSessions,
+  renameCliSession,
+  resumeCliSession,
+  reviveCliChat,
   useCliConsoleStore,
 } from "@/services/cli-console";
 import { useGitStore } from "@/state/git.store";
@@ -145,9 +155,8 @@ export function AppShell() {
   const usage = useUsageViewModel();
   const contextStats = useContextStatsViewModel();
   const cliMode = usePreferencesStore((s) => s.cliMode);
-  const setCliMode = usePreferencesStore((s) => s.setCliMode);
   const cliSessions = useCliConsoleStore((s) => s.sessions);
-  const selectedCliId = useCliConsoleStore((s) => s.selectedId);
+  const cliChats = useCliConsoleStore((s) => s.chats);
   const providerRevision = useProvidersStore((s) => s.revision);
   const setComposer = usePreferencesStore((s) => s.setComposer);
   const skillDetail = useWorkspaceStore((s) => s.skillDetail);
@@ -174,6 +183,12 @@ export function AppShell() {
     query: "",
   });
   const [agentSurface, setAgentSurface] = useState<AgentSurface>("agent");
+  const [cliHistoryOpen, setCliHistoryOpen] = useState(false);
+  const [historyTermId, setHistoryTermId] = useState<string | null>(null);
+  const [selectedCliHistoryId, setSelectedCliHistoryId] = useState<string | null>(null);
+  const historyTermIds = useRef(new Set<string>());
+  const leavingCliHistory = useRef<Promise<void> | null>(null);
+  const switchingCliProvider = useRef(false);
   const [pagePreviewTermId, setPagePreviewTermId] = useState<string | null>(null);
   const [pagePreviewUrl, setPagePreviewUrl] = useState<string | null>(null);
   const [previewSessionMenu, setPreviewSessionMenu] = useState<{
@@ -219,6 +234,10 @@ export function AppShell() {
 
   useEffect(() => {
     setAgentSurface("agent");
+    setCliHistoryOpen(false);
+    setHistoryTermId(null);
+    setSelectedCliHistoryId(null);
+    historyTermIds.current.clear();
     setPagePreviewTermId(null);
     setPagePreviewUrl(null);
     setFrontendReviewOffer(null);
@@ -297,7 +316,6 @@ export function AppShell() {
         new CustomEvent("atelier:screenshot-captured", { detail: image })
       );
       editor.setRightTab("chat");
-      setAgentSurface("agent");
       setActiveView("agents");
     },
     [editor.setRightTab, sessions.createSession, sessions.selectedId, setActiveView]
@@ -335,34 +353,47 @@ export function AppShell() {
         choice === "default" || choice.startsWith("atelier/")
           ? undefined
           : choice;
+      // Lift the signed-in preview session across to the agent before the
+      // task starts, so preview_review opens on the same authenticated app
+      // the user is looking at. It rides its own RPC, never the prompt.
+      const sessionShared = await publishPreviewSession(url);
       const visiblePrompt = `Review the completed frontend in Page preview · ${url}`;
       const prompt = [
         frontendReviewTimelineMarker({
           ...(image.path ? { screenshotPath: image.path } : {}),
           displayRequest: visiblePrompt,
         }),
-        "FRONTEND REVIEW ONLY. Do not modify files, run fixes, or start another server.",
+        "FRONTEND REVIEW ONLY. Do not modify workspace files, run fixes, or start " +
+          "another server. Driving the preview UI (navigate, click, fill, assert) is " +
+          "expected; do not trigger irreversible or destructive actions (delete, pay, " +
+          "send, sign out) unless that action IS the change under review.",
         `Review the completed frontend task at ${url}.`,
-        "Use the attached live preview screenshot as visual evidence. Then call " +
-          "preview_review with this exact URL for the headless Playwright desktop " +
-          "and mobile audit. Correlate its console, network, accessibility, layout, " +
-          "and screenshot evidence with the requested change.",
-        "Obey preview_review's decision. If unavailable, ask the user to start or " +
-          "reopen Page preview and stop without retrying or starting a server. If " +
-          "failed, report the tool error and skip. If issues are present, report " +
-          "the exact console/network/page evidence and skip because this review is read-only.",
-        "The verdict is about the original requested UI outcome, not whether the " +
-          "preview merely loaded or had clean console diagnostics. preview_review status " +
-          "ready/continue means evidence collection succeeded; it is never proof that the " +
-          "requested change passed.",
-        "PASS only when the attached screenshot and the settled Playwright evidence " +
-          "actually show the requested outcome on the target route and viewport. A modal " +
-          "or overlay obscuring the target, screenshot/DOM disagreement, the wrong route " +
-          "or state, an expected layout/content mismatch, or missing visual evidence is a " +
-          "blocking review failure. Never say no blocking issue in those cases.",
-        "Report findings in severity order with concrete routes and elements. End with " +
-          "exactly FRONTEND REVIEW: PASS or FRONTEND REVIEW: FAIL; use FAIL whenever the " +
-          "requested outcome was not verified.",
+        "WRITE THE TEST CASE FIRST, THEN RUN IT. Derive a concrete test case from the " +
+          "requested change: the route to open, the interactions that reach the state " +
+          "under review, and assert steps that check the requested outcome in the DOM. " +
+          "Then call preview_test with { title, url, steps } — it runs your test against " +
+          "the LIVE in-app Page preview through the bridge (the same authenticated app " +
+          "in the screenshot), no external browser. Use the attached screenshot only as " +
+          "visual context for authoring the steps.",
+        "Step kinds: navigate {target}, click {selector|text}, fill {selector,value}, " +
+          "press {key}, waitFor {selector|text}, assert {description, selector?, text?, " +
+          "notText?, visible?, absent?}, screenshot {label}. Prefer visible text and " +
+          "stable roles/labels over brittle nth-child selectors. Include at least one " +
+          "assert that proves the requested outcome; add a waitFor before asserting on " +
+          "anything async.",
+        "The verdict is preview_test's assertion results, not whether the page merely " +
+          "loaded. preview_test status passed means every assertion held; failed means " +
+          "the requested outcome was not verified — report the exact failing step. If " +
+          "preview_test returns unavailable, say Page preview must be open on the route " +
+          "and stop without starting a server or guessing from the screenshot alone.",
+        sessionShared
+          ? "The signed-in Page preview session is live, so the test drives the " +
+            "authenticated app the user sees."
+          : "If the preview is signed out and lands on a login route, say so and treat " +
+            "the result as unverified rather than a defect in the change.",
+        "Report findings in severity order with the concrete failing step, route, and " +
+          "element. End with exactly FRONTEND REVIEW: PASS or FRONTEND REVIEW: FAIL; use " +
+          "FAIL whenever an assertion failed or the requested outcome was not verified.",
         `Original request: ${review.request}`,
         `Changed frontend files: ${review.changedFiles.join(", ")}`,
       ].join("\n\n");
@@ -606,6 +637,63 @@ export function AppShell() {
     !knowledge.welcomeDismissed &&
     knowledge.stats?.lastIndexedAt == null;
 
+  // Keep every CLI row visible and group Claude and Codex above agent chats.
+  const visibleAgentSessions = (() => {
+    const priority = (session: (typeof sessions.sessionList)[number]) => {
+      const providerId = cliChats[session.conversation.id]?.providerId;
+      return providerId === "claude" ? 0 : providerId === "codex" ? 1 : 2;
+    };
+    return [...sessions.sessionList].sort((a, b) => priority(a) - priority(b));
+  })();
+
+  // History owns the main pane while it is open. Agents keeps its selected
+  // conversation and CLI bindings, so returning can restore that view.
+  const openCliHistory = async (entry: CliHistoryEntry) => {
+    switchingCliProvider.current = true;
+    try {
+      await ensureCliSessions();
+      const liveBefore = new Set(useCliConsoleStore.getState().sessions.map((session) => session.termId));
+      setHistoryTermId(null);
+      setSelectedCliHistoryId(null);
+      const termId = await resumeCliSession(entry);
+      if (!liveBefore.has(termId)) historyTermIds.current.add(termId);
+      setHistoryTermId(termId);
+      setSelectedCliHistoryId(`${entry.providerId}:${entry.id}`);
+      editor.setRightTab("chat");
+      setAgentSurface("agent");
+      setActiveView("agents");
+    } finally {
+      switchingCliProvider.current = false;
+    }
+  };
+
+  // History-created terminals live only in history; Agents terminals stay running.
+  const closeCliHistory = (): Promise<void> => {
+    if (leavingCliHistory.current) return leavingCliHistory.current;
+    const leaving = (async () => {
+      switchingCliProvider.current = true;
+      try {
+        for (const termId of historyTermIds.current) {
+          if (useCliConsoleStore.getState().sessions.some((session) => session.termId === termId)) {
+            await closeCliSession(termId);
+          }
+        }
+        historyTermIds.current.clear();
+        setHistoryTermId(null);
+        setSelectedCliHistoryId(null);
+        setCliHistoryOpen(false);
+      } finally {
+        switchingCliProvider.current = false;
+      }
+    })().finally(() => { leavingCliHistory.current = null; });
+    leavingCliHistory.current = leaving;
+    return leaving;
+  };
+
+  useEffect(() => {
+    if (cliMode && cliHistoryOpen) void closeCliHistory().catch(() => undefined);
+  }, [cliMode, cliHistoryOpen]);
+
   const leftPanel =
     activeView === "agents" ? (
       // CLI mode owns the whole conversation surface, so the chat sessions
@@ -618,12 +706,28 @@ export function AppShell() {
         />
       ) : (
         <SessionListPanel
-          sessions={sessions.sessionList}
+          sessions={visibleAgentSessions}
           selectedId={sessions.selectedId}
+          showCliHistory={cliHistoryOpen}
+          selectedCliHistoryId={selectedCliHistoryId}
+          onShowCliHistory={(show) => {
+            if (show) {
+              setCliHistoryOpen(true);
+              setHistoryTermId(null);
+              setSelectedCliHistoryId(null);
+            } else {
+              return closeCliHistory();
+            }
+          }}
           onSelect={sessions.selectSession}
-          onCreate={() => void sessions.createSession()}
-          onRename={sessions.renameSession}
-          onDelete={(id) => void sessions.deleteSession(id)}
+          onCreate={() => useCliConsoleStore.getState().openProviderPicker()}
+          onRename={(conversationId, title) => {
+            const binding = useCliConsoleStore.getState().chats[conversationId];
+            if (binding) renameCliSession(binding.termId, title);
+            sessions.renameSession(conversationId, title);
+          }}
+          onDelete={(id) => void deleteAgentSession(id)}
+          onResumeCliHistory={openCliHistory}
         />
       )
     ) : activeView === "explorer" ? (
@@ -654,11 +758,121 @@ export function AppShell() {
   // every reconnect.
   // CLI mode swaps the WHOLE chat surface — transcript and composer — for
   // the selected provider CLI. Everything around it (sessions list, editor,
-  // terminals, git) stays exactly as it is.
+  // terminals, git) stays exactly as it is. Outside the mode the same swap
+  // happens for one row at a time: an Agents chat that a dock provider
+  // tile created stands in for a CLI pty (cli-console `chats`), and while
+  // that row is selected — and its pty still runs — the box is that
+  // terminal. Any other row is a chat as usual.
+  const boundTermId =
+    sessions.selectedId !== null
+      ? (cliChats[sessions.selectedId]?.termId ?? null)
+      : null;
+  const boundProviderId = boundTermId !== null && sessions.selectedId !== null
+    ? cliChats[sessions.selectedId]?.providerId ?? "codex"
+    : null;
+  const selectedConversationCreatedAt = sessions.sessionList.find(
+    (session) => session.conversation.id === sessions.selectedId
+  )?.conversation.createdAt;
+  const boundCliLive =
+    boundTermId !== null &&
+    cliSessions.some((session) => session.termId === boundTermId);
+  // The binding sticks across a reload: the pty is still running and the
+  // pairing is in localStorage, but the live list is empty until the
+  // sessions are re-listed, and the pane is what re-lists them. So a bound
+  // row counts as CLI while bootstrap lists live ptys. If its pty died, the
+  // row stays on a CLI surface while the provider context is restored.
+  const cliBootstrapped = useCliConsoleStore((s) => s.bootstrapped);
+  // A bound row whose pty is gone (the agent restarted, the CLI was quit)
+  // is reopened on the provider's own session once, so the user lands
+  // back in that session's transcript rather than on an empty chat. If an
+  // exact match cannot be found, the row offers provider history to choose.
+  const [revivingId, setRevivingId] = useState<string | null>(null);
+  const revived = useRef(new Set<string>());
+  useEffect(() => {
+    if (switchingCliProvider.current || cliHistoryOpen || cliMode || !cliBootstrapped || boundCliLive) return;
+    if (boundTermId === null || sessions.selectedId === null) return;
+    const conversationId = sessions.selectedId;
+    if (revived.current.has(boundTermId)) return;
+    revived.current.add(boundTermId);
+    setRevivingId(conversationId);
+    void reviveCliChat(conversationId, selectedConversationCreatedAt)
+      .catch(() => null)
+      .finally(() =>
+        setRevivingId((id) => (id === conversationId ? null : id))
+      );
+  }, [boundCliLive, boundTermId, cliBootstrapped, cliHistoryOpen, cliMode, selectedConversationCreatedAt, sessions.selectedId]);
+  const boundCliPending =
+    boundTermId !== null &&
+    (!cliBootstrapped || revivingId === sessions.selectedId);
+  const historyCliLive = historyTermId !== null &&
+    cliSessions.some((session) => session.termId === historyTermId);
+  const showCliConsole = cliMode || (cliHistoryOpen ? historyCliLive : boundTermId !== null);
+  const boundCliNeedsRecovery = boundTermId !== null && cliBootstrapped &&
+    revived.current.has(boundTermId) && !boundCliLive && !boundCliPending;
+  useEffect(() => {
+    if (cliHistoryOpen || cliMode || !boundCliLive || boundTermId === null) return;
+    useCliConsoleStore.getState().select(boundTermId);
+  }, [boundCliLive, boundTermId, cliHistoryOpen, cliMode]);
+
+  // A CLI row's pty goes with the row: deleting the chat kills the CLI.
+  const deleteAgentSession = useCallback(
+    async (conversationId: string) => {
+      const binding = useCliConsoleStore.getState().chats[conversationId];
+      if (binding) {
+        useCliConsoleStore.getState().unbindChat(conversationId);
+        await closeCliSession(binding.termId).catch(() => undefined);
+      }
+      await sessions.deleteSession(conversationId);
+    },
+    [sessions]
+  );
+  const resumeBoundCli = useCallback(async (entry: CliHistoryEntry) => {
+    const conversationId = sessions.selectedId;
+    if (!conversationId) return;
+    const termId = await resumeCliSession(entry);
+    useCliConsoleStore.getState().bindChat(conversationId, termId, entry.providerId);
+  }, [sessions.selectedId]);
+  const startBoundCli = useCallback(async () => {
+    const conversationId = sessions.selectedId;
+    if (!conversationId || !boundProviderId) return;
+    const termId = await createCliSession(boundProviderId);
+    useCliConsoleStore.getState().bindChat(conversationId, termId, boundProviderId);
+  }, [boundProviderId, sessions.selectedId]);
+  const recoveryPane = boundProviderId && sessions.selectedId ? (
+    <CliRecoveryPane
+      conversationId={sessions.selectedId}
+      providerId={boundProviderId}
+      onResume={resumeBoundCli}
+      onStartNew={startBoundCli}
+    />
+  ) : null;
+  const restoringCliPane = (
+    <div className="flex h-full items-center justify-center gap-2 bg-panel text-sm text-muted-foreground dark:bg-editor">
+      <Loader2 className="h-4 w-4 animate-spin" /> Restoring CLI session…
+    </div>
+  );
   const chatPane = useMemo(
     () =>
-      cliMode ? <CliConsolePane /> : <ChatPanel shellError={sessions.error} />,
-    [cliMode, sessions.error]
+      cliMode ? (
+        <CliConsolePane />
+      ) : cliHistoryOpen ? (
+        historyCliLive ? (
+          <CliConsolePane sessionId={historyTermId} />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            Select a saved Claude or Codex session.
+          </div>
+        )
+      ) : boundCliPending && cliBootstrapped ? (
+        restoringCliPane
+      ) : boundCliNeedsRecovery && recoveryPane ? (
+        recoveryPane
+      ) : showCliConsole ? (
+        <CliConsolePane />
+      ) : (
+        <ChatPanel shellError={sessions.error} />
+      ),
+    [cliHistoryOpen, cliMode, historyCliLive, historyTermId, boundCliPending, cliBootstrapped, boundCliNeedsRecovery, recoveryPane, restoringCliPane, showCliConsole, sessions.error]
   );
 
   const previewSessionOptions = useMemo(
@@ -796,8 +1010,26 @@ export function AppShell() {
             />
           )}
         </div>
+        {/* The picked session decides the box here too: a CLI row is
+            its terminal, any other row the chat. */}
         <div className="min-h-0 flex-1">
-          <ChatPanel compact shellError={sessions.error} />
+          {cliHistoryOpen ? (
+            historyCliLive ? (
+              <CliConsolePane compact sessionId={historyTermId} />
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                Select a saved Claude or Codex session.
+              </div>
+            )
+          ) : boundCliPending && cliBootstrapped ? (
+            restoringCliPane
+          ) : boundCliNeedsRecovery && recoveryPane ? (
+            recoveryPane
+          ) : showCliConsole ? (
+            <CliConsolePane compact />
+          ) : (
+            <ChatPanel compact shellError={sessions.error} />
+          )}
         </div>
       </div>
     ) : (
@@ -842,7 +1074,7 @@ export function AppShell() {
   const commands = useCommandRegistry(commandSources);
 
   // App-level, not workspace-level: a release is news about Atelier itself,
-  // so it survives project switches and lives in the header, not the rail.
+  // so it survives project switches and takes over the whole window.
   const updates = useUpdatesViewModel();
   // Whether this workspace has a web app at all. Decides if Page preview is
   // offered — an API or a native-only project has no page to preview.
@@ -859,6 +1091,7 @@ export function AppShell() {
           : "Page preview"
       }
       onSelectAgent={() => {
+        if (cliHistoryOpen) void closeCliHistory().catch(() => undefined);
         setAgentSurface("agent");
         setActiveView("agents");
       }}
@@ -867,53 +1100,39 @@ export function AppShell() {
         setActiveView("agents");
       }}
       onStopPagePreview={stopPagePreview}
-      onOpenPalette={(query) => setPalette({ open: true, query })}
-      updateAvailable={updates.available}
-      onInstallUpdate={updates.install}
-      updateStage={updates.stage}
-      updatePercent={updates.percent}
-      updateError={updates.error}
     />
   );
 
-  // Provider CLI tiles own the conversation surface: entering one enables
-  // CLI mode, swaps the transcript for that provider's real terminal, and
-  // swaps the left rail from Atelier chats to CLI sessions. Reuse a live
-  // session before creating one so switching providers preserves scrollback.
-  const selectedCliProvider = cliSessions.find(
-    (session) => session.termId === selectedCliId
-  )?.providerId;
-  const claudeActive = cliMode && selectedCliProvider === "claude";
-  const codexActive = cliMode && selectedCliProvider === "codex";
+  // Each choice creates a new row and terminal; history stays separate.
   const selectCliProvider = useCallback(
-    (providerId: "claude" | "codex") => {
-      setCliMode(true);
+    async (providerId: string, title: string) => {
+      if (cliHistoryOpen) await closeCliHistory();
       editor.setRightTab("chat");
       setAgentSurface("agent");
       setActiveView("agents");
-      void ensureCliSessions()
-        .then(() => {
-          const cli = useCliConsoleStore.getState();
-          const existing = cli.sessions.find(
-            (session) => session.providerId === providerId
-          );
-          if (existing) {
-            cli.select(existing.termId);
-            return;
-          }
-          return createCliSession(providerId);
-        })
-        .catch(() => useCliConsoleStore.getState().openProviderPicker());
+      await ensureCliSessions();
+      if (cliMode) {
+        const termId = await createCliSession(providerId);
+        if (title) renameCliSession(termId, title);
+        return;
+      }
+      const termId = await createCliSession(providerId);
+      const conversationId = await sessions.createSession();
+      if (!conversationId) {
+        await closeCliSession(termId);
+        throw new Error("Could not create an Agents session.");
+      }
+      const baseTitle = `${cliProvider(providerId).label} CLI`;
+      const taken = new Set(sessions.sessionList.map((session) => session.conversation.title));
+      let ordinal = 1;
+      while (taken.has(`${baseTitle} ${ordinal}`)) ordinal += 1;
+      const sessionTitle = title || `${baseTitle} ${ordinal}`;
+      sessions.renameSession(conversationId, sessionTitle);
+      if (title) renameCliSession(termId, title);
+      useCliConsoleStore.getState().bindChat(conversationId, termId, providerId);
+      sessions.selectSession(conversationId);
     },
-    [editor.setRightTab, setActiveView, setCliMode]
-  );
-  const selectClaude = useCallback(
-    () => selectCliProvider("claude"),
-    [selectCliProvider]
-  );
-  const selectCodex = useCallback(
-    () => selectCliProvider("codex"),
-    [selectCliProvider]
+    [cliHistoryOpen, cliMode, editor.setRightTab, sessions, setActiveView]
   );
 
   // Every icon control in the app, in one bar at the bottom of the canvas.
@@ -938,10 +1157,6 @@ export function AppShell() {
       onToggleSettings={settingsOpen ? closeSettings : openSettings}
       onToggleTheme={toggle}
       onSelectTab={selectHeaderTab}
-      claudeActive={claudeActive}
-      codexActive={codexActive}
-      onSelectClaude={selectClaude}
-      onSelectCodex={selectCodex}
     />
   );
 
@@ -967,6 +1182,20 @@ export function AppShell() {
       <div className="flex min-h-0 flex-1">
         <aside className="dock-rail" aria-label="Dock">
           {dock}
+          {/* Search lives in the rail, next to the other always-available
+              controls, rather than as a second target in the header. */}
+          <div className="flex shrink-0 items-center justify-center pb-1">
+            <Tooltip side="right" content="Search files and commands">
+              <button
+                type="button"
+                aria-label="Search files and commands"
+                onClick={() => setPalette({ open: true, query: "" })}
+                className="dock-tile"
+              >
+                <Search className="h-[18px] w-[18px] shrink-0" />
+              </button>
+            </Tooltip>
+          </div>
           <RailStatus
             connection={connection.state}
             agentStatusDetail={connection.agentStatusDetail}
@@ -1182,7 +1411,7 @@ export function AppShell() {
         onOpenFile={(path) => void explorer.openFile(path)}
         onClose={() => setPalette((p) => ({ ...p, open: false }))}
       />
-      <CliProviderModal />
+      <CliProviderModal onChoose={selectCliProvider} />
       <SettingsModal open={settingsOpen} onClose={closeSettings} />
       {/* Shell-level: raised by the git panel or by the git-flow hook. */}
       <GitFlowHost />
@@ -1193,11 +1422,24 @@ export function AppShell() {
       <GitSyncModal />
       {/* Shell-level: one stack for every git operation's outcome. */}
       <AlertHost />
+      {/* Shell-level: in-app confirm; native confirm() wedges typing
+          in Electron on Windows. */}
+      <ConfirmHost />
       {/* Shell-level: what changed, once, on the first launch after an
           upgrade. */}
       <ChangelogModal
         entry={updates.changelog}
         onClose={updates.dismissChangelog}
+      />
+      {/* Shell-level, and above everything: once a newer release exists the
+          only thing this build can do is install it. */}
+      <ForceUpdateScreen
+        available={updates.available}
+        current={updates.current}
+        stage={updates.stage}
+        percent={updates.percent}
+        error={updates.error}
+        onInstall={updates.install}
       />
       {/* Shell-level: the agent's DB command waits on this answer. */}
       <DbApprovalModal vm={dbApproval} />

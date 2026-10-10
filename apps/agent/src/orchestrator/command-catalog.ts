@@ -12,11 +12,19 @@ import {
   DEBUG_REPORT_TEMPLATE,
   FEATURE_CONTEXT_COMMAND_ID,
   FEATURE_CONTEXT_COMMAND_NAME,
+  ENTRY_POINT_COMMAND_ID,
+  ENTRY_POINT_COMMAND_NAME,
+  IMPACT_RADIUS_COMMAND_ID,
+  IMPACT_RADIUS_COMMAND_NAME,
   FEATURE_CONTEXT_DEBUG_COMMAND_ID,
   FEATURE_CONTEXT_DEBUG_COMMAND_NAME,
   FEATURE_CONTEXT_UPDATE_COMMAND_ID,
   FEATURE_CONTEXT_UPDATE_COMMAND_NAME,
 } from "../context/feature-context/index.js";
+import {
+  MOCK_API_COMMAND_ID,
+  MOCK_API_COMMAND_NAME,
+} from "../preview/mock-api-command.js";
 
 const GLOBAL_SESSION_COMMAND: SlashCommand = {
   id: GLOBAL_SESSION_COMMAND_ID,
@@ -95,6 +103,71 @@ const FEATURE_CONTEXT_DEBUG_DETAIL = `# Debug report\n\n` +
   DEBUG_REPORT_TEMPLATE +
   "```\n";
 
+const ENTRY_POINT_COMMAND: SlashCommand = {
+  id: ENTRY_POINT_COMMAND_ID,
+  name: ENTRY_POINT_COMMAND_NAME,
+  description:
+    "Find the code that renders the screen you marked in Page preview.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+const ENTRY_POINT_DETAIL = `# Entry point\n\n` +
+  `Mark a screen in Page preview, attach it, and send /entry_point. Atelier ` +
+  `reads the route the screenshot came from and the text on the page, ` +
+  `matches both against the tree-sitter index, and names the symbol that ` +
+  `renders it with its file and line. Add a word to narrow it — ` +
+  `/entry_point budgets — when a screen matches more than one place. The ` +
+  `answer comes from the local index, not from the model, so it is the same ` +
+  `on Claude, Codex and local providers. Follow it with /impact_radius.`;
+
+const IMPACT_RADIUS_COMMAND: SlashCommand = {
+  id: IMPACT_RADIUS_COMMAND_ID,
+  name: IMPACT_RADIUS_COMMAND_NAME,
+  description:
+    "Walk every file and function connected to that screen, end to end.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+const IMPACT_RADIUS_DETAIL = `# Impact radius\n\n` +
+  `Run /impact_radius after /entry_point to see everything the marked ` +
+  `screen touches: the functions it calls, the functions that call it, and ` +
+  `the files pulled in by imports — the whole reachable set, in both ` +
+  `directions, grouped by file. Attach a screenshot and it finds the entry ` +
+  `point itself; send it bare and it walks whatever /entry_point last ` +
+  `pinned. Use it before changing a screen to see what else is involved.`;
+
+const MOCK_API_COMMAND: SlashCommand = {
+  id: MOCK_API_COMMAND_ID,
+  name: MOCK_API_COMMAND_NAME,
+  description:
+    "Replay one API call as the account Page preview is signed in as.",
+  kind: "command",
+  scope: "project",
+  enabled: true,
+};
+
+const MOCK_API_DETAIL = `# Mock an API call\n\n` +
+  `Use /context_mock_api <url> to call a local endpoint exactly as the ` +
+  `signed-in app would. Atelier lifts the live session out of the in-app ` +
+  `Page preview — the same bridge the preview review uses — and sends its ` +
+  `Authorization header and cookies with the request, then reports the ` +
+  `status, headers and body.\n\n` +
+  `This is the answer to a mimicked call coming back ` +
+  `\`401 {"error":"Missing authorization header"}\`: the headless browser ` +
+  `redirects to /auth and has no token, while the in-app browser is signed ` +
+  `in the whole time.\n\n` +
+  `    /context_mock_api http://localhost:5055/api/v1/budgets?billing_mode=usage\n` +
+  `    /context_mock_api POST http://localhost:5055/api/v1/budgets {"name":"test"}\n` +
+  `    /context_mock_api http://localhost:5055/api/v1/me login\n\n` +
+  `A method may lead; a trailing \`{\` or \`[\` is the request body, and ` +
+  `anything else trailing is context ("login", "signup") recorded in the ` +
+  `report. Local http(s) URLs only, and the token is never printed. Open ` +
+  `Page preview and sign in before running it.`;
+
 /**
  * Discovers the app-owned skills plus the Claude Code-compatible commands
  * and skills used for a query:
@@ -116,6 +189,9 @@ export function listSlashCommands(
     FEATURE_CONTEXT_COMMAND,
     FEATURE_CONTEXT_UPDATE_COMMAND,
     FEATURE_CONTEXT_DEBUG_COMMAND,
+    ENTRY_POINT_COMMAND,
+    IMPACT_RADIUS_COMMAND,
+    MOCK_API_COMMAND,
     GLOBAL_SESSION_COMMAND,
     ...scanSkills(bundledSkillsRoot(), "app"),
     ...scanBase(os.homedir(), "user"),
@@ -150,6 +226,15 @@ export function readSlashCommandDetail(
       command: FEATURE_CONTEXT_DEBUG_COMMAND,
       content: FEATURE_CONTEXT_DEBUG_DETAIL,
     };
+  }
+  if (id === ENTRY_POINT_COMMAND_ID) {
+    return { command: ENTRY_POINT_COMMAND, content: ENTRY_POINT_DETAIL };
+  }
+  if (id === IMPACT_RADIUS_COMMAND_ID) {
+    return { command: IMPACT_RADIUS_COMMAND, content: IMPACT_RADIUS_DETAIL };
+  }
+  if (id === MOCK_API_COMMAND_ID) {
+    return { command: MOCK_API_COMMAND, content: MOCK_API_DETAIL };
   }
   const disabled = new Set(disabledSkills);
   for (const entry of scanSkillDetails(bundledSkillsRoot(), "app")) {
@@ -203,6 +288,9 @@ export function listSlashCommandDetails(
       command: FEATURE_CONTEXT_DEBUG_COMMAND,
       content: FEATURE_CONTEXT_DEBUG_DETAIL,
     },
+    { command: ENTRY_POINT_COMMAND, content: ENTRY_POINT_DETAIL },
+    { command: IMPACT_RADIUS_COMMAND, content: IMPACT_RADIUS_DETAIL },
+    { command: MOCK_API_COMMAND, content: MOCK_API_DETAIL },
     { command: GLOBAL_SESSION_COMMAND, content: GLOBAL_SESSION_DETAIL },
     ...scanSkillDetails(bundledSkillsRoot(), "app"),
     ...scanDetails(os.homedir(), "user"),

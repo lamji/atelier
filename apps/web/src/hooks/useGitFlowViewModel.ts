@@ -6,6 +6,8 @@ import { alert } from "@/state/alerts.store";
 import { useGitFlowStore } from "@/state/git-flow.store";
 import { useGitStore } from "@/state/git.store";
 import { useSessionsStore } from "@/state/sessions.store";
+import { branchMatches } from "./useGitViewModel";
+import { gitDraftModel } from "@/views/git/GitModelSelect";
 
 /** Model for the AI repair loops, per the user's product decision. */
 const FIX_MODEL = "claude-sonnet-5";
@@ -28,6 +30,55 @@ const FIX_KIND_BY_STAGE: Partial<Record<string, FixKind>> = {
  * dedicated conversation whose messages stream through the existing
  * sessions store.
  */
+/**
+ * What is worth saying about the head branch before a request is opened.
+ *
+ * Deliberately warnings and not blocks. GitHub compares what it HAS — the
+ * branch as pushed — so uncommitted work and unpushed commits simply are
+ * not in the request. That is a thing to be told, not a reason to refuse:
+ * plenty of requests are opened from a branch whose author is still
+ * working, and forcing a push first is the app deciding for them.
+ */
+function prWarningsFor(input: {
+  head: string;
+  branches: string[];
+  status: { files: unknown[]; ahead: number };
+  info: { hasUpstream: boolean };
+}): string[] {
+  const warnings: string[] = [];
+  if (!input.branches.includes(input.head)) {
+    warnings.push(
+      `${input.head} has never been pushed, so GitHub cannot see it yet. ` +
+        "Creating the request will fail until it is pushed."
+    );
+  } else if (input.status.ahead > 0) {
+    warnings.push(
+      `${input.status.ahead} commit(s) on ${input.head} are not pushed. ` +
+        "They will not be part of this request."
+    );
+  }
+  if (input.status.files.length > 0) {
+    warnings.push(
+      `${input.status.files.length} file(s) have uncommitted changes. ` +
+        "They will not be part of this request."
+    );
+  }
+  return warnings;
+}
+
+/**
+ * Whether the head branch has commits the remote has not seen.
+ *
+ * Read off the warning text rather than recomputed: prWarningsFor is the
+ * one place that decides what "not pushed" means, and a second opinion
+ * here is a second thing to keep in step.
+ */
+function needsPush(warnings: string[]): boolean {
+  return warnings.some(
+    (warning) => /never been pushed/.test(warning) || /are not pushed/.test(warning)
+  );
+}
+
 export function useGitFlowViewModel() {
   const flow = useGitFlowStore();
   const fixSession = useSessionsStore((s) =>
@@ -69,13 +120,30 @@ export function useGitFlowViewModel() {
     async (stageAll: boolean) => {
       patch({ stage: "commit" });
       try {
+        // One commit per branch: once the branch owns exactly one, every
+        // later commit rewrites it so the branch reads as a single dated
+        // changelog rather than a trail of fixups. Never on the base
+        // branch, and never past one commit — that would fold together
+        // work the user chose to keep apart.
+        const branch = await bridge
+          .rpc("git.branchState", {})
+          .then((r) => r.state)
+          .catch(() => null);
+        const amend = Boolean(branch && branch.ahead === 1 && !branch.onBase);
         const result = await streamRun("git.commitRun", {
           message: state().commitMessage,
           stageAll,
+          amend,
         });
         useGitStore.getState().bumpStateVersion();
         if (result.ok) {
-          alert.success("Committed", firstLine(state().commitMessage));
+          alert.success(
+            amend ? "Commit updated" : "Committed",
+            firstLine(state().commitMessage) +
+              (amend && branch?.hasUpstream
+                ? " · push with --force-with-lease to update the remote"
+                : "")
+          );
           patch({ running: false, stage: "push" });
         } else {
           alert.danger(`Commit failed (exit ${result.exitCode})`, "hooks output is in the wizard");
@@ -93,7 +161,14 @@ export function useGitFlowViewModel() {
     [streamRun]
   );
 
+  /**
+   * The Create button. Warnings are surfaced once, here, and confirmed —
+   * never enforced. A second press with the modal open means "yes".
+   */
   const validatePr = useCallback(async () => {
+    // No confirm here: the push check already put the warnings in front of
+    // the user, as a screen, before anything was drafted. A second prompt
+    // at the end would be asking the same question twice.
     patch({ stage: "pr-conflicts", running: true, error: null, conflicts: [] });
     try {
       const check = await bridge.rpc("git.checkConflicts", {
@@ -110,10 +185,43 @@ export function useGitFlowViewModel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * A protected branch stops the wizard too.
+   *
+   * The Commit button already refuses before opening this flow, but the
+   * flow can be entered from elsewhere (a git-flow request raised by the
+   * agent, or a branch switched while it was open), and push is the step
+   * that cannot be undone. Checked here as well, against the settings the
+   * agent guard reads, so there is one rule and not two.
+   */
+  const protectionOnCurrentBranch = useCallback(async (): Promise<
+    string | null
+  > => {
+    const [{ settings }, { status }] = await Promise.all([
+      bridge.rpc("settings.get", {}),
+      bridge.rpc("git.status", {}),
+    ]);
+    return (
+      settings.protectedBranches.find((pattern) =>
+        branchMatches(status.branch, pattern)
+      ) ?? null
+    );
+  }, []);
+
   const runPush = useCallback(async () => {
     const flags = state().flagsText.split(/\s+/).filter(Boolean);
     patch({ stage: "push" });
     try {
+      const blocked = await protectionOnCurrentBranch().catch(() => null);
+      if (blocked) {
+        const message =
+          `This branch is protected by the rule "${blocked}", so it cannot ` +
+          "be pushed. Switch to a working branch, or remove the protection " +
+          "in the git panel's Protected tab.";
+        alert.danger("Push blocked — protected branch", message);
+        patch({ running: false, stage: "push", error: message });
+        return;
+      }
       const result = await streamRun("git.pushRun", { flags });
       useGitStore.getState().bumpStateVersion();
       if (!result.ok) {
@@ -141,7 +249,7 @@ export function useGitFlowViewModel() {
       const stage = text.includes("flag not allowed") ? "push" : "push-fix";
       patch({ running: false, stage, error: text });
     }
-  }, [streamRun, validatePr]);
+  }, [streamRun, validatePr, protectionOnCurrentBranch]);
 
   /**
    * Entry point for commits made outside the wizard (e.g. from a
@@ -181,7 +289,9 @@ export function useGitFlowViewModel() {
         }
         if (info.branch === info.defaultBranch) {
           patch({ stage: "branch", suggestingBranch: true });
-          const { name } = await bridge.rpc("git.suggestBranchName", {});
+          const { name } = await bridge.rpc("git.suggestBranchName", {
+            model: gitDraftModel(),
+          });
           patch({ branchName: name, suggestingBranch: false });
           return;
         }
@@ -286,23 +396,148 @@ export function useGitFlowViewModel() {
     });
   }, []);
 
+  /**
+   * Drafts the PR title and body against ONE base.
+   *
+   * Always takes the base explicitly. The description is a statement about
+   * a commit RANGE, and the range is `origin/<base>..HEAD` — so a draft and
+   * the base it was written against are one fact, and reading the base from
+   * state at some later point is how they come apart.
+   */
+  /**
+   * Drafts the PR title and body for ONE head/base pair.
+   *
+   * Never runs on its own when the screen opens. The branches are the
+   * question the screen exists to ask, and drafting before they are settled
+   * both spends a model call on a comparison the user is about to change
+   * and — as this screen proved — leaves a description standing that
+   * describes some other pair entirely.
+   */
+  /**
+   * Which forge accounts could open this PR, and which one this checkout
+   * points at.
+   *
+   * Loaded alongside the draft because the describe step is where both are
+   * chosen. The suggestion is applied only while the user has not picked
+   * an account themselves — re-entering the step must not silently undo
+   * their choice.
+   */
+  const loadPrCredentials = useCallback(async () => {
+    try {
+      const found = await bridge.rpc("git.prCredentials", {});
+      const now = useGitFlowStore.getState();
+      patch({
+        prCredentials: found.credentials,
+        prIdentity: found.identity ?? "",
+        ...(now.prCredentialId === undefined && found.suggestedId
+          ? { prCredentialId: found.suggestedId }
+          : {}),
+      });
+    } catch {
+      // A picker that cannot load is not a reason to block the PR: the
+      // create call falls back to picking an account by itself.
+    }
+  }, []);
+
+  const draftPr = useCallback(async (base: string, head?: string) => {
+    void loadPrCredentials();
+    patch({ prDrafting: true });
+    try {
+      const draft = await bridge.rpc("git.generatePrDescription", {
+        base,
+        head,
+        // The git screen's own provider/model pick, not the chat's.
+        model: gitDraftModel(),
+      });
+      // The user may have moved the picker again while this was in flight;
+      // a late answer must not overwrite a newer one.
+      const now = useGitFlowStore.getState();
+      if (now.prBase !== base || (head && now.prHead !== head)) return;
+      patch({
+        prTitle: draft.title,
+        prBody: draft.body,
+        prDrafting: false,
+        prDraftedFor: base,
+      });
+    } catch (e) {
+      patch({ prDrafting: false, error: errText(e) });
+    }
+  }, [loadPrCredentials]);
+
   /** PR step 1: user said yes — draft description + load branches. */
   const beginPr = useCallback(async () => {
     const base = state().info?.defaultBranch ?? "main";
-    patch({ stage: "pr-describe", prDrafting: true, prBase: base });
+    patch({ stage: "pr-compare", prDrafting: false, prBase: base });
     try {
-      const [{ branches }, draft] = await Promise.all([
+      const [{ branches }, { status }] = await Promise.all([
         bridge.rpc("git.remoteBranches", {}),
-        bridge.rpc("git.generatePrDescription", { base }),
+        bridge.rpc("git.status", {}),
       ]);
+      const head = state().info?.branch ?? "";
       patch({
         remoteBranches: branches,
-        prTitle: draft.title,
-        prBody: draft.body,
+        prHead: head,
+        prWarnings: head
+          ? prWarningsFor({
+              head,
+              branches,
+              status,
+              info: state().info ?? { hasUpstream: false },
+            })
+          : [],
         prDrafting: false,
       });
     } catch (e) {
       patch({ prDrafting: false, error: errText(e) });
+    }
+  }, []);
+
+  /**
+   * Entry point for "New pull request" in the Requests pane.
+   *
+   * Opens straight on the description step, the way GitHub's own button
+   * does: the branch already exists and its commits are already made, so
+   * the only question left is what the request says. A branch that has
+   * never been pushed is pushed first — GitHub cannot open a request for
+   * commits it has not seen, and sending the user back to do it by hand
+   * would be a worse answer than doing it.
+   */
+  const startPr = useCallback(async () => {
+    useGitFlowStore.getState().openFlow("", false);
+    patch({ stage: "pr-compare", prDrafting: false, afterPush: "pr-ask" });
+    try {
+      const [{ info }, { branches }, { status }] = await Promise.all([
+        bridge.rpc("git.flowInfo", {}),
+        bridge.rpc("git.remoteBranches", {}),
+        bridge.rpc("git.status", {}),
+      ]);
+      patch({ info, remoteBranches: branches });
+      if (!info.hasRemote) {
+        patch({
+          stage: "done",
+          prDrafting: false,
+          error: "Connect a GitHub remote first.",
+        });
+        return;
+      }
+      // Two branches, the way GitHub's compare page does it — and nothing
+      // is pushed to get here. A branch with no remote copy is a warning
+      // to confirm, not a wall: GitHub opens the request from what it can
+      // see, and being told that is better than being made to push first.
+      const head = info.branch;
+      const base =
+        info.defaultBranch && info.defaultBranch !== head
+          ? info.defaultBranch
+          : (branches.find((b) => b !== head) ?? info.defaultBranch ?? "main");
+      patch({
+        prHead: head,
+        prBase: base,
+        prWarnings: prWarningsFor({ head, branches, status, info }),
+        // Not drafted yet, on purpose — see draftPr.
+        prDrafting: false,
+      });
+    } catch (e) {
+      patch({ stage: "done", prDrafting: false, error: errText(e) });
     }
   }, []);
 
@@ -312,12 +547,17 @@ export function useGitFlowViewModel() {
     try {
       const result = await streamRun("git.createPr", {
         base: s.prBase,
+        head: s.prHead || undefined,
         title: s.prTitle,
         body: s.prBody,
+        ...(s.prCredentialId ? { credentialId: s.prCredentialId } : {}),
       });
       if (result.ok) {
         alert.success("Pull request created", result.url);
         patch({ running: false, stage: "done", prUrl: result.url ?? null });
+        // The Requests pane learns about it now, not on its next poll.
+        useGitStore.getState().bumpStateVersion();
+        useGitStore.getState().nudgeRequests();
       } else {
         alert.danger(`PR creation failed (exit ${result.exitCode})`, "see the wizard output");
         patch({
@@ -408,7 +648,122 @@ export function useGitFlowViewModel() {
     setFlagsText: (v: string) => patch({ flagsText: v }),
     setPrTitle: (v: string) => patch({ prTitle: v }),
     setPrBody: (v: string) => patch({ prBody: v }),
-    setPrBase: (v: string) => patch({ prBase: v }),
+    /** Pin the account that opens the PR; undefined means automatic. */
+    selectPrCredential: (id?: string) => patch({ prCredentialId: id }),
+    reloadPrCredentials: () => void loadPrCredentials(),
+    /**
+     * Changing the base changes what the PR IS, so the description is
+     * redrafted for it.
+     *
+     * Without this the draft was written once against the repository's
+     * DEFAULT branch and never revisited: picking `SPDNX-Dev` moved the
+     * base used to create the PR and check conflicts, while the title and
+     * body went on describing every commit since `main`. A branch fixing
+     * tag management was proposed as a multitenancy platform migration.
+     */
+    startPr,
+    /** Recomputes warnings and redrafts when the head branch changes. */
+    setPrHead: (v: string) => {
+      if (v === useGitFlowStore.getState().prHead) return;
+      patch({ prHead: v });
+      void bridge
+        .rpc("git.status", {})
+        .then(({ status }) => {
+          const now = useGitFlowStore.getState();
+          if (now.prHead !== v) return;
+          patch({
+            prWarnings: prWarningsFor({
+              head: v,
+              branches: now.remoteBranches,
+              status,
+              info: now.info ?? { hasUpstream: false },
+            }),
+          });
+        })
+        .catch(() => undefined);
+      // Only if there is already a draft to keep in step. Before that the
+      // user is still choosing, and drafting under them would spend a model
+      // call on a comparison they are about to change.
+      if (useGitFlowStore.getState().prDraftedFor) {
+        void draftPr(useGitFlowStore.getState().prBase, v);
+      }
+    },
+    setPrBase: (v: string) => {
+      if (v === useGitFlowStore.getState().prBase) return;
+      patch({ prBase: v });
+      if (useGitFlowStore.getState().prDraftedFor) {
+        void draftPr(v, useGitFlowStore.getState().prHead || undefined);
+      }
+    },
+    /**
+     * The Continue button on the compare screen.
+     *
+     * Validates the chosen head before spending anything on a draft: if
+     * its commits are not all on the remote, the screen is REPLACED by the
+     * push check, because that decision changes what the request will
+     * contain. Otherwise it goes straight to drafting.
+     */
+    generatePr: () => {
+      const now = useGitFlowStore.getState();
+      // ANY warning, not only a missing push: uncommitted work is left out
+      // of the request just as silently, and one screen that states both is
+      // better than one gate here and another at create time.
+      if (now.stage === "pr-compare" && now.prWarnings.length > 0) {
+        patch({ stage: "pr-push-check" });
+        return;
+      }
+      patch({ stage: "pr-describe" });
+      void draftPr(now.prBase, now.prHead || undefined);
+    },
+    /** Back out of the push check to the compare form. */
+    backToCompare: () => patch({ stage: "pr-compare", error: null }),
+    /** "Proceed anyway": open the request from what the remote already has. */
+    skipPushAndDraft: () => {
+      const now = useGitFlowStore.getState();
+      patch({ stage: "pr-describe" });
+      void draftPr(now.prBase, now.prHead || undefined);
+    },
+    /**
+     * "Push now": sends the branch, refreshes what is true of it, then
+     * drafts. `pushRun` adds `-u origin <branch>` itself when the branch
+     * has no upstream, so a never-pushed branch works from here too.
+     */
+    pushThenDraft: async () => {
+      patch({ running: true, error: null });
+      useGitFlowStore.getState().clearOutput();
+      try {
+        const { result } = await bridge.rpc("git.pushRun", { flags: [] }, (p) => {
+          if (p.chunk) useGitFlowStore.getState().appendOutput(p.chunk);
+        });
+        useGitStore.getState().bumpStateVersion();
+        if (!result.ok) {
+          alert.danger(`Push failed (exit ${result.exitCode})`, "see the output");
+          patch({ running: false, error: `Push failed (exit ${result.exitCode})` });
+          return;
+        }
+        alert.success("Pushed to origin", useGitFlowStore.getState().prHead);
+        const [{ branches }, { status }] = await Promise.all([
+          bridge.rpc("git.remoteBranches", {}),
+          bridge.rpc("git.status", {}),
+        ]);
+        const now = useGitFlowStore.getState();
+        patch({
+          running: false,
+          remoteBranches: branches,
+          stage: "pr-describe",
+          prWarnings: prWarningsFor({
+            head: now.prHead,
+            branches,
+            status,
+            info: now.info ?? { hasUpstream: true },
+          }),
+        });
+        void draftPr(now.prBase, now.prHead || undefined);
+      } catch (e) {
+        alert.danger("Push failed", errText(e));
+        patch({ running: false, error: errText(e) });
+      }
+    },
     close: () => useGitFlowStore.getState().close(),
   };
 }

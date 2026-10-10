@@ -1,17 +1,21 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  Check,
+  Copy,
   MessageSquareDashed,
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { Tooltip } from "@/components/ui/tooltip";
 import { liveHeadline } from "@/lib/live-headline";
 import { useChatViewModel } from "@/hooks/useChatViewModel";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { ProcessCard } from "./ProcessCard";
 import { Composer } from "./Composer";
+import { ChatErrorModal } from "./ChatErrorModal";
 import type { ChatItemVm } from "@/types";
 
 export interface ChatPanelProps {
@@ -91,6 +95,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight">
               {vm.sessionTitle}
             </span>
+            {vm.sessionId && <SessionIdChip id={vm.sessionId} />}
             {vm.busy && (
               <span className="chip chip-accent">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
@@ -113,8 +118,14 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             ref={scrollRef}
             onScroll={onScroll}
             className={cn(
-              "flex-1 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable_both-edges]",
-              compact ? "px-2 py-3" : "px-4 py-4"
+              "flex-1 overflow-y-auto overflow-x-hidden",
+              // both-edges mirrors the scrollbar's width as dead space on the
+              // left too. In the preview sidebar that pair of gutters is most
+              // of the column's slack, and filenames wrap mid-word to pay for
+              // it — the narrow layout reserves one edge only.
+              compact
+                ? "px-1 py-3 [scrollbar-gutter:stable]"
+                : "px-4 py-4 [scrollbar-gutter:stable_both-edges]"
             )}
           >
             <div
@@ -196,25 +207,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             </div>
           </div>
 
-          {error && (
-            <div
-              className={cn(
-                "mx-auto w-full max-w-4xl",
-                compact ? "px-2" : "px-4"
-              )}
-            >
-              <motion.p
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={cn(
-                  "mb-2 w-full rounded-2xl bg-destructive/10",
-                  "px-4 py-2.5 text-xs text-destructive"
-                )}
-              >
-                {error}
-              </motion.p>
-            </div>
-          )}
+          <ChatErrorModal error={error} title="Chat error" />
           <Composer compact={compact} />
         </div>
       </div>
@@ -332,5 +325,44 @@ function EmptyState({ connected }: { connected: boolean }) {
         </p>
       </div>
     </motion.div>
+  );
+}
+
+/**
+ * The session's conversation id, copyable in one click. It is the key every
+ * persisted row of a run hangs off (tasks, timeline, chat, scope, summaries),
+ * so when a run goes wrong this is what gets pasted into a DB query or a bug
+ * report — no digging through the sidebar or the data dir to find it.
+ */
+function SessionIdChip({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void navigator.clipboard
+      .writeText(id)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => undefined);
+  };
+  return (
+    <Tooltip content={copied ? "Copied" : "Copy the shared session id"}>
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={`Copy session id ${id}`}
+        className={cn(
+          "chip max-w-[16rem] font-mono",
+          "hover:bg-accent/60 hover:text-foreground"
+        )}
+      >
+        {copied ? (
+          <Check className="h-3 w-3 shrink-0 text-success" />
+        ) : (
+          <Copy className="h-3 w-3 shrink-0" />
+        )}
+        <span className="truncate">{id}</span>
+      </button>
+    </Tooltip>
   );
 }

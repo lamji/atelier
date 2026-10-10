@@ -13,6 +13,8 @@ import { isTrivialChat } from "../src/orchestrator/trivial-chat.js";
 import {
   ANSWER_ONLY_RULES,
   FAST_RULES,
+  asksForPlanOnly,
+  investigationTargets,
   readIntent,
 } from "../src/orchestrator/pipeline-executor.js";
 import { DIRECT_RULES } from "../src/orchestrator/direct-mode.js";
@@ -101,6 +103,63 @@ for (const [name, rules] of [
   );
 }
 
+check(
+  "pipeline reuses supplied evidence before opening a knowledge gap",
+  FAST_RULES.startsWith("REUSE PROVIDED EVIDENCE FIRST") &&
+    FAST_RULES.indexOf("REUSE PROVIDED EVIDENCE FIRST") <
+      FAST_RULES.indexOf("KNOWLEDGE GAPS") &&
+    FAST_RULES.includes("selected skill's read/study step")
+);
+check(
+  "current-turn files are the scripted investigation entry points",
+  JSON.stringify(
+    investigationTargets(
+      ["src/login-route.ts"],
+      ["src/stale-session-file.ts"],
+      ["src/unrelated.ts", "src/login-service.ts"]
+    )
+  ) === JSON.stringify(["src/login-route.ts"])
+);
+check(
+  "a vague follow-up inherits the session entry point",
+  JSON.stringify(
+    investigationTargets(
+      [],
+      ["src/login-service.ts"],
+      ["src/unrelated.ts"]
+    )
+  ) === JSON.stringify(["src/login-service.ts"])
+);
+check(
+  "retrieval supplies entry points when the turn has no file anchor",
+  JSON.stringify(
+    investigationTargets(
+      [],
+      [],
+      ["src/login-route.ts", "src/login-service.ts"]
+    )
+  ) === JSON.stringify(["src/login-route.ts", "src/login-service.ts"])
+);
+check(
+  "scripted investigation targets are concrete, unique and bounded",
+  investigationTargets(
+    [],
+    [],
+    [
+      "src/a.ts",
+      "not-a-file",
+      "src/a.ts",
+      "src/b.ts",
+      "src/c.ts",
+      "src/d.ts",
+      "src/e.ts",
+      "src/f.ts",
+      "src/g.ts",
+    ]
+  ).join(",") ===
+    "src/a.ts,src/b.ts,src/c.ts,src/d.ts,src/e.ts,src/f.ts"
+);
+
 // The block only helps if the pipeline actually withholds the execution
 // contract from a question turn; requiring a plan is what makes the model
 // open a checklist in the first place.
@@ -114,6 +173,12 @@ const ollamaSource = fs.readFileSync(
   "utf8"
 );
 check(
+  "Plan mode reuses assembled code instead of reopening it",
+  pipelineSource.includes("Use current code already carried in the assembled context") &&
+    pipelineSource.includes("do not reopen code the prompt already provides") &&
+    !pipelineSource.includes("Read the code you are about to change before you plan it")
+);
+check(
   "a question turn is not given the timeline contract",
   pipelineSource.includes(
     "if (answerOnly) this.deps.planTracker.markAnswerOnly(ctx.taskId);"
@@ -121,12 +186,39 @@ check(
     pipelineSource.includes("else this.deps.planTracker.requirePlan(ctx.taskId);")
 );
 
+const retrievalStart = pipelineSource.indexOf(
+  'const retrieval = await this.stage(ctx, "retrieve"'
+);
+const impactStart = pipelineSource.indexOf(
+  "const radius = this.investigationRadius(ctx, intent);"
+);
+const executionStart = pipelineSource.indexOf(
+  'const exec = await this.stage(ctx, "execute"'
+);
+check(
+  "the executable investigation order is entry point, impact, then provider",
+  retrievalStart >= 0 &&
+    impactStart > retrievalStart &&
+    executionStart > impactStart
+);
+check(
+  "read-only investigations receive the impact returned by the graph walk",
+  pipelineSource.includes(
+    "private investigationRadius(ctx: TaskContext, intent: Intent)"
+  ) &&
+    !pipelineSource.includes(
+      "if (isReadOnly(intent)) return emptyRadius([]);"
+    ) &&
+    pipelineSource.includes("retrieval,\n          radius,\n          plan,")
+);
+
 // The other half of the same rule: a turn that owes no edit must not be
 // held by the completion gate either, or it ends on "the gate is still
 // open" after spending the whole stall budget on work that never existed.
 check(
   "an informational turn is not held by the completion gate",
-  pipelineSource.includes("!looksInformational(ctx.prompt)")
+  // The human half of the prompt, never the hidden preview block.
+  pipelineSource.includes("!looksInformational(ctx.humanPrompt)")
 );
 
 // Ollama must receive the exact same assembled contract as Claude. Otherwise
@@ -137,6 +229,31 @@ check(
   pipelineSource.includes("system: providerContext") &&
     ollamaSource.includes("system: opts.system")
 );
+
+/**
+ * Plan-only routing: a turn that asks for a PLAN owes no edit and no step
+ * per request bullet. The first row is verbatim from the run where six
+ * study steps ended with none checked. "plan" as a thing to build stays a
+ * change request.
+ */
+const PLAN_ONLY: Array<[string, boolean]> = [
+  [
+    "Understand and study this and create a plan allocation rules should " +
+      "be reflected in the dashboard and cost analysis",
+    true,
+  ],
+  ["create an implementation plan for the new billing page", true],
+  ["give me a plan first, don't implement yet", true],
+  ["plan only: how would you migrate the auth module?", true],
+  ["create a plan page under settings", false],
+  ["add a plan selector to the pricing card", false],
+  ["fix the terminal search", false],
+  ["create a plan and then implement it", false],
+];
+for (const [prompt, want] of PLAN_ONLY) {
+  const got = asksForPlanOnly(prompt);
+  check(`plan-only ${JSON.stringify(prompt.slice(0, 50))}`, got === want, `got=${got}`);
+}
 
 console.log(failed === 0 ? "\nall cases pass" : `\n${failed} mismatch(es)`);
 process.exit(failed === 0 ? 0 : 1);

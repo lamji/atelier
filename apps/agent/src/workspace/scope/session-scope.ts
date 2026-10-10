@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 import { toPosix } from "@atelier/shared";
 import type { Db } from "../../storage/db.js";
@@ -9,8 +8,12 @@ import { parseMentions, parseTypedPaths } from "./mentions.js";
 const MAX_ANCHORS = 40;
 
 export interface SessionScope {
-  /** Locked project directories, workspace-relative posix. Empty = whole
-   *  workspace, which is the correct answer for a single-project folder. */
+  /**
+   * Locked project directories. ALWAYS EMPTY since 2026-08-29: project
+   * locking was removed (see the store's doc). The field stays so every
+   * consumer — the tool guard, retrieval clamp, git focus, prompt block,
+   * UI chip — keeps its existing "no lock" path instead of a rewrite.
+   */
   roots: string[];
   /** Files this conversation has already read or edited, newest first. */
   anchors: string[];
@@ -61,18 +64,24 @@ interface ScopeRow {
 }
 
 /**
- * Per-conversation working-set lock.
+ * Per-conversation working set — anchors and this turn's named paths.
  *
- * Mentioning a folder is the strongest scope signal a user can give, and
- * it used to survive only as characters in the prompt: retrieval ranked
- * across every checkout in the workspace, so three near-identical
- * badge.tsx files scored the same and the agent read all three. The lock
- * turns that signal into a filter, and makes it STICKY — a follow-up like
- * "add bg to each badge" carries no path at all, so without persistence
- * the second turn is unscoped again.
+ * This used to be a LOCK as well: mentioning a folder pinned the
+ * conversation to that project's roots, the pin persisted, and the tool
+ * guard refused paths outside it. It was built for one hazard (three
+ * near-identical badge.tsx files across checkouts) and it kept locking
+ * the wrong thing: a feature match relocked sessions to foreign
+ * checkouts, a `/context` trace of one folder was inherited by an
+ * unrelated design request three turns later, and the model then reported
+ * "package.json is outside this session's scope" as its blocker. A sticky
+ * guess about which project the user means is worse than no guess.
  *
- * Precedence: an explicit mention this turn always wins and re-locks;
- * otherwise the stored lock is inherited unchanged.
+ * So roots are gone. `resolve`, `lock`, `focusFiles` and `get` return
+ * `roots: []` unconditionally and persist only anchors; a stored row from
+ * before this change has its roots ignored. What remains is the useful
+ * half: which files this conversation has touched, and which the user
+ * named in this message — hints to the ranker and the prompt, never a
+ * boundary. Mentions outside the workspace are still granted as reads.
  */
 export class SessionScopeStore {
   constructor(
@@ -83,14 +92,13 @@ export class SessionScopeStore {
   ) {}
 
   /**
-   * Decides the scope for a turn and persists it. `profile` maps a
-   * mentioned path onto the project that owns it, so mentioning a file
-   * deep inside a checkout locks the checkout, not the file's folder.
+   * Decides the working set for a turn and persists its anchors. Mentions
+   * become anchors and this turn's `named` subject; nothing is locked.
    */
   resolve(
     conversationId: string,
     prompt: string,
-    profile: WorkspaceProfile
+    _profile: WorkspaceProfile
   ): SessionScope {
     const stored = this.read(conversationId);
     const mentions = parseMentions(prompt, this.workspaceRoot);
@@ -103,123 +111,64 @@ export class SessionScopeStore {
       if (path.isAbsolute(candidate)) this.guard?.allowRead(candidate);
     }
 
-    const mentionedRoots = new Set<string>();
     const mentionedFiles: string[] = [];
-    /** Mentioned directories the profile does not know as projects. */
-    const unownedDirs: string[] = [];
     for (const mention of mentions) {
       // A path outside the workspace becomes a readable reference and
-      // nothing more: it is not a project, so it must never join the lock
-      // (which routes git and the directory map) or the retrieval anchors,
-      // both of which assume workspace-relative paths.
+      // nothing more: the retrieval anchors assume workspace-relative
+      // paths.
       if (mention.outside) {
         this.guard?.allowRead(mention.path);
         continue;
       }
-      const owner = projectFor(mention.path, profile);
-      if (owner) mentionedRoots.add(owner);
-      else if (mention.isDir) unownedDirs.push(mention.path);
       if (!mention.isDir) mentionedFiles.push(mention.path);
     }
 
-    // Everything this message points at, however it was written. Typed
-    // paths and "@" mentions differ in what they LOCK; they do not differ
-    // in what the turn is about.
+    // Everything this message points at, however it was written.
     const named = capAnchors([...mentionedFiles, ...allowed]);
-
-    // A mention that resolves to no project (single-project workspace, or
-    // a path at the root) is a real mention but not a lock: there is no
-    // narrower world to lock to, and locking to "src" would be wrong.
-    if (mentionedRoots.size > 0) {
-      // ...but once a lock IS being built, every folder named in the same
-      // breath has to be inside it. Detection is not perfect — a folder
-      // with no manifest of its own is not a "project" — and a mentioned
-      // folder falling outside the lock its own siblings created is the
-      // worst outcome available: the agent refuses to read what it was
-      // just pointed at.
-      for (const dir of unownedDirs) {
-        const covered = [...mentionedRoots].some(
-          (root) => dir === root || dir.startsWith(`${root}/`)
-        );
-        if (!covered) mentionedRoots.add(dir);
-      }
-      const roots = [...mentionedRoots].sort();
-      const changed = !sameRoots(roots, stored?.roots ?? []);
-      const anchors = capAnchors([...mentionedFiles, ...(stored?.anchors ?? [])]);
-      this.write(conversationId, roots, anchors);
-      return { roots, anchors, allowed, named, source: "mention", changed };
-    }
 
     if (!stored) {
       if (named.length === 0) return EMPTY_SCOPE;
       const anchors = capAnchors(mentionedFiles);
-      this.write(conversationId, [], anchors);
+      this.write(conversationId, anchors);
       return { roots: [], anchors, allowed, named, source: "none", changed: false };
     }
 
     const anchors = capAnchors([...mentionedFiles, ...stored.anchors]);
-    if (mentionedFiles.length > 0) {
-      this.write(conversationId, stored.roots, anchors);
-    }
+    if (mentionedFiles.length > 0) this.write(conversationId, anchors);
     return {
-      roots: stored.roots,
+      roots: [],
       anchors,
       allowed,
       named,
-      source: stored.roots.length > 0 ? "inherited" : "none",
+      source: mentionedFiles.length > 0 ? "mention" : "none",
       changed: false,
     };
   }
 
   /**
-   * Locks a conversation to roots the CALLER already knows, without a
-   * mention to parse.
-   *
-   * Some tasks are born inside one project and nowhere else: the git
-   * wizard's fix agent is dispatched about a specific checkout, and asking
-   * it to infer that from a prompt full of command output is how it ended
-   * up reading every repo's .git/config in the workspace. The lock is
-   * persisted like any other, so the follow-up turns of that fix
-   * conversation inherit it.
-   *
-   * Roots that are not real directories in the workspace are dropped — a
-   * lock on a path that does not exist would filter retrieval down to
-   * nothing.
+   * A caller that already knows its project (the git wizard's fix agent is
+   * dispatched about one checkout). It used to lock the conversation to
+   * that root; now it is a no-op on the store — the caller's checkout is
+   * still routed through git focus by the task options, and the working
+   * set is whatever the conversation has anchored.
    */
-  lock(conversationId: string, requested: string[]): SessionScope {
+  lock(conversationId: string, _requested: string[]): SessionScope {
     const stored = this.read(conversationId);
-    const roots = [
-      ...new Set(
-        requested
-          .map((root) => toPosix(root).replace(/^\.\/|\/+$/g, ""))
-          .filter((root) => root !== "" && root !== "." && this.isDir(root))
-      ),
-    ].sort();
-    if (roots.length === 0) {
-      // Nothing to narrow to — a repo AT the workspace root is already the
-      // whole world, and that is the correct unlocked answer.
-      return stored
-        ? { ...EMPTY_SCOPE, anchors: stored.anchors }
-        : EMPTY_SCOPE;
-    }
-    const anchors = capAnchors(stored?.anchors ?? []);
-    const changed = !sameRoots(roots, stored?.roots ?? []);
-    this.write(conversationId, roots, anchors);
-    return { roots, anchors, allowed: [], named: [], source: "explicit", changed };
+    return stored ? { ...EMPTY_SCOPE, anchors: stored.anchors } : EMPTY_SCOPE;
   }
 
   /**
-   * Narrows a conversation from a product feature match, not a typed path.
-   *
-   * Plain-language follow-ups like "fix the dashboard spacing too" do not
-   * mention a file, but the feature model knows the owner files. Persisting
-   * those files as anchors keeps the session on the same feature; resolving
-   * their owning projects gives the tool guard a hard boundary when possible.
+   * Anchors a conversation to the owner files of a product feature match
+   * or a `/context` binding, so plain-language follow-ups like "fix the
+   * dashboard spacing too" keep pointing at the same files. Anchors only:
+   * a feature match is a guess made from this turn's wording, and a guess
+   * once relocked whole sessions to the wrong checkout for good.
    */
   focusFiles(
     conversationId: string,
     featureFiles: string[],
-    profile: WorkspaceProfile
+    _profile: WorkspaceProfile,
+    _opts: { explicit?: boolean } = {}
   ): SessionScope {
     const stored = this.read(conversationId);
     const files = [
@@ -230,31 +179,18 @@ export class SessionScopeStore {
       ),
     ];
     if (files.length === 0) {
-      return stored
-        ? {
-            roots: stored.roots,
-            anchors: stored.anchors,
-            allowed: [],
-            named: [],
-            source: stored.roots.length > 0 ? "inherited" : "none",
-            changed: false,
-          }
-        : EMPTY_SCOPE;
+      return stored ? { ...EMPTY_SCOPE, anchors: stored.anchors } : EMPTY_SCOPE;
     }
-
-    const mentionedRoots = new Set<string>();
-    for (const file of files) {
-      const owner = projectFor(file, profile);
-      if (owner) mentionedRoots.add(owner);
-    }
-    const roots =
-      mentionedRoots.size > 0
-        ? [...mentionedRoots].sort()
-        : (stored?.roots ?? []);
     const anchors = capAnchors([...files, ...(stored?.anchors ?? [])]);
-    const changed = !sameRoots(roots, stored?.roots ?? []);
-    this.write(conversationId, roots, anchors);
-    return { roots, anchors, allowed: [], named: [], source: "feature", changed };
+    this.write(conversationId, anchors);
+    return {
+      roots: [],
+      anchors,
+      allowed: [],
+      named: [],
+      source: "feature",
+      changed: false,
+    };
   }
 
   /** Records a file the agent actually touched, so follow-ups anchor to it. */
@@ -262,22 +198,13 @@ export class SessionScopeStore {
     const rel = toPosix(relPath);
     if (!rel) return;
     const stored = this.read(conversationId);
-    const anchors = capAnchors([rel, ...(stored?.anchors ?? [])]);
-    this.write(conversationId, stored?.roots ?? [], anchors);
+    this.write(conversationId, capAnchors([rel, ...(stored?.anchors ?? [])]));
   }
 
   get(conversationId: string): SessionScope {
     const stored = this.read(conversationId);
     if (!stored) return EMPTY_SCOPE;
-    return {
-      roots: stored.roots,
-      anchors: stored.anchors,
-      // A read of the stored lock, with no prompt to read grants out of.
-      allowed: [],
-      named: [],
-      source: stored.roots.length > 0 ? "inherited" : "none",
-      changed: false,
-    };
+    return { ...EMPTY_SCOPE, anchors: stored.anchors };
   }
 
   clear(conversationId: string): void {
@@ -286,35 +213,22 @@ export class SessionScopeStore {
       .run(conversationId);
   }
 
-  /** Guards `lock` against roots that do not exist on disk. */
-  private isDir(root: string): boolean {
-    try {
-      return fs.statSync(path.resolve(this.workspaceRoot, root)).isDirectory();
-    } catch {
-      return false;
-    }
-  }
-
-  private read(
-    conversationId: string
-  ): { roots: string[]; anchors: string[] } | null {
+  /**
+   * Anchors only. The `roots` column still exists in the schema and is
+   * written as `[]`; whatever a pre-2026-08-29 row holds there is ignored,
+   * which is how a conversation locked under the old code is released.
+   */
+  private read(conversationId: string): { anchors: string[] } | null {
     const row = this.db
       .prepare(
-        "SELECT roots, anchors FROM conversation_scope WHERE conversation_id = ?"
+        "SELECT anchors FROM conversation_scope WHERE conversation_id = ?"
       )
-      .get(conversationId) as ScopeRow | undefined;
+      .get(conversationId) as Pick<ScopeRow, "anchors"> | undefined;
     if (!row) return null;
-    return {
-      roots: parseList(row.roots),
-      anchors: parseList(row.anchors),
-    };
+    return { anchors: parseList(row.anchors) };
   }
 
-  private write(
-    conversationId: string,
-    roots: string[],
-    anchors: string[]
-  ): void {
+  private write(conversationId: string, anchors: string[]): void {
     this.db
       .prepare(
         "INSERT INTO conversation_scope" +
@@ -323,12 +237,7 @@ export class SessionScopeStore {
           "roots = excluded.roots, anchors = excluded.anchors, " +
           "updated_at = excluded.updated_at"
       )
-      .run(
-        conversationId,
-        JSON.stringify(roots),
-        JSON.stringify(anchors),
-        Date.now()
-      );
+      .run(conversationId, "[]", JSON.stringify(anchors), Date.now());
   }
 }
 
@@ -412,6 +321,64 @@ export function inScope(scope: SessionScope, relPath: string): boolean {
   );
 }
 
+/**
+ * The feature-match files a conversation may actually be focused onto.
+ *
+ * The feature table covers the whole workspace, so in a folder holding
+ * several checkouts one ordinary word — "report", "preview", "auth" — can
+ * tie features across unrelated projects. Unioning their files then locked
+ * the session to two projects at once, neither of them the one the user was
+ * working in: the run that produced this guard permitted `agenttest/my-app/`
+ * and `ai-doc-forge/` while every error under discussion was in a third
+ * checkout, and the model correctly reported the lock itself as the blocker.
+ *
+ * Rules, in order (roots are always empty now, so the first is history):
+ *  - a locked conversation keeps its lock; only files inside it may focus,
+ *  - otherwise a conversation may focus on ONE project — the one its own
+ *    anchors already point at,
+ *  - when the match spans several and the conversation's own anchors do not
+ *    say which, nothing focuses. An unlocked turn is the status quo; a lock
+ *    on the wrong project is a dead end the user has to notice and undo.
+ */
+export function featureFocusFiles(
+  files: string[],
+  profile: WorkspaceProfile,
+  scope: SessionScope
+): string[] {
+  const candidates = files.map((file) => toPosix(file)).filter(Boolean);
+  if (candidates.length === 0) return [];
+
+  if (scope.roots.length > 0) {
+    return candidates.filter((file) =>
+      scope.roots.some((root) => file === root || file.startsWith(`${root}/`))
+    );
+  }
+
+  const byProject = new Map<string, string[]>();
+  for (const file of candidates) {
+    const owner = projectFor(file, profile);
+    // A file no project claims cannot pull the session anywhere, so it
+    // never decides the question — it rides along with whatever does.
+    if (!owner) continue;
+    byProject.set(owner, [...(byProject.get(owner) ?? []), file]);
+  }
+  if (byProject.size <= 1) return candidates;
+
+  const anchored = new Map<string, number>();
+  for (const anchor of scope.anchors) {
+    const owner = projectFor(anchor, profile);
+    if (!owner || !byProject.has(owner)) continue;
+    anchored.set(owner, (anchored.get(owner) ?? 0) + 1);
+  }
+  const best = [...anchored.entries()].sort((a, b) => b[1] - a[1]);
+  const winner = best[0];
+  // A tie between two projects the conversation has touched equally is
+  // still no answer, and picking one by sort order would be a coin toss
+  // with a persisted lock as the prize.
+  if (!winner || (best[1] && best[1][1] === winner[1])) return [];
+  return byProject.get(winner[0]) ?? [];
+}
+
 /** The project directory that owns a path, longest match first. */
 function projectFor(
   relPath: string,
@@ -438,10 +405,6 @@ function capAnchors(paths: string[]): string[] {
     if (seen.length >= MAX_ANCHORS) break;
   }
   return seen;
-}
-
-function sameRoots(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((root, i) => root === b[i]);
 }
 
 function parseList(raw: string): string[] {

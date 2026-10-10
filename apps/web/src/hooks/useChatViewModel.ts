@@ -19,6 +19,12 @@ export interface ChatViewModel {
   /** Bridge is up AND a session is selected. */
   connected: boolean;
   sessionTitle: string;
+  /**
+   * Conversation id of the selected session — the key every persisted
+   * row (tasks, timeline, chat, scope, summaries) hangs off, so it is what
+   * you paste into a DB query when debugging a run.
+   */
+  sessionId: string | null;
   items: ChatItemVm[];
   thinking: string;
   actions: AgentAction[];
@@ -42,6 +48,7 @@ export interface ChatViewModel {
 export function useChatViewModel(): ChatViewModel {
   const online = useConnectionStore((s) => s.state === "connected");
   const hasSession = useSessionsStore((s) => s.selectedId !== null);
+  const sessionId = useSessionsStore((s) => s.selectedId);
   const sessionTitle = useSessionsStore((s) => {
     const id = s.selectedId;
     return (id ? s.sessions[id]?.conversation.title : null) ?? "No session";
@@ -62,6 +69,7 @@ export function useChatViewModel(): ChatViewModel {
   return {
     connected: online && hasSession,
     sessionTitle,
+    sessionId,
     items: items ?? NO_ITEMS,
     thinking: thinking ?? "",
     actions: actions ?? NO_ACTIONS,

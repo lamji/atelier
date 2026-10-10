@@ -8,9 +8,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { droppedFilePaths } from "@/lib/desktop";
+import { desktopPlatform, droppedFilePaths } from "@/lib/desktop";
 import { terminalRegistry } from "@/services/terminal-registry";
 import {
+  cliProvider,
   ensureCliSessions,
   useCliConsoleStore,
 } from "@/services/cli-console";
@@ -33,11 +34,18 @@ import { useThemeStore } from "@/state/theme.store";
  * because in this mode it is the only place the user sees what changed. It
  * follows the selected session and shows only what that session changed, so
  * a session that has touched nothing shows nothing.
+ *
+ * `compact` is the Page preview sidebar: the same terminal in a narrow
+ * column beside the preview, where the rail has no room and the preview
+ * itself is what the user is watching for changes.
  */
-export function CliConsolePane() {
+export function CliConsolePane(props: { compact?: boolean; sessionId?: string } = {}) {
+  const compact = props.compact === true;
   const connected = useConnectionStore((s) => s.state === "connected");
   const sessions = useCliConsoleStore((s) => s.sessions);
-  const selectedId = useCliConsoleStore((s) => s.selectedId);
+  const storeSelectedId = useCliConsoleStore((s) => s.selectedId);
+  const selectedId = props.sessionId ?? storeSelectedId;
+  const renameStatus = useCliConsoleStore((s) => selectedId ? s.renameStatus[selectedId] : undefined);
   const changes = useGitChangesRailViewModel(selectedId);
   const bootstrapped = useCliConsoleStore((s) => s.bootstrapped);
   const openProviderPicker = useCliConsoleStore((s) => s.openProviderPicker);
@@ -82,8 +90,10 @@ export function CliConsolePane() {
         // that TUI cannot find out the pane is light — ConPTY eats the OSC 11
         // query it asks with. So its dark surfaces are corrected on the way
         // in; see TuiSurfaceFilter.
+        const provider = cliProvider(session.providerId);
         terminalRegistry.mount(session.termId, el, dark, {
           retintDarkSurfaces: true,
+          imagePasteKey: provider.imagePasteKey(desktopPlatform()),
         });
       }
     }
@@ -160,12 +170,27 @@ export function CliConsolePane() {
               if (el) containers.current.set(session.termId, el);
               else containers.current.delete(session.termId);
             }}
+            // Inset, not padding: the fit addon sizes the terminal from
+            // this element's computed (border-box) height and width, so
+            // padding here would be handed to xterm as drawable area and
+            // the last column and bottom row would land under the edge.
             className={cn(
-              "absolute inset-0 bg-panel p-2 dark:bg-editor",
+              "absolute inset-2 bg-panel dark:bg-editor",
               session.termId !== selectedId && "hidden"
             )}
           />
         ))}
+        {renameStatus && (
+          <div
+            role="status"
+            className={cn(
+              "pointer-events-none absolute left-1/2 top-3 z-10 max-w-[80%] -translate-x-1/2 rounded-lg border bg-card px-3 py-1.5 text-xs shadow-lg",
+              renameStatus.error ? "border-destructive/50 text-destructive" : "border-border text-foreground"
+            )}
+          >
+            {renameStatus.text}
+          </div>
+        )}
         {(sessions.length === 0 || error) && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-panel dark:bg-editor">
             {cliLoading ? (
@@ -230,10 +255,12 @@ export function CliConsolePane() {
           would reflow the terminal at exactly the wrong moment. Empty until
           this session changes something — the column stays, its content
           does not. */}
-      <ChangesRail
-        vm={{ ...changes, loading: changes.loading || cliLoading }}
-        status={null}
-      />
+      {!compact && (
+        <ChangesRail
+          vm={{ ...changes, loading: changes.loading || cliLoading }}
+          status={null}
+        />
+      )}
     </div>
   );
 }

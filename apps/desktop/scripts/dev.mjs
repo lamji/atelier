@@ -328,6 +328,34 @@ function watchForRebuilds() {
   } catch (error) {
     console.warn(`[desktop] auto-restart disabled: ${error.message}`);
   }
+
+  // The agent is deliberately NOT restarted on rebuild — that would kill a
+  // task mid-run. But saying nothing is its own trap: the renderer hot-
+  // reloads, so an agent-side change leaves new UI talking to an old agent
+  // and the app quietly behaves as though the change was never made. A
+  // whole debugging session can be spent on that. So it is announced.
+  try {
+    const agentDist = path.join(agentRoot, "dist-electron");
+    let agentTimer = null;
+    fs.watch(agentDist, (_event, filename) => {
+      if (String(filename ?? "") !== "utility-main.mjs") return;
+      if (agentTimer) clearTimeout(agentTimer);
+      agentTimer = setTimeout(() => {
+        agentTimer = null;
+        console.log(
+          [
+            "",
+            "[desktop] ⚠ AGENT REBUILT — the running agent is now STALE.",
+            "[desktop]   Reopen the project (or restart the window) to load it.",
+            "[desktop]   Until then the UI is new and the agent is old.",
+            "",
+          ].join("\n"),
+        );
+      }, REBUILD_DEBOUNCE_MS);
+    });
+  } catch (error) {
+    console.warn(`[desktop] agent staleness notice disabled: ${error.message}`);
+  }
 }
 
 startElectron();

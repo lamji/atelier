@@ -22,7 +22,7 @@ interface Entry {
    * output follow. Cleared the moment the user scrolls up to read back, and
    * re-armed when they return to the bottom — the same contract as VS Code's
    * terminal.
-   */
+  */
   stick: boolean;
   /** Removes the viewport scroll listener when the terminal is disposed. */
   detach: (() => void) | null;
@@ -37,6 +37,8 @@ interface Entry {
   surfaces: TuiSurfaceFilter | null;
   /** Non-null only for the floating modal terminal. */
   profile: TerminalProfileId | null;
+  /** Set only for a pane that runs a CLI; see pasteFromClipboard. */
+  imagePasteKey: string | null;
 }
 
 export interface TerminalMountOptions {
@@ -48,6 +50,12 @@ export interface TerminalMountOptions {
   retintDarkSurfaces?: boolean;
   /** Linux-style palette for the floating modal terminal only. */
   profile?: TerminalProfileId;
+  /**
+   * The bytes the CLI running in this pane reads as "paste the clipboard
+   * image" — only for panes that exist to run one. Ctrl+V with an image on
+   * the clipboard sends these instead of pasting; see pasteFromClipboard.
+   */
+  imagePasteKey?: string;
 }
 
 /**
@@ -59,6 +67,32 @@ const DOUBLE_CTRL_C_MS = 1000;
 
 /** Slack, in px, for calling a viewport "at the bottom" after rounding. */
 const BOTTOM_EPSILON = 2;
+
+function viewportAtBottom(viewport: HTMLElement): boolean {
+  const distance =
+    viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+  return distance <= BOTTOM_EPSILON;
+}
+
+async function readClipboardText(): Promise<string> {
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    // clipboard unavailable (browser permission) — nothing to paste
+    return "";
+  }
+}
+
+async function clipboardHasImage(): Promise<boolean> {
+  try {
+    const items = await navigator.clipboard.read();
+    return items.some((item) =>
+      item.types.some((type) => type.startsWith("image/"))
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** Highlight colors for search matches — #RRGGBB, as the addon requires. */
 const SEARCH_DECORATIONS = {
@@ -98,6 +132,7 @@ class TerminalRegistry {
   private entries = new Map<string, Entry>();
   private searchRequest: (termId: string) => void = () => {};
   private inputListeners = new Map<string, Set<(data: string) => void>>();
+  private inputInterceptors = new Map<string, (data: string) => string>();
   private outputListeners = new Map<string, Set<(data: string) => void>>();
   /**
    * The live theme. Kept here rather than read per write because output
@@ -128,6 +163,14 @@ class TerminalRegistry {
     return () => {
       listeners.delete(listener);
       if (listeners.size === 0) this.inputListeners.delete(termId);
+    };
+  }
+
+  /** Replace a CLI command's submit key before it reaches the provider pty. */
+  interceptInput(termId: string, interceptor: (data: string) => string): () => void {
+    this.inputInterceptors.set(termId, interceptor);
+    return () => {
+      if (this.inputInterceptors.get(termId) === interceptor) this.inputInterceptors.delete(termId);
     };
   }
 
@@ -187,6 +230,9 @@ class TerminalRegistry {
         fontSize: 12.5,
         cursorBlink: true,
         allowTransparency: true,
+        // SearchAddon uses xterm's proposed decoration API to highlight every
+        // match and publish result counts through onDidChangeResults.
+        allowProposedApi: true,
         theme: this.themeFor(dark, options.profile ?? null),
         scrollback: 5000,
         // Typing must always bring the prompt back into view, however far
@@ -205,12 +251,19 @@ class TerminalRegistry {
         })
       );
       term.onData((data) => {
-        void bridge.rpc("terminal.write", { termId, data }).catch(() => {});
-        // Observers must never be able to stop the keystroke reaching the
-        // pty, so they run after the write and each is isolated.
+        let forwarded = data;
+        try {
+          forwarded = this.inputInterceptors.get(termId)?.(data) ?? data;
+        } catch {
+          // A failed app command must not swallow ordinary terminal input.
+        }
+        if (!forwarded) return;
+        void bridge.rpc("terminal.write", { termId, data: forwarded }).catch(() => {});
+        // Observers see the bytes the provider receives, so a consumed app
+        // command cannot become a topic or a processing event.
         for (const listener of this.inputListeners.get(termId) ?? []) {
           try {
-            listener(data);
+            listener(forwarded);
           } catch {
             // a watcher's problem is not the terminal's
           }
@@ -238,6 +291,7 @@ class TerminalRegistry {
         lastCtrlC: 0,
         surfaces: options.retintDarkSurfaces ? new TuiSurfaceFilter() : null,
         profile: options.profile ?? null,
+        imagePasteKey: options.imagePasteKey ?? null,
       };
       this.entries.set(termId, entry);
       term.attachCustomKeyEventHandler((event) =>
@@ -261,6 +315,7 @@ class TerminalRegistry {
     // replacement is a different node even though the terminal is still live.
     if (entry.element !== container) {
       entry.profile = options.profile ?? null;
+      entry.imagePasteKey = options.imagePasteKey ?? null;
       entry.term.options.theme = this.themeFor(dark, entry.profile);
       if (entry.term.element) container.appendChild(entry.term.element);
       else entry.term.open(container);
@@ -272,22 +327,50 @@ class TerminalRegistry {
   }
 
   /**
-   * Tracks whether the viewport is at the bottom. xterm's own scroll event
-   * fires for output as well as for the user, so the DOM element's scroll
-   * position — the thing the user actually manipulates with the wheel and
-   * the scrollbar — is the only honest source for "am I following?".
+   * Tracks whether the terminal should follow its output.
+   *
+   * Following is released by the USER scrolling up — a wheel up, or a grab
+   * of the scrollbar — and never by the viewport merely being off the
+   * bottom: xterm scrolls the viewport itself while it reflows for a resize
+   * or a full-screen TUI redraws, and a `scroll` event from one of those
+   * used to flip the flag off for good, after which new output (a CLI's
+   * prompt, drawn in the bottom rows) stayed below the fold. So `scroll`
+   * only ever re-arms following, when the viewport reaches the bottom by
+   * any route, including xterm's own scrollOnUserInput.
    */
   private watchViewport(entry: Entry): void {
     entry.detach?.();
-    const viewport = entry.element?.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return;
+    const host = entry.element;
+    const viewport = host?.querySelector<HTMLElement>(".xterm-viewport");
+    if (!host || !viewport) return;
+    const settle = () => {
+      entry.stick = viewportAtBottom(viewport);
+    };
     const onScroll = () => {
-      const distance =
-        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      entry.stick = distance <= BOTTOM_EPSILON;
+      if (viewportAtBottom(viewport)) entry.stick = true;
+    };
+    // On the container, not the viewport: xterm takes the wheel on its
+    // outer element, and over the text the viewport never sees it. Decided
+    // after the wheel has scrolled, so a wheel up with no scrollback to
+    // reveal leaves following on.
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) setTimeout(settle, 0);
+    };
+    // The scrollbar is the viewport's own; a press on it is a grab.
+    const onGrab = () => {
+      entry.stick = false;
+      window.addEventListener("mouseup", () => setTimeout(settle, 0), {
+        once: true,
+      });
     };
     viewport.addEventListener("scroll", onScroll, { passive: true });
-    entry.detach = () => viewport.removeEventListener("scroll", onScroll);
+    host.addEventListener("wheel", onWheel, { passive: true });
+    viewport.addEventListener("mousedown", onGrab);
+    entry.detach = () => {
+      viewport.removeEventListener("scroll", onScroll);
+      host.removeEventListener("wheel", onWheel);
+      viewport.removeEventListener("mousedown", onGrab);
+    };
   }
 
   write(termId: string, data: string): void {
@@ -535,21 +618,34 @@ class TerminalRegistry {
   }
 
   /**
-   * Goes through term.paste() rather than writing the text straight to the
-   * pty: that is what wraps it in bracketed-paste markers when the running
-   * program asked for them, so a shell or editor treats a multi-line paste
-   * as pasted text instead of a burst of typed Enter keys.
+   * Text goes through term.paste() rather than straight to the pty: that is
+   * what wraps it in bracketed-paste markers when the running program asked
+   * for them, so a shell or editor treats a multi-line paste as pasted text
+   * instead of a burst of typed Enter keys.
+   *
+   * An image (a screenshot tool's "copy image") has no bytes a terminal
+   * could paste. Claude Code and Codex read the clipboard image themselves
+   * when they get their paste-image key — what happens in a native
+   * terminal — so a CLI pane sends that key instead. Which key it is
+   * depends on the CLI and the platform (Claude Code on Windows wants
+   * Alt+V, Codex wants Ctrl+V), so the pane's owner supplies it. Only when
+   * an image is really there: a stray ^V is quoted-insert in bash and
+   * swallows the next key.
    */
   private async pasteFromClipboard(termId: string): Promise<void> {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text) this.entries.get(termId)?.term.paste(text);
-    } catch {
-      // clipboard unavailable (browser permission) — nothing to paste
+    const entry = this.entries.get(termId);
+    if (!entry) return;
+    const text = await readClipboardText();
+    if (text) {
+      entry.term.paste(text);
+      return;
     }
+    const key = entry.imagePasteKey;
+    if (key && (await clipboardHasImage())) entry.term.input(key);
   }
 
   dispose(termId: string): void {
+    this.inputInterceptors.delete(termId);
     const entry = this.entries.get(termId);
     if (entry) {
       entry.detach?.();

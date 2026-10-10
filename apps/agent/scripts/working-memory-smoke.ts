@@ -21,6 +21,7 @@ import { llmRequestDetail, llmRequestSummary } from "@atelier/shared";
 import { openDb } from "../src/storage/db.js";
 import {
   WorkingMemoryStore,
+  hitsInResult,
   pathsInResult,
 } from "../src/context/working-memory/index.js";
 import { buildLlmRequest } from "../src/orchestrator/llm-request.js";
@@ -192,8 +193,198 @@ async function workingMemory(): Promise<void> {
       .join(",") === "x,y,z",
     "pathsInResult walks nested results"
   );
+  const hits = hitsInResult({
+    matches: [
+      { path: "src/a.ts", row: 7, col: 2, line: "const label = 'Save';" },
+      { path: "src/a.ts", row: 9 },
+      { path: "src/b.ts", startLine: 3 },
+      { path: "src/c.ts", line: "text only, no number" },
+    ],
+  });
+  check(
+    hits.length === 3 &&
+      hits[0]!.path === "src/a.ts" &&
+      hits[0]!.line === 7 &&
+      hits[0]!.text === "const label = 'Save';" &&
+      hits[1]!.line === 3 &&
+      hits[2]!.line === undefined,
+    `hitsInResult keeps the first line per path (${JSON.stringify(hits)})`
+  );
+
+  await stoppedAttempts(db, files, disk);
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * The wrong-target case: an attempt the user stopped read and edited the
+ * wrong file; the follow-up names the right text. The stopped attempt's
+ * reads must be listed as unconfirmed, the file the user named must come
+ * first, and the file an earlier search for the named text found must be
+ * inlined under its own heading.
+ */
+async function stoppedAttempts(
+  db: ReturnType<typeof openDb>,
+  files: {
+    readFile(
+      rel: string,
+      opts?: { offset?: number; limit?: number }
+    ): Promise<{ content: string; totalLines?: number }>;
+  },
+  disk: Map<string, string>
+): Promise<void> {
+  db.prepare(
+    "INSERT INTO conversations(id, title, sdk_session_id, created_at, updated_at) " +
+      "VALUES('c2', 't', NULL, 1, 1)"
+  ).run();
+  const store = new WorkingMemoryStore(db);
+  // Padded so the ±40-line window (~700 tokens) overflows a 35% slice of
+  // a small block, which is what the sub-budget check below relies on.
+  const bigLines = Array.from(
+    { length: 120 },
+    (_, i) =>
+      `line ${i + 1}${i + 1 === 90 ? ' label="Save changes"' : ""} ` +
+      `${"x".repeat(30)}\n`
+  );
+  disk.set("src/i18n/en.ts", bigLines.join(""));
+  disk.set("src/wrong.tsx", "export const Wrong = () => null;\n");
+  disk.set("src/named.tsx", "export const Named = () => 'Save changes';\n");
+  disk.set("src/short.ts", "export const short = 1;\n");
+
+  // Task w1: a search for the user's text found the i18n file at line 90,
+  // but the attempt then read and edited wrong.tsx — and the user stopped it.
+  store.noteTool({
+    conversationId: "c2",
+    taskId: "w1",
+    name: "search_text",
+    input: { query: "Save changes" },
+    result: {
+      matches: [
+        { path: "src/i18n/en.ts", row: 90, col: 9, line: 'label="Save changes"' },
+      ],
+    },
+  });
+  store.noteTool({
+    conversationId: "c2",
+    taskId: "w1",
+    name: "read_file",
+    input: { path: "src/wrong.tsx" },
+    result: { content: disk.get("src/wrong.tsx") },
+  });
+  // A second, unrelated search whose HIT TEXT mentions the literal.
+  store.noteTool({
+    conversationId: "c2",
+    taskId: "w1",
+    name: "search_text",
+    input: { query: "short" },
+    result: {
+      matches: [{ path: "src/short.ts", row: 1, line: "save changes here too" }],
+    },
+  });
+  // An older row written before hits existed (paths only) must still parse.
+  store.noteSearch({
+    conversationId: "c2",
+    taskId: "w0",
+    tool: "search_workspace",
+    query: "unrelated",
+    paths: ["src/old.ts"],
+  });
+
+  const recalled = await store.recall({
+    conversationId: "c2",
+    currentTaskId: "w2",
+    files,
+    maxTokens: 3000,
+    demoteTaskIds: new Set(["w1"]),
+    preferPaths: ["src/named.tsx"],
+    literals: ["Save changes"],
+  });
+  const text = recalled.text;
+  check(
+    recalled.demoted === 1 &&
+      recalled.listed === 1 &&
+      text.includes(
+        "src/wrong.tsx — read by an attempt the user stopped — not a " +
+          "confirmed target; not inlined"
+      ) &&
+      !text.includes("--- src/wrong.tsx ---"),
+    `stopped attempt's read is listed, never inlined (demoted=${recalled.demoted})`
+  );
+  check(
+    recalled.inlined === 1 &&
+      text.includes("Files the user named in THIS request") &&
+      text.indexOf("--- src/named.tsx ---") <
+        text.indexOf("--- src/i18n/en.ts") &&
+      recalled.groundedPaths.includes("src/named.tsx"),
+    "a file the user named is inlined first and grounded, even if never read"
+  );
+  check(
+    recalled.located === 2 &&
+      text.includes("Files earlier searches located (current content)") &&
+      text.includes(
+        'src/i18n/en.ts (lines 50-120) — located by search_text "Save changes"'
+      ) &&
+      text.includes("--- src/i18n/en.ts (lines 50-120) ---") &&
+      text.includes("line 90 label=") &&
+      text.includes("line 50 x") &&
+      !text.includes("line 49 x"),
+    `search hit is inlined as the window around its line (located=${recalled.located})`
+  );
+  check(
+    text.includes('src/short.ts — located by search_text "short"; whole file') &&
+      recalled.groundedPaths.includes("src/short.ts") &&
+      !recalled.groundedPaths.includes("src/i18n/en.ts") &&
+      recalled.inlinedPaths.includes("src/i18n/en.ts"),
+    "a hit whose matched text carries the literal counts; only whole files ground"
+  );
+  check(
+    !text.includes("--- src/old.ts") && text.includes('search_workspace "unrelated"'),
+    "a search unrelated to the literal is replayed but locates nothing"
+  );
+
+  // The located section holds to its 35% sub-budget: with a tight block
+  // the big window is clipped rather than crowding out the rest.
+  const tight = await store.recall({
+    conversationId: "c2",
+    currentTaskId: "w2",
+    files,
+    maxTokens: 800,
+    demoteTaskIds: new Set(["w1"]),
+    literals: ["Save changes"],
+  });
+  const header = "--- src/i18n/en.ts (lines 50-120) ---\n";
+  const body = tight.text.split(header)[1]?.split("\n--- ")[0];
+  const fullWindow = bigLines.slice(49, 120).join("").length;
+  check(
+    tight.located >= 1 &&
+      body !== undefined &&
+      body.length < fullWindow &&
+      body.length / 4 <= Math.floor(800 * 0.35) + 1,
+    `located section is clipped to its 35% sub-budget (${body?.length} chars)`
+  );
+
+  // Without the demotion the same read would have been inlined by recency.
+  const undemoted = await store.recall({
+    conversationId: "c2",
+    currentTaskId: "w2",
+    files,
+    maxTokens: 3000,
+  });
+  check(
+    undemoted.demoted === 0 && undemoted.text.includes("--- src/wrong.tsx ---"),
+    "the same read is inlined when its task was not stopped"
+  );
+  const empty = await store.recall({
+    conversationId: "c-none",
+    currentTaskId: "w9",
+    files,
+    maxTokens: 3000,
+    preferPaths: ["src/named.tsx"],
+  });
+  check(
+    empty.inlined === 1 && empty.text.includes("--- src/named.tsx ---"),
+    "a named file rides in even for a conversation with no memory rows"
+  );
 }
 
 function llmRequestText(): void {

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ReasoningEffort } from "@atelier/protocol";
+import type { ReasoningEffort, TurnMode } from "@atelier/protocol";
 
 const VIBE_KEY = "atelier.vibe";
 const AUTO_REVIEW_KEY = "atelier.autoReview";
@@ -7,6 +7,7 @@ const AUTO_VALIDATE_KEY = "atelier.autoValidate";
 const CLI_MODE_KEY = "atelier.cliMode";
 const DEFAULTS_KEY = "atelier.composer.defaults";
 const RESOLVER_MODEL_KEY = "atelier.merge.aiModel";
+const GIT_DRAFT_MODEL_KEY = "atelier.git.draftModel";
 const PER_CHAT_KEY = "atelier.composer.byChat";
 /** Keys from when the picks were one global setting; read once, then dead. */
 const LEGACY_MODEL_KEY = "atelier.model";
@@ -22,7 +23,12 @@ export type EffortChoice = "default" | ReasoningEffort;
 export interface ComposerPrefs {
   model: ModelChoice;
   effort: EffortChoice;
-  planMode: boolean;
+  /**
+   * Ask / Plan / Code for the next turn. Replaces the old planMode
+   * boolean: the three are one choice, and two controls that could
+   * disagree about whether a turn edits is not a state worth having.
+   */
+  turnMode: TurnMode;
   /**
    * Run the task through Atelier's knowledge engine. Off means a plain
    * Claude/Codex turn: no retrieval, impact, plan, review or memory.
@@ -112,8 +118,9 @@ function readDefaults(): ComposerPrefs {
       stored.effort ??
       ((localStorage.getItem(LEGACY_EFFORT_KEY) as EffortChoice | null) ??
         "default"),
-    // Plan mode is a per-task decision; a new chat never inherits it.
-    planMode: false,
+    // The turn mode is a per-task decision; a new chat never inherits it
+    // and always opens ready to work.
+    turnMode: "code",
     // Nor does a new chat inherit a prompt file: it sticks where it was
     // chosen, rather than quietly governing every conversation after it.
     promptFile: "",
@@ -131,6 +138,18 @@ function readDefaults(): ComposerPrefs {
 function readResolverModel(): string {
   const own = localStorage.getItem(scoped(RESOLVER_MODEL_KEY));
   return own ?? localStorage.getItem(RESOLVER_MODEL_KEY) ?? "";
+}
+
+/**
+ * Model for the git drafts (commit message, PR title/body). Its own pick
+ * for the same reason as the resolver's: the drafts were locked to the
+ * app-wide selection, and a cheap local model is often the right tool for
+ * a commit message when the chat runs on something heavier. "" means the
+ * app's selected model.
+ */
+function readGitDraftModel(): string {
+  const own = localStorage.getItem(scoped(GIT_DRAFT_MODEL_KEY));
+  return own ?? localStorage.getItem(GIT_DRAFT_MODEL_KEY) ?? "";
 }
 
 /**
@@ -177,6 +196,9 @@ interface PreferencesStore {
   /** Model the AI merge resolver runs on; "" is the resolver's default. */
   resolverModel: string;
   setResolverModel: (value: string) => void;
+  /** Model the git drafts run on; "" is the app's selected model. */
+  gitDraftModel: string;
+  setGitDraftModel: (value: string) => void;
   /** Applied to a chat that has never had a pick of its own. */
   defaults: ComposerPrefs;
   /**
@@ -228,6 +250,12 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
     set({ resolverModel: value });
   },
 
+  gitDraftModel: readGitDraftModel(),
+  setGitDraftModel: (value) => {
+    localStorage.setItem(scoped(GIT_DRAFT_MODEL_KEY), value);
+    set({ gitDraftModel: value });
+  },
+
   defaults: readDefaults(),
   byChat: readByChat(),
 
@@ -241,6 +269,7 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
       autoValidate: readAutoValidate(),
       cliMode: readCliMode(),
       resolverModel: readResolverModel(),
+      gitDraftModel: readGitDraftModel(),
       defaults: readDefaults(),
       byChat: readByChat(),
     });
@@ -266,7 +295,7 @@ export const usePreferencesStore = create<PreferencesStore>((set) => ({
       const defaults: ComposerPrefs = {
         ...s.defaults,
         ...patch,
-        planMode: false,
+        turnMode: "code",
         promptFile: "",
       };
       localStorage.setItem(scoped(DEFAULTS_KEY), JSON.stringify(defaults));
