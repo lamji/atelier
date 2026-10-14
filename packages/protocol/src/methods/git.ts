@@ -451,6 +451,25 @@ export const gitMethods = {
       dirty: z.array(z.string()),
     }),
   },
+  /**
+   * The resolver's fast path: one tool-less model call per file, with the
+   * conflicted hunks in the prompt. Files it resolves are written and
+   * staged; the rest come back untouched with the reason, for the agent.
+   */
+  "git.aiResolveConflicts": {
+    params: z.object({
+      paths: z.array(z.string()),
+      ours: z.string(),
+      theirs: z.string(),
+      kind: z.string(),
+      instruction: z.string().optional(),
+      model: z.string().optional(),
+    }),
+    result: z.object({
+      resolved: z.array(z.string()),
+      skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
+    }),
+  },
   /** `git merge|rebase|cherry-pick|revert --abort`, per the state in flight. */
   "git.mergeAbort": {
     params: z.object({}).optional(),

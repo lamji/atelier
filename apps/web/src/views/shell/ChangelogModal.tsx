@@ -9,6 +9,26 @@ export interface ChangelogModalProps {
   onClose: () => void;
 }
 
+/** The heading a release puts over its list of changes. */
+const CHANGES_HEADING = /^#{1,6}\s*(what'?s new|changes)\s*$/i;
+const ANY_HEADING = /^#{1,6}\s/;
+
+/**
+ * Only the list of changes out of a release body. The rest of it — where to
+ * download the installer, how to verify it — is for someone who has not
+ * installed this version yet, and the reader here just did. A body with no
+ * such section is shown whole.
+ */
+export function changesOf(notes: string): string {
+  const lines = notes.split(/\r?\n/);
+  const start = lines.findIndex((line) => CHANGES_HEADING.test(line.trim()));
+  if (start === -1) return notes;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => ANY_HEADING.test(line));
+  const section = (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
+  return section || notes;
+}
+
 /**
  * What changed, shown once after an upgrade.
  *
@@ -58,10 +78,12 @@ export function ChangelogModal({ entry, onClose }: ChangelogModalProps) {
           </Button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4">
           {entry.notes ? (
-            <div className="chat-md text-sm">
-              <Markdown remarkPlugins={[remarkGfm]}>{entry.notes}</Markdown>
+            <div className="chat-md text-sm [&_li]:my-1.5 [&_ul]:pl-5">
+              <Markdown remarkPlugins={[remarkGfm]}>
+                {changesOf(entry.notes)}
+              </Markdown>
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">

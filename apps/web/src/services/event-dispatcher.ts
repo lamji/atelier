@@ -29,6 +29,7 @@ import {
 } from "@/lib/frontend-review";
 import { isCliConsoleSession, useCliConsoleStore } from "./cli-console.js";
 import { terminalRegistry } from "./terminal-registry.js";
+import { syncRoster } from "./terminal-roster.js";
 import { useConnectionStore } from "@/state/connection.store";
 import { useDbApprovalStore } from "@/state/db-approval.store";
 import { useGitFlowStore } from "@/state/git-flow.store";
@@ -56,6 +57,7 @@ const NON_TIMELINE_TOPICS = new Set([
   "chat.message.completed",
   "agent.thinking.delta",
   "terminal.data",
+  "terminal.cwd",
   // High-frequency during scans; rendered live in the Knowledge panel.
   "knowledge.indexing.progress",
   "knowledge.features.scan",
@@ -780,6 +782,15 @@ function dispatch(frame: EventFrame): void {
           )
           .catch(() => undefined);
       }
+      break;
+    }
+    case "terminal.cwd": {
+      // Saved straight away: the app can be closed at any prompt, and the
+      // roster is what reopens this terminal in the same directory.
+      const moved = useTerminalStore
+        .getState()
+        .setCwd(String(payload.termId), String(payload.cwd));
+      if (moved) syncRoster();
       break;
     }
     case "terminal.session.closed": {

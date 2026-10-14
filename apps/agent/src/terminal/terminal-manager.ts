@@ -6,32 +6,73 @@ import type { TerminalSession } from "@atelier/protocol";
 import { newId } from "@atelier/shared";
 import type { Db } from "../storage/db.js";
 import type { EventBus } from "../events/event-bus.js";
+import {
+  CwdScanner,
+  isUsableDir,
+  probeProcessCwd,
+  sameDir,
+  shellLaunch,
+} from "./shell-cwd.js";
 
+/**
+ * Output arriving closer together than this is coalesced into one frame. A
+ * terminal that has been quiet for longer is flushed straight away instead:
+ * that chunk is a keystroke's echo, and a timer in front of it is latency
+ * paid on every key (Windows rounds a 16 ms timer up to ~31 ms).
+ */
 const FLUSH_MS = 16;
 const FLUSH_BYTES = 8 * 1024;
 const HISTORY_CAP = 200_000;
-const HISTORY_SAVE_MS = 1000;
+/** History is kept as chunks; past this many they are folded into one. */
+const HISTORY_MAX_CHUNKS = 512;
+const HISTORY_SAVE_MS = 5000;
+/** Output has to go quiet this long before a POSIX shell's cwd is re-read. */
+const CWD_PROBE_MS = 400;
+/** A warm shell nobody claimed is ended after this long. */
+const WARM_SHELL_TTL_MS = 60_000;
 
 interface ManagedTerminal {
   session: TerminalSession;
   pty: IPty;
   buffer: string;
   flushTimer: ReturnType<typeof setTimeout> | null;
-  history: string;
+  flushSoon: ReturnType<typeof setImmediate> | null;
+  lastFlushAt: number;
+  /** Scrollback as it arrived; joined only when somebody reads it. */
+  history: string[];
+  historyLength: number;
   historyDirty: boolean;
   /** False once the user explicitly closes this terminal. */
   persistOnExit: boolean;
+  cwdScanner: CwdScanner;
+  cwdProbeTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * False for the warm shell nobody has asked for yet: it is not listed,
+   * publishes nothing, and only collects its own startup output.
+   */
+  adopted: boolean;
+}
+
+interface CreateOptions {
+  cwd?: string;
+  name?: string;
+  cols?: number;
+  rows?: number;
 }
 
 /**
  * Owns all PTY sessions (ConPTY on Windows). Output is coalesced
- * (16 ms / 8 KB) into terminal.data events; history survives UI reloads
- * via SQLite and is capped per session.
+ * (16 ms / 8 KB) into terminal.data events, except the first chunk after a
+ * quiet spell, which goes out at once; history survives UI reloads via
+ * SQLite and is capped per session.
  */
 export class TerminalManager {
   private terminals = new Map<string, ManagedTerminal>();
   private saveTimer: ReturnType<typeof setInterval> | null = null;
   private shuttingDown = false;
+  /** A shell started ahead of the create that will claim it. */
+  private warm: ManagedTerminal | null = null;
+  private warmTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private db: Db,
@@ -46,33 +87,65 @@ export class TerminalManager {
     this.db.prepare("DELETE FROM terminal_history").run();
   }
 
-  create(opts: {
-    cwd?: string;
-    name?: string;
-    cols?: number;
-    rows?: number;
-  }): TerminalSession {
-    return this.spawn(opts);
+  create(opts: CreateOptions): TerminalSession {
+    // A restored terminal asks for the directory it was left in, and that
+    // directory may have been deleted or renamed since.
+    const cwd = isUsableDir(opts.cwd) ? opts.cwd : this.defaultCwd;
+    const managed =
+      this.takeWarm(cwd) ?? this.launch(cwd, opts.cols ?? 80, opts.rows ?? 24);
+    return this.adopt(managed, opts);
   }
 
-  private spawn(
-    opts: {
-      cwd?: string;
-      name?: string;
-      cols?: number;
-      rows?: number;
+  /**
+   * Start a shell now for the create that is about to come.
+   *
+   * Spawning a pty is synchronous and, on Windows, slow (0.2-0.7 s measured
+   * here), and PowerShell then takes about as long again to load its profile
+   * and reach a prompt. Paid at create time, that is all dead air between
+   * choosing a CLI and seeing it start. Paid here — when the picker opens —
+   * the shell is already waiting when the choice is made.
+   */
+  prewarm(): void {
+    if (this.shuttingDown || this.warm) return;
+    try {
+      this.warm = this.launch(this.defaultCwd, 80, 24);
+    } catch {
+      // No shell to warm; the real create will report the failure.
+      return;
     }
-  ): TerminalSession {
-    const id = newId("term");
-    const cols = opts.cols ?? 80;
-    const rows = opts.rows ?? 24;
-    const cwd = opts.cwd ?? this.defaultCwd;
-    const shell =
-      process.platform === "win32"
-        ? "powershell.exe"
-        : (process.env.SHELL ?? "bash");
+    this.warmTimer = setTimeout(() => this.dropWarm(), WARM_SHELL_TTL_MS);
+  }
 
-    const proc = pty.spawn(shell, [], {
+  /** The warm shell, if there is one and it sits in the wanted directory. */
+  private takeWarm(cwd: string): ManagedTerminal | null {
+    const warm = this.warm;
+    if (!warm || !warm.session.alive) return null;
+    if (!sameDir(cwd, warm.session.cwd)) return null;
+    this.forgetWarm();
+    return warm;
+  }
+
+  private forgetWarm(): void {
+    if (this.warmTimer) clearTimeout(this.warmTimer);
+    this.warmTimer = null;
+    this.warm = null;
+  }
+
+  private dropWarm(): void {
+    const warm = this.warm;
+    this.forgetWarm();
+    if (!warm) return;
+    try {
+      killTree(warm.pty);
+    } catch {
+      // already dead
+    }
+  }
+
+  /** Starts a shell and wires its output; nothing is announced yet. */
+  private launch(cwd: string, cols: number, rows: number): ManagedTerminal {
+    const shell = shellLaunch();
+    const proc = pty.spawn(shell.file, shell.args, {
       name: "xterm-256color",
       cols,
       rows,
@@ -81,8 +154,8 @@ export class TerminalManager {
     });
 
     const session: TerminalSession = {
-      id,
-      name: opts.name ?? `Terminal ${this.terminals.size + 1}`,
+      id: newId("term"),
+      name: "",
       cwd,
       cols,
       rows,
@@ -94,26 +167,57 @@ export class TerminalManager {
       pty: proc,
       buffer: "",
       flushTimer: null,
-      history: "",
+      flushSoon: null,
+      lastFlushAt: 0,
+      history: [],
+      historyLength: 0,
       historyDirty: false,
       persistOnExit: true,
+      cwdScanner: new CwdScanner(),
+      cwdProbeTimer: null,
+      adopted: false,
     };
-    this.terminals.set(id, managed);
 
     proc.onData((data) => this.onData(managed, data));
     proc.onExit(({ exitCode }) => {
       this.flush(managed);
+      if (managed.cwdProbeTimer) clearTimeout(managed.cwdProbeTimer);
       session.alive = false;
+      if (!managed.adopted) {
+        if (this.warm === managed) this.forgetWarm();
+        return;
+      }
       if (this.shuttingDown) return;
-      this.bus.publish("terminal.exit", { termId: id, exitCode });
-      this.bus.publish("terminal.session.closed", { termId: id });
+      this.bus.publish("terminal.exit", { termId: session.id, exitCode });
+      this.bus.publish("terminal.session.closed", { termId: session.id });
       if (managed.persistOnExit) this.saveHistoryRow(managed);
-      else this.deleteHistoryRow(id);
-      this.terminals.delete(id);
+      else this.deleteHistoryRow(session.id);
+      this.terminals.delete(session.id);
     });
+    return managed;
+  }
+
+  /** Lists a launched shell as a session and announces it. */
+  private adopt(managed: ManagedTerminal, opts: CreateOptions): TerminalSession {
+    const { session } = managed;
+    session.name = opts.name ?? `Terminal ${this.terminals.size + 1}`;
+    session.createdAt = Date.now();
+    const cols = opts.cols ?? session.cols;
+    const rows = opts.rows ?? session.rows;
+    if (cols !== session.cols || rows !== session.rows) {
+      managed.pty.resize(Math.max(2, cols), Math.max(2, rows));
+      session.cols = cols;
+      session.rows = rows;
+    }
+    // Whatever a warm shell printed while it waited is in its history, which
+    // is what the UI replays on mount — sending it again would double it.
+    this.cancelFlush(managed);
+    managed.buffer = "";
+    managed.adopted = true;
+    this.terminals.set(session.id, managed);
 
     this.bus.publish("terminal.session.created", {
-      termId: id,
+      termId: session.id,
       name: session.name,
     });
     // Persist the identity immediately. A newly opened CLI session must still
@@ -124,26 +228,92 @@ export class TerminalManager {
 
   private onData(managed: ManagedTerminal, data: string): void {
     managed.buffer += data;
-    managed.history =
-      managed.history.length + data.length > HISTORY_CAP
-        ? (managed.history + data).slice(-HISTORY_CAP)
-        : managed.history + data;
-    managed.historyDirty = true;
+    this.remember(managed, data);
+    this.trackCwd(managed, data);
     if (managed.buffer.length >= FLUSH_BYTES) {
       this.flush(managed);
       return;
     }
-    managed.flushTimer ??= setTimeout(() => this.flush(managed), FLUSH_MS);
+    if (managed.flushTimer || managed.flushSoon) return;
+    const quietFor = Date.now() - managed.lastFlushAt;
+    if (quietFor >= FLUSH_MS) {
+      // setImmediate, not a direct flush: it still gathers every chunk the
+      // pty delivered in this turn of the loop, and costs no timer tick.
+      managed.flushSoon = setImmediate(() => this.flush(managed));
+      return;
+    }
+    managed.flushTimer = setTimeout(
+      () => this.flush(managed),
+      FLUSH_MS - quietFor
+    );
+  }
+
+  /**
+   * Appends to the scrollback without copying it. Concatenating and slicing
+   * a 200 KB string per chunk is megabytes a second of garbage while a TUI
+   * redraws, on the thread that also carries the keystrokes.
+   */
+  private remember(managed: ManagedTerminal, data: string): void {
+    managed.history.push(data);
+    managed.historyLength += data.length;
+    managed.historyDirty = true;
+    while (
+      managed.history.length > 1 &&
+      managed.historyLength - managed.history[0]!.length >= HISTORY_CAP
+    ) {
+      managed.historyLength -= managed.history.shift()!.length;
+    }
+    if (managed.history.length > HISTORY_MAX_CHUNKS) this.historyText(managed);
+  }
+
+  /** The scrollback as one capped string, folded back into a single chunk. */
+  private historyText(managed: ManagedTerminal): string {
+    const joined = managed.history.join("");
+    const text =
+      joined.length > HISTORY_CAP ? joined.slice(-HISTORY_CAP) : joined;
+    managed.history = text ? [text] : [];
+    managed.historyLength = text.length;
+    return text;
+  }
+
+  /**
+   * Follow the shell as the user moves around, so the terminal can be
+   * reopened where it was left. See shell-cwd.ts for the two mechanisms.
+   */
+  private trackCwd(managed: ManagedTerminal, data: string): void {
+    const reported = managed.cwdScanner.push(data);
+    if (reported) this.noteCwd(managed, reported);
+    if (process.platform === "win32") return;
+    if (managed.cwdProbeTimer) clearTimeout(managed.cwdProbeTimer);
+    managed.cwdProbeTimer = setTimeout(() => {
+      managed.cwdProbeTimer = null;
+      void probeProcessCwd(managed.pty.pid).then((cwd) => {
+        if (cwd && managed.session.alive) this.noteCwd(managed, cwd);
+      });
+    }, CWD_PROBE_MS);
+  }
+
+  private noteCwd(managed: ManagedTerminal, cwd: string): void {
+    if (sameDir(cwd, managed.session.cwd)) return;
+    managed.session.cwd = cwd;
+    if (!managed.adopted) return;
+    this.bus.publish("terminal.cwd", { termId: managed.session.id, cwd });
+  }
+
+  private cancelFlush(managed: ManagedTerminal): void {
+    if (managed.flushTimer) clearTimeout(managed.flushTimer);
+    if (managed.flushSoon) clearImmediate(managed.flushSoon);
+    managed.flushTimer = null;
+    managed.flushSoon = null;
   }
 
   private flush(managed: ManagedTerminal): void {
-    if (managed.flushTimer) {
-      clearTimeout(managed.flushTimer);
-      managed.flushTimer = null;
-    }
+    this.cancelFlush(managed);
     if (!managed.buffer) return;
     const data = managed.buffer;
     managed.buffer = "";
+    managed.lastFlushAt = Date.now();
+    if (!managed.adopted) return;
     this.bus.publish("terminal.data", { termId: managed.session.id, data });
   }
 
@@ -191,7 +361,7 @@ export class TerminalManager {
 
   getHistory(termId: string): string {
     const managed = this.terminals.get(termId);
-    if (managed) return managed.history;
+    if (managed) return this.historyText(managed);
     const row = this.db
       .prepare("SELECT data FROM terminal_history WHERE term_id = ?")
       .get(termId) as { data: string } | undefined;
@@ -225,7 +395,7 @@ export class TerminalManager {
         managed.session.id,
         managed.session.name,
         managed.session.cwd,
-        managed.history,
+        this.historyText(managed),
         Date.now()
       );
   }
@@ -238,6 +408,7 @@ export class TerminalManager {
     if (this.saveTimer) clearInterval(this.saveTimer);
     this.saveDirtyHistory();
     this.shuttingDown = true;
+    this.dropWarm();
     for (const managed of this.terminals.values()) {
       try {
         killTree(managed.pty);

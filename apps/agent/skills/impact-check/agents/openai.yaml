@@ -1,0 +1,4 @@
+interface:
+  display_name: "Impact Check"
+  short_description: "Tree-sitter impact of a change, before the edit and after the fix"
+  default_prompt: "Use $impact-check: keep every site in the impact list working, then run the --diff check and the related tests after the fix."

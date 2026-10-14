@@ -160,14 +160,28 @@ function editDistance(a: string[], b: string[]): number | null {
   return null;
 }
 
+/**
+ * A file's text as lines, whichever ending it uses.
+ *
+ * The two sides of a diff do not always agree on that: under git's
+ * `core.autocrlf` the "before" comes out of the index with LF endings while
+ * the working file on disk has CRLF. Split on LF alone, every line of the
+ * file then differs by its trailing carriage return, and a ten-line edit
+ * reads as the whole file removed and added back. Git itself does not count
+ * that as a change, so neither does this.
+ */
+function toLines(text: string): string[] {
+  return text.split(/\r?\n/);
+}
+
 /** Line delta for a tab's badge, with the same edit-distance cap as the rows. */
 export function countChanges(
   before: string,
   after: string
 ): { added: number; removed: number } {
   if (before === after) return { added: 0, removed: 0 };
-  const a = before.split("\n");
-  const b = after.split("\n");
+  const a = toLines(before);
+  const b = toLines(after);
   const distance = editDistance(a, b);
   if (distance === null) return multisetStat(a, b);
   return {
@@ -202,8 +216,8 @@ function rewriteRows(a: string[], b: string[]): DiffRow[] {
  * lines between hunks.
  */
 export function buildUnifiedDiff(before: string, after: string): UnifiedDiff {
-  const a = before.split("\n");
-  const b = after.split("\n");
+  const a = toLines(before);
+  const b = toLines(after);
   const ops = diffOps(a, b);
 
   const rows: DiffRow[] = [];

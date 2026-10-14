@@ -5,11 +5,14 @@
  * process, and that process dies with the app. So the *processes* cannot be
  * restored — no live shell, no scrollback. What is restored is the roster:
  * reopening a workspace recreates the same terminals, with the same names, in
- * the same order, so the panel you left is the panel you come back to.
+ * the same order and each in the directory it was left in, so the panel you
+ * left is the panel you come back to — without a `cd` to get back to work.
  *
  * Scoped per project, like the composer preferences: terminals belong to the
  * workspace you opened them in.
  */
+
+import { useTerminalStore } from "@/state/terminal.store";
 
 const KEY = "atelier.terminals";
 /** A runaway roster would spawn that many shells on the next launch. */
@@ -26,8 +29,28 @@ function storageKey(): string {
   return scope ? `${KEY}::${scope}` : KEY;
 }
 
-/** Saved terminal names, oldest first. Empty when nothing is on record. */
-export function readRoster(): string[] {
+export interface RosterEntry {
+  name: string;
+  /** Where the shell was last seen; absent on rosters saved before this. */
+  cwd?: string;
+}
+
+/** Rosters used to be bare names, so a string is still a valid entry. */
+function toEntry(value: unknown): RosterEntry | null {
+  if (typeof value === "string") {
+    const name = value.trim();
+    return name ? { name } : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const { name, cwd } = value as { name?: unknown; cwd?: unknown };
+  if (typeof name !== "string" || !name.trim()) return null;
+  const entry: RosterEntry = { name: name.trim() };
+  if (typeof cwd === "string" && cwd) entry.cwd = cwd;
+  return entry;
+}
+
+/** Saved terminals, oldest first. Empty when nothing is on record. */
+export function readRoster(): RosterEntry[] {
   if (!scope) return [];
   try {
     const raw = localStorage.getItem(storageKey());
@@ -35,26 +58,40 @@ export function readRoster(): string[] {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((name): name is string => typeof name === "string")
-      .map((name) => name.trim())
-      .filter(Boolean)
+      .map(toEntry)
+      .filter((entry): entry is RosterEntry => entry !== null)
       .slice(0, MAX_TERMINALS);
   } catch {
     return [];
   }
 }
 
-/** Record the current terminals. Called whenever the set or a name changes. */
-export function writeRoster(names: string[]): void {
+/** Record the current terminals. */
+export function writeRoster(entries: RosterEntry[]): void {
   if (!scope) return;
   try {
     localStorage.setItem(
       storageKey(),
-      JSON.stringify(names.slice(0, MAX_TERMINALS))
+      JSON.stringify(entries.slice(0, MAX_TERMINALS))
     );
   } catch {
     // A full or blocked localStorage costs the roster, not the terminals.
   }
+}
+
+/**
+ * Persist the dock's terminals as they stand — tab order, display names and
+ * current directories — for the next launch. Called whenever any of those
+ * change.
+ */
+export function syncRoster(): void {
+  const { sessions, labels } = useTerminalStore.getState();
+  writeRoster(
+    sessions.map((session) => ({
+      name: labels[session.id] ?? session.name,
+      cwd: session.cwd,
+    }))
+  );
 }
 
 /**

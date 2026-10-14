@@ -2,7 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { newId } from "@atelier/shared";
 import type { CliHistoryEntry, ModelOption } from "@atelier/protocol";
 import { AnimatePresence } from "framer-motion";
-import { Bot, Loader2, Plus, Search, Trash2, X } from "lucide-react";
+import {
+  Bot,
+  History,
+  Loader2,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   Panel,
   PanelGroup,
@@ -25,6 +33,8 @@ import { Select } from "@/components/ui/select";
 import { Dock } from "./dock/Dock";
 import { ChatPanel } from "@/views/chat/ChatPanel";
 import { CliConsolePane } from "@/views/cli/CliConsolePane";
+import { CliDocViewer } from "@/views/cli/CliDocViewer";
+import { useCliDocsStore } from "@/services/cli-docs";
 import { CliRecoveryPane } from "@/views/cli/CliRecoveryPane";
 import { CliProviderModal } from "@/views/cli/CliProviderModal";
 import { CliSessionListPanel } from "@/views/cli/CliSessionListPanel";
@@ -637,15 +647,6 @@ export function AppShell() {
     !knowledge.welcomeDismissed &&
     knowledge.stats?.lastIndexedAt == null;
 
-  // Keep every CLI row visible and group Claude and Codex above agent chats.
-  const visibleAgentSessions = (() => {
-    const priority = (session: (typeof sessions.sessionList)[number]) => {
-      const providerId = cliChats[session.conversation.id]?.providerId;
-      return providerId === "claude" ? 0 : providerId === "codex" ? 1 : 2;
-    };
-    return [...sessions.sessionList].sort((a, b) => priority(a) - priority(b));
-  })();
-
   // History owns the main pane while it is open. Agents keeps its selected
   // conversation and CLI bindings, so returning can restore that view.
   const openCliHistory = async (entry: CliHistoryEntry) => {
@@ -694,19 +695,25 @@ export function AppShell() {
     if (cliMode && cliHistoryOpen) void closeCliHistory().catch(() => undefined);
   }, [cliMode, cliHistoryOpen]);
 
-  const leftPanel =
-    activeView === "agents" ? (
-      // CLI mode owns the whole conversation surface, so the chat sessions
-      // are hidden with it: the rail's Agents slot lists the CLI sessions
-      // of each provider instead. The chats are only out of sight — the
-      // list comes back untouched when the mode is switched off.
-      cliMode ? (
+  // The Files view keeps the session in a side panel; its history button
+  // swaps the terminal for the session list, and picking a row swaps back.
+  const [sideSessionsOpen, setSideSessionsOpen] = useState(false);
+  // CLI mode owns the whole conversation surface, so the chat sessions
+  // are hidden with it: the rail's Agents slot lists the CLI sessions
+  // of each provider instead. The chats are only out of sight — the
+  // list comes back untouched when the mode is switched off.
+  // The side panel's own header already toggles the list, so the copy
+  // shown there leaves out the list's CLI-history toggle.
+  const renderAgentsList = (historyToggle = true) => cliMode ? (
         <CliSessionListPanel
-          onActivateSession={() => editor.setRightTab("chat")}
+          onActivateSession={() => {
+            editor.setRightTab("chat");
+            setSideSessionsOpen(false);
+          }}
         />
       ) : (
         <SessionListPanel
-          sessions={visibleAgentSessions}
+          sessions={sessions.sessionList}
           selectedId={sessions.selectedId}
           showCliHistory={cliHistoryOpen}
           selectedCliHistoryId={selectedCliHistoryId}
@@ -719,7 +726,10 @@ export function AppShell() {
               return closeCliHistory();
             }
           }}
-          onSelect={sessions.selectSession}
+          onSelect={(conversationId) => {
+            sessions.selectSession(conversationId);
+            setSideSessionsOpen(false);
+          }}
           onCreate={() => useCliConsoleStore.getState().openProviderPicker()}
           onRename={(conversationId, title) => {
             const binding = useCliConsoleStore.getState().chats[conversationId];
@@ -728,8 +738,14 @@ export function AppShell() {
           }}
           onDelete={(id) => void deleteAgentSession(id)}
           onResumeCliHistory={openCliHistory}
+          historyToggle={historyToggle}
         />
-      )
+      );
+  const agentsListPanel = renderAgentsList();
+
+  const leftPanel =
+    activeView === "agents" ? (
+      agentsListPanel
     ) : activeView === "explorer" ? (
       <FileTreePanel vm={explorer} />
     ) : activeView === "markdown" ? (
@@ -875,6 +891,33 @@ export function AppShell() {
     [cliHistoryOpen, cliMode, historyCliLive, historyTermId, boundCliPending, cliBootstrapped, boundCliNeedsRecovery, recoveryPane, restoringCliPane, showCliConsole, sessions.error]
   );
 
+  // A session's documentation covers the main view until it is closed or
+  // another session is picked. Laid over the pane, never in place of it: the
+  // terminal underneath stays mounted and running.
+  const docsOpenFor = useCliDocsStore((s) => s.openFor);
+  useEffect(() => {
+    const { openFor, close } = useCliDocsStore.getState();
+    if (openFor !== null && openFor !== sessions.selectedId) close();
+  }, [sessions.selectedId]);
+  // The viewer lives on the session's pane, so opening it brings that pane
+  // forward even when a file tab was showing.
+  useEffect(() => {
+    if (docsOpenFor !== null) editor.setRightTab("chat");
+  }, [docsOpenFor, editor.setRightTab]);
+  const docViewer =
+    docsOpenFor !== null && docsOpenFor === sessions.selectedId ? (
+      <CliDocViewer conversationId={docsOpenFor} />
+    ) : null;
+  const mainPane = useMemo(
+    () => (
+      <div className="relative h-full">
+        {chatPane}
+        {docViewer}
+      </div>
+    ),
+    [chatPane, docViewer]
+  );
+
   const previewSessionOptions = useMemo(
     () =>
       sessions.sessionList.length > 0
@@ -900,6 +943,74 @@ export function AppShell() {
     sessions.sessionList.find(
       (session) => session.conversation.id === previewDeletingId
     ) ?? null;
+
+  // The picked session decides the box in a narrow column too: a CLI row is
+  // its terminal, any other row the chat.
+  const compactSessionPane = cliMode ? (
+    <CliConsolePane compact />
+  ) : cliHistoryOpen ? (
+    historyCliLive ? (
+      <CliConsolePane compact sessionId={historyTermId} />
+    ) : (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        Select a saved Claude or Codex session.
+      </div>
+    )
+  ) : boundCliPending && cliBootstrapped ? (
+    restoringCliPane
+  ) : boundCliNeedsRecovery && recoveryPane ? (
+    recoveryPane
+  ) : showCliConsole ? (
+    <CliConsolePane compact />
+  ) : (
+    <ChatPanel compact shellError={sessions.error} />
+  );
+
+  /*
+   * The session beside the Files view: reading code and talking to the
+   * agent about it happen together, so the active session stays on screen
+   * instead of a dock switch away. The terminal stays mounted under the
+   * list, so opening the list never restarts or refits it.
+   */
+  const sideSessionTitle = sideSessionsOpen
+    ? "Sessions"
+    : (currentSessionTitle ?? "Session");
+  const sideSessionToggleLabel = sideSessionsOpen
+    ? "Back to the session"
+    : "Show sessions";
+  const sideSessionPanel = (
+    <div className="flex h-full flex-col">
+      <div className="island-header justify-between">
+        <span className="icon-tile icon-tile-sm">
+          <Bot className="h-3.5 w-3.5" />
+        </span>
+        <span className="island-title min-w-0 truncate" title={sideSessionTitle}>
+          {sideSessionTitle}
+        </span>
+        <button
+          type="button"
+          title={sideSessionToggleLabel}
+          aria-label={sideSessionToggleLabel}
+          aria-pressed={sideSessionsOpen}
+          onClick={() => setSideSessionsOpen((open) => !open)}
+          className="tool-btn ml-auto"
+        >
+          {sideSessionsOpen ? (
+            <X className="h-4 w-4" />
+          ) : (
+            <History className="h-4 w-4" />
+          )}
+        </button>
+      </div>
+      <div className="relative min-h-0 flex-1">
+        {docViewer}
+        {compactSessionPane}
+        {sideSessionsOpen && (
+          <div className="absolute inset-0 z-30 bg-panel">{renderAgentsList(false)}</div>
+        )}
+      </div>
+    </div>
+  );
 
   const previewAgentPanel =
     !cliMode && agentSurface === "preview" ? (
@@ -1010,26 +1121,9 @@ export function AppShell() {
             />
           )}
         </div>
-        {/* The picked session decides the box here too: a CLI row is
-            its terminal, any other row the chat. */}
-        <div className="min-h-0 flex-1">
-          {cliHistoryOpen ? (
-            historyCliLive ? (
-              <CliConsolePane compact sessionId={historyTermId} />
-            ) : (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                Select a saved Claude or Codex session.
-              </div>
-            )
-          ) : boundCliPending && cliBootstrapped ? (
-            restoringCliPane
-          ) : boundCliNeedsRecovery && recoveryPane ? (
-            recoveryPane
-          ) : showCliConsole ? (
-            <CliConsolePane compact />
-          ) : (
-            <ChatPanel compact shellError={sessions.error} />
-          )}
+        <div className="relative min-h-0 flex-1">
+          {docViewer}
+          {compactSessionPane}
         </div>
       </div>
     ) : (
@@ -1092,6 +1186,7 @@ export function AppShell() {
       }
       onSelectAgent={() => {
         if (cliHistoryOpen) void closeCliHistory().catch(() => undefined);
+        if (activeView !== "agents") editor.setRightTab("chat");
         setAgentSurface("agent");
         setActiveView("agents");
       }}
@@ -1110,14 +1205,26 @@ export function AppShell() {
       editor.setRightTab("chat");
       setAgentSurface("agent");
       setActiveView("agents");
-      await ensureCliSessions();
+      // Listing is only owed once per workspace; after that the store is
+      // kept current by events, and re-listing just delays the new CLI.
+      if (!useCliConsoleStore.getState().bootstrapped) {
+        await ensureCliSessions();
+      }
       if (cliMode) {
         const termId = await createCliSession(providerId);
         if (title) renameCliSession(termId, title);
         return;
       }
-      const termId = await createCliSession(providerId);
-      const conversationId = await sessions.createSession();
+      // The pty and its Agents row do not depend on each other, so neither
+      // waits for the other.
+      const creatingRow = sessions.createSession().catch(() => null);
+      const termId = await createCliSession(providerId).catch(async (error) => {
+        // No CLI to stand in for: do not leave its empty row behind.
+        const orphan = await creatingRow;
+        if (orphan) await sessions.deleteSession(orphan).catch(() => undefined);
+        throw error;
+      });
+      const conversationId = await creatingRow;
       if (!conversationId) {
         await closeCliSession(termId);
         throw new Error("Could not create an Agents session.");
@@ -1143,7 +1250,12 @@ export function AppShell() {
         if (view === "explorer" || view === "markdown") {
           editor.setRightTab("editor");
         }
-        if (view === "agents") setAgentSurface("agent");
+        // Back to Agents means back to the session: a file opened from the
+        // explorer must not keep the editor over the last active CLI.
+        if (view === "agents") {
+          setAgentSurface("agent");
+          editor.setRightTab("chat");
+        }
         setActiveView(view);
       }}
       workingCount={sessions.workingCount}
@@ -1265,7 +1377,7 @@ export function AppShell() {
                     >
                       <RightDock
                         rightTab={editor.rightTab}
-                        chatPane={agentSurface === "agent" ? chatPane : null}
+                        chatPane={agentSurface === "agent" ? mainPane : null}
                         skillDetail={skillDetail}
                         onCloseSkillDetail={closeSkillDetail}
                         selectedPath={editor.selectedPath}
@@ -1307,19 +1419,21 @@ export function AppShell() {
                 <WorkspacePageBody className="flex min-h-0 flex-1">
                   <PanelGroup direction="horizontal" className="min-w-0 flex-1">
                     <Panel
-                      defaultSize={30}
-                      minSize={18}
-                      maxSize={45}
+                      defaultSize={22}
+                      minSize={14}
+                      maxSize={40}
                       className="sidebar-panel"
                     >
                       <div className="island h-full">{leftPanel}</div>
                     </Panel>
                     <PanelResizeHandle className="resize-handle w-px" />
-                    <Panel defaultSize={70} minSize={40} className="min-w-[360px]">
+                    <Panel defaultSize={46} minSize={25} className="min-w-[320px]">
                       <div className="island island-main h-full overflow-hidden">
+                        {/* The session lives in the side panel here, so the
+                            hidden chat pane must not mount it a second time. */}
                         <RightDock
                           rightTab="editor"
-                          chatPane={chatPane}
+                          chatPane={null}
                           skillDetail={skillDetail}
                           onCloseSkillDetail={closeSkillDetail}
                           selectedPath={editor.selectedPath}
@@ -1332,6 +1446,12 @@ export function AppShell() {
                           timelineEntries={timeline.entries}
                           processConsoleVm={processConsole}
                         />
+                      </div>
+                    </Panel>
+                    <PanelResizeHandle className="resize-handle w-px" />
+                    <Panel defaultSize={32} minSize={20} className="min-w-[300px]">
+                      <div className="island h-full overflow-hidden">
+                        {sideSessionPanel}
                       </div>
                     </Panel>
                   </PanelGroup>
@@ -1354,7 +1474,7 @@ export function AppShell() {
                       <div className="island island-main h-full overflow-hidden">
                         <RightDock
                           rightTab="editor"
-                          chatPane={chatPane}
+                          chatPane={mainPane}
                           skillDetail={skillDetail}
                           onCloseSkillDetail={closeSkillDetail}
                           selectedPath={editor.selectedPath}

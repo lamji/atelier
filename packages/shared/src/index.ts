@@ -10,3 +10,5 @@ export * from "./glob.js";
 export * from "./tokens/index.js";
 export * from "./llm-request-text.js";
 export * from "./terminal-prompt.js";
+export * from "./doc-upkeep.js";
+export * from "./skill-submit.js";

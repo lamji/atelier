@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import { pnpmArgs } from "./package-manager.mjs";
+import { copySkills } from "../../agent/scripts/copy-skills.mjs";
 
 const desktopRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -102,6 +103,15 @@ fs.copyFileSync(
   path.join(agentSrc, "storage", "schema.sql"),
   path.join(agentOut, "schema.sql"),
 );
+// App skills: /debugging, /document, and the tree the provider CLIs load.
+copySkills(path.join(repoRoot, "apps", "agent"), agentOut);
+// The impact-check hook the CLIs run before an edit; after copySkills,
+// which clears cli-skills/ before laying it out.
+await esbuild({
+  ...shared,
+  entryPoints: [path.join(agentSrc, "terminal", "impact", "edit-impact-main.ts")],
+  outfile: path.join(agentOut, "cli-skills", "hooks", "edit-impact.mjs"),
+});
 
 // 3. Install runtime deps normally, then retarget only the natives that
 //    are NOT N-API at the Electron ABI. N-API packages (sharp,

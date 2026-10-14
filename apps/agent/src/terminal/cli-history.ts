@@ -42,17 +42,48 @@ interface WalkedFile {
   mtime: number;
 }
 
-const walkCache = new Map<string, { expiresAt: number; files: WalkedFile[] }>();
+/**
+ * Even a caller that wants a fresh walk reuses one this recent. A new CLI
+ * session asks for the first page again and again while it waits for its
+ * transcript to appear, and each walk is a stat of every transcript the
+ * provider has ever written — thousands of files, on the process that is
+ * also serving the terminal the user is typing into.
+ */
+const WALK_REFRESH_MIN_MS = 3_000;
+
+interface CachedWalk {
+  walkedAt: number;
+  files: WalkedFile[];
+}
+
+const walkCache = new Map<string, CachedWalk>();
+const walksInFlight = new Map<string, Promise<WalkedFile[]>>();
+
+/** JSONL files under `root`, newest first. See {@link walkTree}. */
+function walkJsonl(root: string, refresh = false): Promise<WalkedFile[]> {
+  const cached = walkCache.get(root);
+  const maxAge = refresh ? WALK_REFRESH_MIN_MS : WALK_CACHE_MS;
+  if (cached && Date.now() - cached.walkedAt < maxAge) {
+    return Promise.resolve(cached.files);
+  }
+  // Two callers wanting the same walk share one, rather than racing two.
+  const running = walksInFlight.get(root);
+  if (running) return running;
+  const walk = walkTree(root)
+    .then((files) => {
+      walkCache.set(root, { walkedAt: Date.now(), files });
+      return files;
+    })
+    .finally(() => walksInFlight.delete(root));
+  walksInFlight.set(root, walk);
+  return walk;
+}
 
 /**
- * JSONL files under `root`, newest first.
- *
  * Directories are visited in reverse name order, which for Codex's
  * `YYYY/MM/DD` layout means the newest days are walked first.
  */
-async function walkJsonl(root: string, refresh = false): Promise<WalkedFile[]> {
-  const cached = walkCache.get(root);
-  if (!refresh && cached && cached.expiresAt > Date.now()) return cached.files;
+async function walkTree(root: string): Promise<WalkedFile[]> {
   const out: WalkedFile[] = [];
   const stack = [root];
   while (stack.length > 0) {
@@ -64,26 +95,58 @@ async function walkJsonl(root: string, refresh = false): Promise<WalkedFile[]> {
       continue;
     }
     const dirs: string[] = [];
+    const transcripts: string[] = [];
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        dirs.push(full);
-      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-        try {
-          const stat = await fs.stat(full);
-          out.push({ file: full, mtime: stat.mtimeMs });
-        } catch {
-          // vanished mid-walk — the CLI rotates its own files
-        }
+      if (entry.isDirectory()) dirs.push(full);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        transcripts.push(full);
       }
     }
+    // One directory's files together: a day of transcripts is one round of
+    // stats instead of one await each.
+    const stats = await Promise.all(
+      transcripts.map((file) =>
+        fs.stat(file).then(
+          (stat): WalkedFile => ({ file, mtime: stat.mtimeMs }),
+          // vanished mid-walk — the CLI rotates its own files
+          () => null
+        )
+      )
+    );
+    for (const walked of stats) if (walked) out.push(walked);
     // Ascending push, LIFO pop: the newest-named directory comes out first.
     dirs.sort();
     stack.push(...dirs);
   }
   out.sort((a, b) => b.mtime - a.mtime);
-  walkCache.set(root, { expiresAt: Date.now() + WALK_CACHE_MS, files: out });
   return out;
+}
+
+/**
+ * Rows already read from a transcript's head, by file.
+ *
+ * A transcript is append-only, so once its head has given up the id, the
+ * directory and the first prompt, no later write can change them — only the
+ * file's mtime moves. Without this every listing re-read up to half a
+ * megabyte from each of the newest thirty transcripts, to learn what the
+ * previous listing had just learned.
+ */
+const headCache = new Map<string, { mtime: number; entry: CliHistoryEntry | null }>();
+
+async function cachedEntry(
+  file: string,
+  mtime: number,
+  read: () => Promise<CliHistoryEntry | null>
+): Promise<CliHistoryEntry | null> {
+  const cached = headCache.get(file);
+  const settled = Boolean(cached?.entry?.title && cached.entry.cwd);
+  if (cached && (settled || cached.mtime === mtime)) {
+    return cached.entry ? { ...cached.entry, updatedAt: mtime } : null;
+  }
+  const entry = await read();
+  headCache.set(file, { mtime, entry });
+  return entry;
 }
 
 /** The first {@link HEAD_BYTES} of a file, as text. */
@@ -340,7 +403,9 @@ async function codexHistory(workspaceRoot: string, offset: number, limit: number
   const entries: CliHistoryEntry[] = [];
   for (const { file, mtime } of files.slice(offset, offset + limit)) {
     try {
-      const entry = parseCodexRollout(await readCodexHead(file), file, mtime);
+      const entry = await cachedEntry(file, mtime, async () =>
+        parseCodexRollout(await readCodexHead(file), file, mtime)
+      );
       // A rollout with no cwd predates the field; it cannot be claimed for
       // this workspace, so it stays out rather than showing up everywhere.
       if (entry && entry.cwd && sameDir(entry.cwd, workspaceRoot)) {
@@ -413,7 +478,9 @@ async function claudeHistory(workspaceRoot: string, offset: number, limit: numbe
   const entries: CliHistoryEntry[] = [];
   for (const { file, mtime } of files.slice(offset, offset + limit)) {
     try {
-      const entry = parseClaudeTranscript(await readHead(file), file, mtime);
+      const entry = await cachedEntry(file, mtime, async () =>
+        parseClaudeTranscript(await readHead(file), file, mtime)
+      );
       // The directory already IS this workspace, so an entry whose lines
       // carry no cwd is still ours.
       if (entry && (!entry.cwd || sameDir(entry.cwd, workspaceRoot))) {

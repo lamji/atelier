@@ -44,6 +44,11 @@ export class PtyInputLines {
   /** Inside a bracketed paste, where newlines are text rather than submits. */
   private pasting = false;
 
+  /** What has been typed on the line still being written. */
+  get current(): string {
+    return this.buffer;
+  }
+
   /** Feeds one chunk of input and returns whatever lines it completed. */
   push(chunk: string): string[] {
     const data = this.pending + chunk;

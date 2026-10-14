@@ -282,11 +282,65 @@ const previous = capture("git", [
   dryRun ? "HEAD" : `${tag}^`,
 ]);
 const range = previous ? `${previous}..HEAD` : "HEAD";
-const log =
-  capture("git", ["log", "--no-merges", "--pretty=format:- %s", range]) ?? "";
+
+/** Subjects that say a release happened, not what is in it. */
+const NOISE_SUBJECT = /^(release\b|final release|bump\b|wip\b|v?\d+\.\d+)/i;
+
+/** The notes written for this version, when someone wrote them. */
+function writtenChanges() {
+  const file = path.join(repoRoot, "docs", "releases", `${version}.md`);
+  if (!fs.existsSync(file)) return "";
+  return fs.readFileSync(file, "utf8").replace(/^﻿/, "").trim();
+}
+
+/** One bullet per commit that describes a change. */
+function commitChanges() {
+  const subjects = capture("git", ["log", "--no-merges", "--pretty=format:%s", range]);
+  return (subjects ?? "")
+    .split(/\r?\n/)
+    .map((subject) => subject.trim())
+    .filter((subject) => subject && !NOISE_SUBJECT.test(subject))
+    .map((subject) => `- ${subject}`)
+    .join("\n");
+}
+
+/** `apps/web/src/views/git/x.tsx` → `apps/web: views/git`. */
+function areaOf(file) {
+  const [kind, name, ...rest] = file.split("/");
+  if (!name || (kind !== "apps" && kind !== "packages")) return null;
+  const inner = rest[0] === "src" ? rest.slice(1) : rest;
+  return { area: `${kind}/${name}`, part: inner.length > 1 ? inner[0] : null };
+}
+
+/** Last resort: which parts of the app the release touched, from the diff. */
+function areaChanges() {
+  const files = capture("git", ["diff", "--name-only", range]) ?? "";
+  const areas = new Map();
+  for (const file of files.split(/\r?\n/)) {
+    const found = areaOf(file.trim());
+    if (!found) continue;
+    const entry = areas.get(found.area) ?? { count: 0, parts: new Set() };
+    entry.count += 1;
+    if (found.part) entry.parts.add(found.part);
+    areas.set(found.area, entry);
+  }
+  return [...areas]
+    .sort((a, b) => b[1].count - a[1].count)
+    .map(([area, { count, parts }]) => {
+      const where = [...parts].sort().join(", ");
+      return `- **${area}**: ${count} files changed` + (where ? ` (${where})` : "");
+    })
+    .join("\n");
+}
+
+const changes = writtenChanges() || commitChanges() || areaChanges();
+if (!writtenChanges()) {
+  say(`note: no docs/releases/${version}.md — the notes come from git alone`);
+}
 const notes = [
-  `Windows installer for Atelier ${version}.`,
+  `Atelier ${version} for Windows.`,
   "",
+  changes ? "### What's new\n\n" + changes + "\n" : "",
   "### Download",
   "",
   "```",
@@ -317,8 +371,6 @@ const notes = [
   "",
   "The installer checks for the tools Atelier needs (git, Node.js) and " +
     "offers to install any that are missing.",
-  "",
-  log ? "### Changes\n\n" + log : "",
 ].join("\n");
 const notesFile = path.join(releaseDir, `notes-${version}.md`);
 if (!dryRun) fs.writeFileSync(notesFile, notes, "utf8");

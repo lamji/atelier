@@ -1,8 +1,21 @@
 import { create } from "zustand";
 import type { CliHistoryEntry, TerminalSession } from "@atelier/protocol";
-import { conversationTitle } from "@atelier/shared";
+import {
+  canSendDocUpkeep,
+  composerShows,
+  conversationTitle,
+  planDocUpkeep,
+  skillSubmitKeys,
+} from "@atelier/shared";
 import { PtyInputLines } from "@/lib/pty-input-lines";
 import { bridge } from "./bridge-client.js";
+import {
+  docsForSession,
+  refreshCliDocs,
+  refreshCliDocsNow,
+  sessionKeys,
+  useCliDocsStore,
+} from "./cli-docs.js";
 import {
   beginSessionTracking,
   endSessionTracking,
@@ -25,6 +38,14 @@ export interface CliProvider {
    * terminal sends for it. Pressing Ctrl+V over an image sends this.
    */
   imagePasteKey: (platform: Platform | null) => string;
+  /**
+   * True for a CLI that loads Atelier's app skills itself, from the folder
+   * its launch flags name. False for one with no such option: its skill
+   * commands are expanded by Atelier instead — see {@link expandSkillCommand}.
+   */
+  loadsSkills: boolean;
+  /** What a skill command starts with in this CLI: `/name` or `$name`. */
+  skillSigil: string;
 }
 
 const CTRL_V = "\x16";
@@ -41,6 +62,8 @@ export const CLI_PROVIDERS: readonly CliProvider[] = [
     command: "codex",
     resume: (sessionId) => `codex resume ${sessionId}`,
     imagePasteKey: () => CTRL_V,
+    loadsSkills: false,
+    skillSigil: "$",
   },
   {
     id: "claude",
@@ -50,6 +73,8 @@ export const CLI_PROVIDERS: readonly CliProvider[] = [
     // Claude Code binds image paste to Alt+V on Windows, where Ctrl+V is the
     // terminal's own paste; everywhere else it is Ctrl+V.
     imagePasteKey: (platform) => (platform === "win32" ? ALT_V : CTRL_V),
+    loadsSkills: true,
+    skillSigil: "/",
   },
 ];
 
@@ -426,7 +451,11 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
 
   setBootstrapped: () => set({ bootstrapped: true }),
 
-  openProviderPicker: () => set({ providerPickerOpen: true }),
+  openProviderPicker: () => {
+    // The user is a click away from asking for a shell; have one waiting.
+    void bridge.rpc("terminal.prewarm", {}).catch(() => undefined);
+    set({ providerPickerOpen: true });
+  },
 
   closeProviderPicker: () => set({ providerPickerOpen: false }),
 
@@ -437,6 +466,8 @@ export const useCliConsoleStore = create<CliConsoleStore>((set) => ({
     for (const termId of [...processingWatchers.keys()]) unwatchProcessing(termId);
     for (const termId of [...sessionSwitchWatchers.keys()]) unwatchSessionSwitch(termId);
     for (const termId of [...renameCommandWatchers.keys()]) unwatchRenameCommand(termId);
+    useCliDocsStore.getState().reset();
+    upkeepAsked.clear();
     // Names and pty→session pairings are NOT cleared: the ptys of the
     // project being left keep running, and coming back to it must find
     // them still named. History is, because it is per-project.
@@ -517,14 +548,240 @@ async function autoRenameCliSession(termId: string, providerId: string): Promise
   }
 }
 
-/** Consume /rename at submit, clearing the CLI composer without sending Enter. */
+export interface CliSkills {
+  /** Holds `.claude/skills/<name>` inside the app; null when it ships none. */
+  root: string | null;
+  skills: Array<{ name: string; file: string }>;
+  /** Added to each CLI's launch command; empty when there is nothing to load. */
+  launch: { claude: string; codex: string };
+}
+
+const NO_SKILLS: CliSkills = {
+  root: null,
+  skills: [],
+  launch: { claude: "", codex: "" },
+};
+
+/**
+ * The app skills the CLIs can run (`/document`, `$document`), as paths into
+ * the installed app. Nothing is copied into ~/.claude or ~/.codex, so the
+ * skills go when Atelier is uninstalled. Asked for once: the app does not
+ * move while it is running.
+ */
+let cliSkills: CliSkills = NO_SKILLS;
+let cliSkillsRequest: Promise<CliSkills> | null = null;
+
+function loadCliSkills(): Promise<CliSkills> {
+  cliSkillsRequest ??= bridge
+    .rpc("cli.skills", {})
+    .then((found) => (cliSkills = found))
+    .catch(() => {
+      // An older agent, or none yet: the CLI still starts, without skills.
+      cliSkillsRequest = null;
+      return NO_SKILLS;
+    });
+  return cliSkillsRequest;
+}
+
+/**
+ * The provider's launch command with the app skills attached: the skills
+ * folder where the CLI can load it, and the SessionStart hook that tells
+ * every new session which skills and reports it has. The agent builds the
+ * flags, already quoted for the pty's shell.
+ */
+async function withAppSkills(
+  provider: CliProvider,
+  command: string
+): Promise<string> {
+  const { launch } = await loadCliSkills();
+  const flags = launch[provider.id as keyof typeof launch] ?? "";
+  return flags ? `${command} ${flags}` : command;
+}
+
+/**
+ * Other spellings that mean an app skill inside Atelier.
+ *
+ * `$documents:documents` is what Codex's own menu turns `$document` into: it
+ * is Codex's Word-file skill, and accepting the suggestion (or recalling it
+ * from history) sent every request for a report there instead. In an Atelier
+ * session that spelling runs the app's `document` skill.
+ */
+const SKILL_ALIASES: Record<string, string> = {
+  "documents:documents": "document",
+};
+
+/**
+ * The prompt a typed skill command stands for, or null when `line` is not
+ * one. Only for a CLI that cannot load the app's skills itself (Codex has no
+ * launch option for an extra skill folder): Atelier swaps the command for a
+ * prompt naming the skill file inside the app, which the CLI then reads.
+ */
+export function expandSkillCommand(
+  provider: CliProvider,
+  line: string,
+  skills: CliSkills["skills"],
+  session: string
+): {
+  name: string;
+  subject: string;
+  /** The command word as typed, sigil included: what the lead replaces. */
+  token: string;
+  /** What stands in for the command word, ahead of the request. */
+  lead: string;
+  request: string;
+  prompt: string;
+} | null {
+  if (provider.loadsSkills || !line.startsWith(provider.skillSigil)) return null;
+  const typed = line.slice(provider.skillSigil.length).split(" ");
+  const [command = "", ...rest] = typed;
+  const wanted = command.toLowerCase();
+  const name = SKILL_ALIASES[wanted] ?? wanted;
+  const skill = skills.find((item) => item.name === name);
+  if (!skill) return null;
+  const subject = rest.join(" ").trim();
+  const request = subject || "(none given)";
+  const lead =
+    `Run the Atelier "${skill.name}" skill: read "${skill.file}" and ` +
+    `follow it exactly. Session: ${session}. Request:`;
+  return {
+    name: skill.name,
+    subject,
+    token: `${provider.skillSigil}${command}`,
+    lead,
+    request,
+    prompt: `${lead} ${request}`,
+  };
+}
+
+/**
+ * The id a report written from this pty is filed under: the Agents row it
+ * stands in for, which outlives the pty, or the pty itself when it has none.
+ */
+function skillSessionKey(termId: string): string {
+  const { chats } = useCliConsoleStore.getState();
+  const bound = Object.entries(chats).find(
+    ([, chat]) => chat.termId === termId
+  );
+  return bound?.[0] ?? termId;
+}
+
+/**
+ * The expanded prompt goes in as a bracketed paste, and its Enter follows
+ * after a pause. Measured against the real Codex TUI: typed as plain
+ * characters, the prompt is taken for a paste burst and an Enter 400 ms
+ * later lands inside it as a newline, so nothing is sent. Marked as a paste,
+ * the same Enter submits every time.
+ */
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+const SKILL_SUBMIT_DELAY_MS = 400;
+
+/** Fewest letters of a skill name that Tab or Enter will complete. */
+const MIN_SKILL_PREFIX = 3;
+
+/**
+ * What to type instead of the Tab or Enter that would accept the CLI's own
+ * suggestion, or null to let the key through.
+ *
+ * Codex opens a menu on `$`, and the app's skills are not in it — but its own
+ * are, so `$doc` + Enter picked Codex's "Documents" skill and wrote a Word
+ * file where the user had asked for `$document`. While what is typed is the
+ * start of exactly one app skill, the accepting key finishes that name here,
+ * and the trailing space closes Codex's menu. Typing a Codex skill's full
+ * name still reaches it: `$documents` is not the start of `document`.
+ */
+export function skillCompletion(
+  provider: CliProvider,
+  typed: string,
+  key: string,
+  skills: CliSkills["skills"]
+): string | null {
+  if (provider.loadsSkills || (key !== "\t" && key !== "\r")) return null;
+  const line = typed.trimStart().toLowerCase();
+  if (!line.startsWith(provider.skillSigil)) return null;
+  const prefix = line.slice(provider.skillSigil.length);
+  if (prefix.length < MIN_SKILL_PREFIX || !/^[a-z0-9_-]+$/.test(prefix)) {
+    return null;
+  }
+  const found = skills.filter((skill) => skill.name.startsWith(prefix));
+  if (found.length !== 1) return null;
+  const name = found[0]!.name;
+  // The whole name and Enter is a command to run, not a name to finish.
+  if (prefix === name && key === "\r") return null;
+  return `${name.slice(prefix.length)} `;
+}
+
+/** The bytes that put `text` into a cleared composer, as one paste. */
+function pasteInto(text: string): string {
+  return `\x15${PASTE_START}${text}${PASTE_END}`;
+}
+
+/**
+ * What to send in place of Enter when `line` is an app skill command: the
+ * skill's prompt put in the composer, and Enter a moment later. Null when
+ * the line is not one.
+ *
+ * The composer is read off the screen first: one holding a pasted image is
+ * edited in place rather than cleared, or the image would not be sent.
+ */
+function runSkillCommand(
+  termId: string,
+  provider: CliProvider,
+  line: string
+): string | null {
+  const skill = expandSkillCommand(
+    provider,
+    line,
+    cliSkills.skills,
+    skillSessionKey(termId)
+  );
+  if (!skill) return null;
+  if (!useCliConsoleStore.getState().titles[termId]) {
+    const topic = `${skill.name} ${skill.subject}`.trim();
+    setCliTitle(termId, conversationTitle(topic), false);
+  }
+  setTimeout(
+    () => terminalRegistry.sendInput(termId, "\r"),
+    SKILL_SUBMIT_DELAY_MS
+  );
+  return skillSubmitKeys({
+    token: skill.token,
+    lead: skill.lead,
+    request: skill.request,
+    shown: terminalRegistry.composerText(termId),
+  });
+}
+
+/**
+ * Consume Atelier's own commands at submit, before the provider sees Enter:
+ * /rename, and the app skills of a CLI that cannot load them itself. Ctrl+U
+ * clears what was typed out of the CLI's composer.
+ */
 function watchRenameCommand(termId: string, providerId: string): void {
   if (renameCommandWatchers.has(termId)) return;
+  void loadCliSkills();
+  const provider = cliProvider(providerId);
   const lines = new PtyInputLines();
   renameCommandWatchers.set(termId, terminalRegistry.interceptInput(termId, (data) => {
-    if (lines.push(data).some((line) => line.toLowerCase() === "/rename")) {
-      void autoRenameCliSession(termId, providerId);
-      return "\x15";
+    const rest = skillCompletion(provider, lines.current, data, cliSkills.skills);
+    if (rest !== null) {
+      lines.push(rest);
+      return rest;
+    }
+    for (const line of lines.push(data)) {
+      if (line.toLowerCase() === "/rename") {
+        void autoRenameCliSession(termId, providerId);
+        return "\x15";
+      }
+      const typed = runSkillCommand(termId, provider, line);
+      if (typed) return typed;
+    }
+    // Enter on a line the keystrokes did not spell out: recalled from
+    // history, or filled in by the CLI's own menu. The screen has it.
+    if (data === "\r" && !provider.loadsSkills) {
+      const shown = terminalRegistry.composerText(termId);
+      const recalled = shown ? runSkillCommand(termId, provider, shown) : null;
+      if (recalled) return recalled;
     }
     return data;
   }));
@@ -538,6 +795,8 @@ function unwatchRenameCommand(termId: string): void {
 
 interface ProcessingWatcher {
   stop: () => void;
+  /** What the user has keyed into the composer and not yet sent. */
+  lines: PtyInputLines;
   startedAt: number;
   sawCursorHidden: boolean;
 }
@@ -547,6 +806,112 @@ const CURSOR_VISIBILITY = /\x1b\[\?25([hl])/g;
 
 function setProcessing(termId: string, processing: boolean): void {
   useCliConsoleStore.getState().setProcessing(termId, processing);
+  // A turn just ended, which is when a `document` run has saved its report,
+  // and when a report written earlier may have fallen behind the code.
+  if (!processing) void keepDocsCurrent(termId);
+}
+
+/** The skill that writes the reports, and that `update` is asked of. */
+const DOCUMENT_SKILL = "document";
+
+/** Per report, the change its session was last asked to document. */
+const upkeepAsked = new Map<string, number>();
+/** Sessions with an upkeep check under way, so a turn end starts only one. */
+const upkeepChecks = new Set<string>();
+
+/** Rows searched for the composer when it holds a pasted request. */
+const UPKEEP_COMPOSER_ROWS = 20;
+/** Looks at the composer after a paste, one submit pause apart. */
+const UPKEEP_LOOKS = 5;
+/** Enters sent for one request: the first, and one more if it was eaten. */
+const UPKEEP_ENTERS = 2;
+
+/**
+ * Press Enter on a request Atelier pasted, once it is seen in the composer.
+ *
+ * The user did press Enter on a line they typed, but nobody pressed this
+ * one, and sent into an approval dialog it would answer the dialog. So it
+ * goes out only while the screen shows the request behind the composer's
+ * mark; a request that never shows up is left unsent.
+ *
+ * Measured against the real Codex TUI: a session still busy with its own
+ * start-up took the Enter 400 ms after the paste as part of the paste. The
+ * request then still sits in the composer, and a second Enter sends it.
+ */
+async function submitPasted(termId: string, text: string): Promise<void> {
+  let entersSent = 0;
+  for (let look = 0; look < UPKEEP_LOOKS; look += 1) {
+    await new Promise((done) => setTimeout(done, SKILL_SUBMIT_DELAY_MS));
+    const shown = terminalRegistry.composerText(termId, UPKEEP_COMPOSER_ROWS);
+    if (!composerShows(shown, text)) {
+      // Gone after an Enter: it was submitted. Otherwise not there yet.
+      if (entersSent > 0) return;
+      continue;
+    }
+    if (entersSent === UPKEEP_ENTERS) return;
+    terminalRegistry.sendInput(termId, "\r");
+    entersSent += 1;
+  }
+}
+
+/** Every id a report written from this pty may be filed under. */
+function reportKeys(termId: string): string[] {
+  const { chats, resumed } = useCliConsoleStore.getState();
+  const conversationId = skillSessionKey(termId);
+  const keys = sessionKeys(conversationId, chats[conversationId], resumed);
+  const own = resumed[termId];
+  return own ? [...keys, termId, own] : [...keys, termId];
+}
+
+/**
+ * Keep a session's reports describing the code as it stands.
+ *
+ * A report is written once, but the session goes on changing the files it
+ * cites. At each turn end the reports are re-listed, and the ones with a
+ * cited file written since are handed back to the same session as one
+ * `update` request - the same skill, typed for the user. A session whose
+ * reports are current costs one listing and no turn.
+ *
+ * The request waits for a composer that is on screen and empty, so a prompt
+ * the user is writing is never cleared, and its Enter waits for the request
+ * to be seen there - see {@link submitPasted}. A report is marked as asked
+ * when its request is pasted, so one that could not be sent is not pasted
+ * over and over; it is asked about again when a cited file next changes.
+ */
+async function keepDocsCurrent(termId: string): Promise<void> {
+  if (upkeepChecks.has(termId)) return;
+  upkeepChecks.add(termId);
+  try {
+    const [docs, { skills }] = await Promise.all([
+      refreshCliDocsNow(),
+      loadCliSkills(),
+    ]);
+    const state = useCliConsoleStore.getState();
+    const session = state.sessions.find((item) => item.termId === termId);
+    if (!session) return;
+    const mine = docsForSession(docs, reportKeys(termId));
+    const plan = planDocUpkeep(mine, upkeepAsked);
+    if (!plan) return;
+    const ready = canSendDocUpkeep({
+      processing: Boolean(state.processing[termId]),
+      typed: processingWatchers.get(termId)?.lines.current ?? "",
+      composer: terminalRegistry.composerText(termId, UPKEEP_COMPOSER_ROWS),
+    });
+    if (!ready) return;
+    const provider = cliProvider(session.providerId);
+    const line = `${provider.skillSigil}${DOCUMENT_SKILL} ${plan.request}`;
+    // Claude runs the command itself; Codex is handed the skill's prompt.
+    const text = provider.loadsSkills
+      ? line
+      : expandSkillCommand(provider, line, skills, skillSessionKey(termId))
+          ?.prompt;
+    if (!text || !skills.some((skill) => skill.name === DOCUMENT_SKILL)) return;
+    for (const [id, at] of Object.entries(plan.asked)) upkeepAsked.set(id, at);
+    terminalRegistry.sendInput(termId, pasteInto(text));
+    await submitPasted(termId, text);
+  } finally {
+    upkeepChecks.delete(termId);
+  }
 }
 
 function beginProcessing(termId: string): void {
@@ -572,6 +937,7 @@ function watchCliProcessing(termId: string): void {
   if (processingWatchers.has(termId)) return;
   const lines = new PtyInputLines();
   const watcher: ProcessingWatcher = {
+    lines,
     startedAt: 0,
     sawCursorHidden: false,
     stop: () => {},
@@ -642,13 +1008,23 @@ function watchSessionSwitch(termId: string, providerId: string, startedAt: numbe
                  line.trim() && !line.trim().startsWith("/")) {
         // Some CLIs do not write a transcript until the first prompt. The
         // initial timed claim may have expired while the user was thinking.
-        void claimSessionId(termId, providerId, startedAt);
+        // One at a time: every further line typed before the claim lands
+        // would otherwise start its own round of history scans.
+        if (!lateClaims.has(termId)) {
+          lateClaims.add(termId);
+          void claimSessionId(termId, providerId, startedAt).finally(() =>
+            lateClaims.delete(termId)
+          );
+        }
       }
       tryClaim();
     }
   });
   sessionSwitchWatchers.set(termId, off);
 }
+
+/** Sessions with a late claim already looking for their transcript. */
+const lateClaims = new Set<string>();
 
 function unwatchSessionSwitch(termId: string): void {
   sessionSwitchWatchers.get(termId)?.();
@@ -750,6 +1126,7 @@ export function ensureCliSessions(): Promise<void> {
     // including any started outside Atelier — are listed alongside the live
     // ones, so the list matches what the CLI's own resume screen offers.
     void refreshCliHistory();
+    void refreshCliDocs();
   })().finally(() => {
     pending = null;
   });
@@ -811,7 +1188,8 @@ export async function createCliSession(
   if (pendingCreate) return pendingCreate;
   const creating = (async () => {
     const startedAt = Date.now();
-    const termId = await spawnCliSession(provider, provider.command);
+    const command = await withAppSkills(provider, provider.command);
+    const termId = await spawnCliSession(provider, command);
     watchCliTopic(termId);
     void claimSessionId(termId, provider.id, startedAt);
     return termId;
@@ -850,7 +1228,8 @@ export async function resumeCliSession(
   } catch {
     // Review persistence is additive; it must never prevent native resume.
   }
-  const termId = await spawnCliSession(provider, provider.resume(entry.id));
+  const command = await withAppSkills(provider, provider.resume(entry.id));
+  const termId = await spawnCliSession(provider, command);
   useCliConsoleStore.getState().bindSessionId(termId, entry.id);
   if (entry.title) {
     // Pinned, not watched: a resumed session already knows what it is

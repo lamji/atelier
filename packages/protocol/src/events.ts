@@ -337,6 +337,8 @@ export const eventPayloads = {
   // terminal
   "terminal.session.created": z.object({ termId: z.string(), name: z.string() }),
   "terminal.session.closed": z.object({ termId: z.string() }),
+  /** The shell moved (`cd`); what a restored terminal reopens in. */
+  "terminal.cwd": z.object({ termId: z.string(), cwd: z.string() }),
   "terminal.data": z.object({ termId: z.string(), data: z.string() }),
   "terminal.exit": z.object({ termId: z.string(), exitCode: z.number().nullable() }),
 

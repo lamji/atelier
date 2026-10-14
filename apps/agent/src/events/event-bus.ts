@@ -14,13 +14,15 @@ export type EventListener = (event: PublishedEvent) => void;
 /**
  * Per-token topics, exempt from payload validation.
  *
- * Both are producer-built in this process (never user or wire input), both
+ * All are producer-built in this process (never user or wire input), all
  * are already in the timeline store's EPHEMERAL_TOPICS so nothing persists
- * them, and both fire once per streamed token.
+ * them, and all fire once per streamed token — or, for `terminal.data`,
+ * once per keystroke echo, where the parse sits directly in typing latency.
  */
 const HOT_TOPICS = new Set<string>([
   "chat.message.delta",
   "agent.thinking.delta",
+  "terminal.data",
 ]);
 
 /**

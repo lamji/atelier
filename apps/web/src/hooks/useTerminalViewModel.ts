@@ -6,7 +6,8 @@ import {
   MAX_TERMINALS,
   nextTerminalName,
   readRoster,
-  writeRoster,
+  syncRoster,
+  type RosterEntry,
 } from "@/services/terminal-roster";
 import { useConnectionStore } from "@/state/connection.store";
 import { useTerminalStore } from "@/state/terminal.store";
@@ -16,11 +17,6 @@ import { useThemeStore } from "@/state/theme.store";
 function currentNames(): string[] {
   const { sessions, labels } = useTerminalStore.getState();
   return sessions.map((session) => labels[session.id] ?? session.name);
-}
-
-/** Persist the current tab order and names for the next launch. */
-function syncRoster(): void {
-  writeRoster(currentNames());
 }
 
 /** ViewModel for the terminal island: session tabs, create, kill, mount. */
@@ -46,9 +42,10 @@ export function useTerminalViewModel() {
    *
    * Two cases land here. A reconnect inside one app run finds live PTYs and
    * simply adopts them. A cold start finds none — the agent process is new —
-   * so the workspace's saved terminals are recreated by name, and a workspace
-   * with nothing on record gets its first terminal opened for it. The panel is
-   * never an empty shell you have to prime by hand.
+   * so the workspace's saved terminals are recreated by name, each in the
+   * directory it was left in, and a workspace with nothing on record gets its
+   * first terminal opened for it. The panel is never an empty shell you have
+   * to prime by hand.
    *
    * Guarded by a ref: this must run once per connection, or a re-render mid
    * restore would spawn the roster twice.
@@ -75,11 +72,13 @@ export function useTerminalViewModel() {
           syncRoster();
           return;
         }
-        const wanted = readRoster();
-        const names = wanted.length > 0 ? wanted : [nextTerminalName([])];
-        for (const name of names.slice(0, MAX_TERMINALS)) {
+        const saved = readRoster();
+        const wanted: RosterEntry[] =
+          saved.length > 0 ? saved : [{ name: nextTerminalName([]) }];
+        for (const entry of wanted.slice(0, MAX_TERMINALS)) {
           if (cancelled) return;
-          const { session } = await bridge.rpc("terminal.create", { name });
+          // A cwd that no longer exists is the agent's to fall back from.
+          const { session } = await bridge.rpc("terminal.create", entry);
           useTerminalStore.getState().addSession(session);
         }
         if (!cancelled) {

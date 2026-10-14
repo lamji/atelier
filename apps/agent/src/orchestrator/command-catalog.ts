@@ -308,7 +308,7 @@ export function listSlashCommandDetails(
 }
 
 /** Resolve source and packaged application skill directories. */
-function bundledSkillsRoot(): string {
+export function bundledSkillsRoot(): string {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const packaged = path.join(moduleDir, "skills");
   return fs.existsSync(packaged)

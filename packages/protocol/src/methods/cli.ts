@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CliHistoryEntry, CliSessionChange } from "../models/cli.js";
+import { CliDoc, CliHistoryEntry, CliSessionChange } from "../models/cli.js";
 
 export const cliMethods = {
   /**
@@ -21,6 +21,32 @@ export const cliMethods = {
       })
       .optional(),
     result: z.object({ entries: z.array(CliHistoryEntry), hasMore: z.boolean() }),
+  },
+  /**
+   * The app skills offered inside the provider CLIs, as paths into the
+   * installed app. Nothing is copied into the user's home: Claude Code loads
+   * `root` through `--add-dir`, and a CLI with no such option is pointed at
+   * a skill's `file` when its command is typed.
+   */
+  "cli.skills": {
+    params: z.object({}).optional(),
+    result: z.object({
+      /** Holds `.claude/skills/<name>`; null when the app ships none. */
+      root: z.string().nullable(),
+      skills: z.array(z.object({ name: z.string(), file: z.string() })),
+      /**
+       * What to add to each CLI's launch command, quoted for the pty's
+       * shell: the skills folder and the SessionStart hook that loads them.
+       */
+      launch: z
+        .object({ claude: z.string(), codex: z.string() })
+        .default({ claude: "", codex: "" }),
+    }),
+  },
+  /** The reports the `document` skill saved in this workspace, newest first. */
+  "cli.docs.list": {
+    params: z.object({}).optional(),
+    result: z.object({ docs: z.array(CliDoc) }),
   },
   "cli.title.autoRename": {
     params: z.object({ providerId: z.string(), sessionId: z.string() }),

@@ -31,3 +31,29 @@ export const CliSessionChange = z.object({
   alsoTouchedBy: z.array(z.string()).default([]),
 });
 export type CliSessionChange = z.infer<typeof CliSessionChange>;
+
+/**
+ * One report written by the `document` skill into `.atelier/doc-agent`.
+ * The id is the report's file name without `.md`.
+ */
+export const CliDoc = z.object({
+  id: z.string(),
+  /**
+   * The session that wrote it, from the report's frontmatter: the provider's
+   * own session id, or the id Atelier handed the CLI. Null when unrecorded.
+   */
+  session: z.string().nullable(),
+  title: z.string(),
+  /** Last write to the report, ms. */
+  createdAt: z.number(),
+  /** Workspace-relative path, for showing where the report lives. */
+  path: z.string(),
+  /**
+   * Files the report cites that were written after it, workspace-relative.
+   * Not empty means the report no longer describes the code as it stands.
+   */
+  changedFiles: z.array(z.string()).default([]),
+  /** Last write among `changedFiles`, ms; 0 when the report is current. */
+  changedAt: z.number().default(0),
+});
+export type CliDoc = z.infer<typeof CliDoc>;

@@ -34,7 +34,7 @@ export function useMergeConflictViewModel() {
 
   const conflicts = useMemo(() => status?.conflicts ?? [], [status]);
   const mergeState = status?.mergeState ?? null;
-  const aiWorking = aiSession?.status === "working";
+  const aiWorking = merge.aiQuick || aiSession?.status === "working";
 
   const store = () => useGitMergeStore.getState();
   const bump = () => useGitStore.getState().bumpStateVersion();
@@ -441,17 +441,26 @@ export function useMergeConflictViewModel() {
   }, []);
 
   /**
-   * Starts (or continues) the repair task for `paths` on `model` (blank
-   * takes AI_MODEL). Runs in a dedicated conversation, confined to the
-   * checkout, and edits files only — staging and completing stay with the
-   * user (and with the post-run scan below, which stages the files it
-   * left marker-free).
+   * Resolves `paths` on `model` (blank takes AI_MODEL). The fast path goes
+   * first: one model call per file, done in seconds. Only what it could not
+   * resolve gets the repair task, which runs in a dedicated conversation,
+   * confined to the checkout, and edits files only — staging and completing
+   * stay with the user (and with the post-run scan below, which stages the
+   * files it left marker-free).
    */
   const aiResolve = useCallback(
-    async (paths: string[], extraPrompt = "", model = "") => {
+    async (allPaths: string[], extraPrompt = "", model = "") => {
+      if (allPaths.length === 0 || store().aiQuick) return;
+      const info = useGitStore.getState().status;
+      const sides = {
+        ours: info?.mergeState?.ours ?? info?.branch ?? "HEAD",
+        theirs: info?.mergeState?.theirs ?? "incoming",
+        kind: info?.mergeState?.kind ?? "merge",
+      };
+      const paths = await quickResolve(allPaths, sides, extraPrompt, model);
+      bump();
       if (paths.length === 0) return;
       const s = store();
-      const info = useGitStore.getState().status;
       try {
         let conversationId = s.aiConversationId;
         if (!conversationId) {
@@ -478,15 +487,13 @@ export function useMergeConflictViewModel() {
           conversationId,
           prompt: buildResolvePrompt({
             paths,
-            ours: info?.mergeState?.ours ?? info?.branch ?? "HEAD",
-            theirs: info?.mergeState?.theirs ?? "incoming",
-            kind: info?.mergeState?.kind ?? "merge",
+            ...sides,
             output: s.syncOutput,
             extra: extraPrompt,
             repo,
           }),
           model: model || AI_MODEL,
-          effort: "high",
+          effort: "medium",
           scopeRoots: repo && repo !== "." ? [repo] : undefined,
         });
         sessions.taskStarted(conversationId, taskId);
@@ -729,6 +736,50 @@ export function useMergeConflictEffects(): void {
   }, [liveConflicts, activityView]);
 }
 
+interface ConflictSides {
+  ours: string;
+  theirs: string;
+  kind: string;
+}
+
+/**
+ * The fast path. Resolves what one model call per file can, and returns the
+ * paths that still need the agent. Never throws: a fast path that failed is
+ * just a slower resolution, so everything falls through to the task.
+ */
+async function quickResolve(
+  paths: string[],
+  sides: ConflictSides,
+  instruction: string,
+  model: string
+): Promise<string[]> {
+  const store = useGitMergeStore.getState();
+  store.set({ aiQuick: true, aiPaths: paths, aiSummary: null, syncError: null });
+  try {
+    const { resolved, skipped } = await bridge.rpc("git.aiResolveConflicts", {
+      paths,
+      ...sides,
+      instruction: instruction || undefined,
+      model: model || AI_MODEL,
+    });
+    const s = useGitMergeStore.getState();
+    s.set({ aiResolved: [...new Set([...s.aiResolved, ...resolved])] });
+    if (s.openPath && resolved.includes(s.openPath)) {
+      await loadConflictFile(s.openPath);
+    }
+    if (skipped.length === 0) {
+      const summary = summarizeAi(resolved.length, 0);
+      s.set({ aiSummary: summary });
+      alert.success("AI resolver finished", summary);
+    }
+    return skipped.map((entry) => entry.path);
+  } catch {
+    return paths;
+  } finally {
+    useGitMergeStore.getState().set({ aiQuick: false, aiPaths: null });
+  }
+}
+
 function summarizeAi(clean: number, dirty: number): string {
   if (clean === 0 && dirty === 0) return "AI made no changes.";
   if (dirty === 0) {
@@ -797,6 +848,10 @@ function buildResolvePrompt(input: ResolvePromptInput): string {
       "`>>>>>>>` marker. Do not touch code outside the conflicted regions " +
       "except where a resolution needs a matching edit (an import, a type) " +
       "to stay consistent.",
+    "",
+    "Stop as soon as the markers are gone. Do NOT run builds, tests, " +
+      "type-checks, linters or any other shell command to verify the " +
+      "result — the user reviews it.",
     "",
     "Do NOT run `git commit`, `git merge --continue`, `git rebase " +
       "--continue`, `git merge --abort` or push. Do not stage files — the " +

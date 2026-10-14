@@ -330,11 +330,16 @@ function isPreviewablePath(path: string | null): boolean {
   return isMarkdownPath(path) || isHtmlPath(path);
 }
 
-const FilePane = memo(function FilePane(props: {
+export const FilePane = memo(function FilePane(props: {
   selectedPath: string | null;
   fileContent: string | null;
   language: string;
   monacoTheme: string;
+  /**
+   * Which side of the Editor/Preview toggle a previewable file opens on.
+   * Source by default; a document opened to be read asks for the preview.
+   */
+  initialView?: "editor" | "preview";
 }) {
   const editable = isEditablePath(props.selectedPath);
   const markdown = isMarkdownPath(props.selectedPath);
@@ -365,7 +370,8 @@ const FilePane = memo(function FilePane(props: {
   /** Monaco mounts asynchronously; format-on-open waits for this. */
   const [editorReady, setEditorReady] = useState(false);
   /** "editor" keeps the source in Monaco; "preview" renders HTML or Markdown. */
-  const [view, setView] = useState<"editor" | "preview">("editor");
+  const initialView = props.initialView ?? "editor";
+  const [view, setView] = useState<"editor" | "preview">(initialView);
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
   const timerRef = useRef<number | undefined>(undefined);
   // The Monaco editor instance, kept in a ref so the search-decoration
@@ -415,7 +421,7 @@ const FilePane = memo(function FilePane(props: {
   // {path, content} pair keeps the write pointed at the right file.
   useEffect(() => {
     setSaveState("clean");
-    setView("editor");
+    setView(initialView);
     return () => void flush();
   }, [props.selectedPath, flush]);
 

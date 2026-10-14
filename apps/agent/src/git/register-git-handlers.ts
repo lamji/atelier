@@ -1,6 +1,7 @@
 import type { Router } from "../bridge/router.js";
 import { generatePrDescription, suggestBranchName } from "./ai-drafts.js";
 import { generateCommitMessage } from "./commit-message.js";
+import { quickResolveConflicts } from "./conflict-quick-resolve.js";
 import { clearForgeAuth } from "./forge-auth.js";
 import type { GitService } from "./git-service.js";
 import * as ops from "./git-ops.js";
@@ -258,6 +259,13 @@ export function registerGitHandlers(
 
   router.register("git.scanConflictMarkers", async (params) =>
     ops.scanConflictMarkers(git, params.paths)
+  );
+
+  router.register("git.aiResolveConflicts", (params) =>
+    quickResolveConflicts(git, {
+      ...params,
+      model: params.model || selectedModel(),
+    })
   );
 
   router.register("git.mergeAbort", async () => {

@@ -1,4 +1,5 @@
-import { FileDiff, Loader2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown, FileDiff, Loader2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { basename, type FileChange } from "@/lib/file-changes";
 import { UnifiedDiffView } from "./UnifiedDiffView";
@@ -11,8 +12,8 @@ export interface ChangesRailProps {
 }
 
 /**
- * The rail beside the transcript: this conversation's file changes, one tab
- * per file, the selected tab shown as a full-height diff.
+ * The rail beside the transcript: this conversation's file changes, picked from
+ * a dropdown of files, the selected one shown as a full-height diff.
  *
  * It is the only place a diff renders — the transcript carries the
  * conversation and the process card carries the steps, so an edit is read
@@ -34,11 +35,9 @@ export function ChangesRail(props: ChangesRailProps) {
         "overflow-hidden border-l border-border-subtle bg-panel"
       )}
     >
-      <TabStrip
+      <FilePicker
         changes={vm.changes}
         activePath={vm.active?.path ?? null}
-        added={vm.added}
-        removed={vm.removed}
         onSelect={vm.select}
       />
       {vm.active ? (
@@ -62,58 +61,129 @@ function LoadingState() {
 }
 
 /**
- * One tab per changed file, plus the run's total at the right. Built to the
- * same rules as the editor's own tab strip (active tab wears the surface of
- * the pane below it, marked by a slim top rule) so the two read as one
- * control, not two takes on the same idea.
+ * The changed files as one dropdown. A
+ * strip of tabs clipped every name past the second file and hid the rest
+ * behind a horizontal scroll; a menu lists them all, each with its own
+ * removed/added count, so the file worth opening is picked by reading.
  */
-function TabStrip(props: {
+function FilePicker(props: {
   changes: FileChange[];
   activePath: string | null;
-  added: number;
-  removed: number;
   onSelect: (path: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const active =
+    props.changes.find((change) => change.path === props.activePath) ?? null;
+
+  // Click-outside / Escape both close the menu.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
   return (
     <div
-      role="tablist"
-      aria-label="Changed files"
-      className="flex shrink-0 items-center gap-1 overflow-x-auto px-2.5"
+      ref={rootRef}
+      className="relative flex shrink-0 items-center gap-2 px-2.5"
       style={{ height: "var(--tabbar-h)" }}
     >
-      {props.changes.map((change) => {
-        const active = change.path === props.activePath;
-        return (
-          <button
-            key={change.path}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            title={change.path}
-            onClick={() => props.onSelect(change.path)}
-            className={cn(
-              "flex h-8 max-w-[12rem] shrink-0 items-center gap-1.5 rounded-full",
-              "px-3 text-xs font-medium transition-colors",
-              active
-                ? "bg-accent text-foreground"
-                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-            )}
-          >
-            <FileDiff className="h-3.5 w-3.5 shrink-0 opacity-80" />
-            <span className="truncate">{basename(change.path)}</span>
-          </button>
-        );
-      })}
-      <span aria-hidden className="min-w-0 flex-1" />
-      {props.changes.length > 0 && (
-        <span className="flex shrink-0 items-center gap-2 pl-2 text-[11px] tabular-nums">
-          <span className="text-muted-foreground">
-            {props.changes.length} file{props.changes.length === 1 ? "" : "s"}
-          </span>
-          <LineStat added={props.added} removed={props.removed} />
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Changed files"
+        title={active?.path}
+        disabled={props.changes.length === 0}
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          "flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-full bg-accent",
+          "px-3 text-xs font-medium text-foreground transition-colors",
+          "hover:bg-accent/80 disabled:cursor-default disabled:opacity-50"
+        )}
+      >
+        <FileDiff className="h-3.5 w-3.5 shrink-0 opacity-80" />
+        <span className="min-w-0 flex-1 truncate text-left">
+          {active ? basename(active.path) : "No changed files"}
         </span>
+        {active && <FileStat added={active.added} removed={active.removed} />}
+        <ChevronDown
+          className={cn(
+            "h-3.5 w-3.5 shrink-0 transition-transform",
+            open && "rotate-180"
+          )}
+        />
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          aria-label="Changed files"
+          className={cn(
+            "absolute inset-x-2.5 top-full z-20 -mt-0.5 max-h-[60vh]",
+            "overflow-y-auto rounded-lg border border-border bg-card p-1",
+            "shadow-pop"
+          )}
+        >
+          {props.changes.map((change) => {
+            const selected = change.path === props.activePath;
+            return (
+              <li key={change.path}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  title={change.path}
+                  onClick={() => {
+                    props.onSelect(change.path);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-1.5",
+                    "text-left text-xs",
+                    selected
+                      ? "bg-accent text-foreground"
+                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                  )}
+                >
+                  <FileDiff className="h-3.5 w-3.5 shrink-0 opacity-80" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">
+                      {basename(change.path)}
+                    </span>
+                    <span className="block truncate font-mono text-[10px] opacity-60">
+                      {change.path}
+                    </span>
+                  </span>
+                  <FileStat added={change.added} removed={change.removed} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
+  );
+}
+
+/** Both sides always, zero included: in a list the columns have to line up. */
+function FileStat(props: { added: number; removed: number }) {
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+      <span className="text-destructive">−{props.removed}</span>
+      <span className="text-success">+{props.added}</span>
+    </span>
   );
 }
 
@@ -128,7 +198,7 @@ function DiffPane(props: { change: FileChange }) {
           "px-3.5 py-2"
         )}
       >
-        {/* Where the file lives. The tab above already carries its name, so
+        {/* Where the file lives. The picker above already carries its name, so
             clipping the tail here costs nothing the reader needs. */}
         <span
           title={change.path}

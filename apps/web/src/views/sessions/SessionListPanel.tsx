@@ -1,11 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { Bot, Check, History, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
+import { motion } from "framer-motion";
+import {
+  BookOpen,
+  Bot,
+  Check,
+  History,
+  Loader2,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
 import type { CliHistoryEntry } from "@atelier/protocol";
 import { ListSearch, ListSearchEmpty } from "@/components/ui/list-search";
 import { cn } from "@/lib/cn";
 import { loadFirstCliHistory, loadMoreCliHistory, useCliConsoleStore } from "@/services/cli-console";
-import { CliProviderLogo } from "@/views/cli/CliProviderLogo";
+import {
+  docsForSession,
+  refreshCliDocs,
+  sessionKeys,
+  useCliDocsStore,
+} from "@/services/cli-docs";
 import type { SessionVm } from "@/state/sessions.store";
 
 /**
@@ -28,6 +43,21 @@ function matches(session: SessionVm, query: string): boolean {
   return terms.every((term) => hay.includes(term));
 }
 
+function providerName(providerId: string | null): string {
+  return providerId === "claude" ? "Claude" : "Codex";
+}
+
+/**
+ * A documentation sidebar's nav row: one line of text, no icon, and a soft
+ * rounded highlight on the page you are on.
+ */
+const NAV_ROW =
+  "group relative flex w-full items-center rounded-lg px-3 py-1.5 " +
+  "text-left text-[13px] leading-snug transition-colors";
+const NAV_ROW_IDLE =
+  "text-muted-foreground hover:bg-accent/50 hover:text-foreground";
+const NAV_ROW_ACTIVE = "bg-accent font-medium text-foreground";
+
 export interface SessionListPanelProps {
   sessions: SessionVm[];
   selectedId: string | null;
@@ -39,6 +69,8 @@ export interface SessionListPanelProps {
   onRename: (conversationId: string, title: string) => void;
   onDelete: (conversationId: string) => void;
   onResumeCliHistory: (entry: CliHistoryEntry) => Promise<void>;
+  /** False where the host already has its own history toggle. */
+  historyToggle?: boolean;
 }
 
 /** Agent-session switcher: one row per parallel agent run. */
@@ -51,11 +83,65 @@ export function SessionListPanel(props: SessionListPanelProps) {
   const history = useCliConsoleStore((s) => s.history);
   const historyHasMore = useCliConsoleStore((s) => s.historyHasMore);
   const cliChats = useCliConsoleStore((s) => s.chats);
+  const cliProcessing = useCliConsoleStore((s) => s.processing);
+  const cliResumed = useCliConsoleStore((s) => s.resumed);
+  const cliDocs = useCliDocsStore((s) => s.docs);
+  // The list is what shows the book icon, so it asks for the reports itself
+  // rather than waiting on a CLI pane to have been opened first.
+  useEffect(() => {
+    void refreshCliDocs();
+  }, []);
+  /** How many `document` reports each session has written. */
+  const docCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (cliDocs.length === 0) return counts;
+    for (const session of props.sessions) {
+      const id = session.conversation.id;
+      const keys = sessionKeys(id, cliChats[id], cliResumed);
+      counts[id] = docsForSession(cliDocs, keys).length;
+    }
+    return counts;
+  }, [props.sessions, cliChats, cliResumed, cliDocs]);
+  /*
+   * In progress right now. An agent chat says so itself; a CLI row is an
+   * empty conversation whose status never moves, so its pty is asked instead.
+   */
+  const isBusy = (session: SessionVm): boolean => {
+    if (session.status === "working") return true;
+    const termId = cliChats[session.conversation.id]?.termId;
+    return Boolean(termId && cliProcessing[termId]);
+  };
   const showCliHistory = props.showCliHistory;
   const total = props.sessions.length;
+  /*
+   * When a session was last worked in. A CLI row is an empty conversation
+   * standing in for a pty, so its own updatedAt is only when it was opened;
+   * the provider's transcript knows when it was last actually used.
+   */
+  const lastActive = useMemo(() => {
+    const transcripts = new Map(history.map((entry) => [entry.id, entry]));
+    const byId: Record<string, number> = {};
+    for (const session of props.sessions) {
+      const { id, updatedAt } = session.conversation;
+      const sessionId = cliChats[id]?.sessionId;
+      const transcript = sessionId ? transcripts.get(sessionId) : undefined;
+      byId[id] = Math.max(updatedAt, transcript?.updatedAt ?? 0);
+    }
+    return byId;
+  }, [props.sessions, cliChats, history]);
+  // The session you are in leads; everything else is newest first.
+  const ordered = useMemo(() => {
+    const rank = (session: SessionVm) =>
+      session.conversation.id === props.selectedId ? 0 : 1;
+    const recency = (session: SessionVm) =>
+      lastActive[session.conversation.id] ?? 0;
+    return [...props.sessions].sort(
+      (a, b) => rank(a) - rank(b) || recency(b) - recency(a)
+    );
+  }, [props.sessions, props.selectedId, lastActive]);
   const shown = useMemo(
-    () => props.sessions.filter((session) => matches(session, query)),
-    [props.sessions, query]
+    () => ordered.filter((session) => matches(session, query)),
+    [ordered, query]
   );
   const filtering = query.trim().length > 0;
   const shownHistory = useMemo(() => {
@@ -112,23 +198,25 @@ export function SessionListPanel(props: SessionListPanelProps) {
           <Bot className="h-3.5 w-3.5" />
         </span>
         <span className="island-title">{showCliHistory ? "CLI history" : "Agents"}</span>
-        <button
-          type="button"
-          title={showCliHistory ? "Back to agents" : "Claude and Codex session history"}
-          aria-label={showCliHistory ? "Back to agents" : "Claude and Codex session history"}
-          aria-pressed={showCliHistory}
-          disabled={openingId !== null || historyClosing}
-          onClick={toggleCliHistory}
-          className="tool-btn ml-auto"
-        >
-          {showCliHistory ? <X className="h-4 w-4" /> : <History className="h-4 w-4" />}
-        </button>
+        {props.historyToggle !== false && (
+          <button
+            type="button"
+            title={showCliHistory ? "Back to agents" : "Claude and Codex session history"}
+            aria-label={showCliHistory ? "Back to agents" : "Claude and Codex session history"}
+            aria-pressed={showCliHistory}
+            disabled={openingId !== null || historyClosing}
+            onClick={toggleCliHistory}
+            className="tool-btn ml-auto"
+          >
+            {showCliHistory ? <X className="h-4 w-4" /> : <History className="h-4 w-4" />}
+          </button>
+        )}
         <button
           type="button"
           title="Open Claude or Codex CLI"
           aria-label="Open Claude or Codex CLI"
           onClick={props.onCreate}
-          className="tool-btn"
+          className={cn("tool-btn", props.historyToggle === false && "ml-auto")}
         >
           <Plus className="h-4 w-4" />
         </button>
@@ -144,7 +232,7 @@ export function SessionListPanel(props: SessionListPanelProps) {
           />
         </div>
       )}
-      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
+      <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
         {showCliHistory ? (
           <>
             {historyBusy && history.length === 0 && (
@@ -156,31 +244,32 @@ export function SessionListPanel(props: SessionListPanelProps) {
             {!historyBusy && shownHistory.length === 0 && !historyHasMore && !historyError && (
               <p className="px-2 py-3 text-xs text-muted-foreground">No saved CLI sessions for this workspace.</p>
             )}
-            {shownHistory.map((entry) => (
-              <button
-                key={`${entry.providerId}:${entry.id}`}
-                type="button"
-                disabled={openingId !== null || historyClosing}
-                onClick={() => void openHistory(entry)}
-                aria-current={props.selectedCliHistoryId === `${entry.providerId}:${entry.id}`}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left hover:bg-accent/60 disabled:opacity-60",
-                  props.selectedCliHistoryId === `${entry.providerId}:${entry.id}` && "bg-primary/12 ring-1 ring-primary/30"
-                )}
-                title={`${entry.providerId === "claude" ? "Claude" : "Codex"}: ${entry.title || entry.id}`}
-              >
-                <span className="icon-tile icon-tile-sm shrink-0">
-                  <CliProviderLogo providerId={entry.providerId} className="h-4 w-4" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium">{entry.title || "Untitled session"}</span>
-                  <span className="block truncate text-[11px] text-muted-foreground">
-                    {entry.providerId === "claude" ? "Claude" : "Codex"} · {new Date(entry.updatedAt).toLocaleString()}
-                  </span>
-                </span>
-                {openingId === `${entry.providerId}:${entry.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              </button>
-            ))}
+            {shownHistory.map((entry) => {
+              const key = `${entry.providerId}:${entry.id}`;
+              const current = props.selectedCliHistoryId === key;
+              const title = entry.title || "Untitled session";
+              const when = new Date(entry.updatedAt).toLocaleString();
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  disabled={openingId !== null || historyClosing}
+                  onClick={() => void openHistory(entry)}
+                  aria-current={current}
+                  title={`${providerName(entry.providerId)} · ${when}\n${title}`}
+                  className={cn(
+                    NAV_ROW,
+                    "gap-2 disabled:opacity-60",
+                    current ? NAV_ROW_ACTIVE : NAV_ROW_IDLE
+                  )}
+                >
+                  <span className="min-w-0 flex-1 truncate">{title}</span>
+                  {openingId === key && (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                  )}
+                </button>
+              );
+            })}
             {historyHasMore && (
               <button
                 type="button"
@@ -202,19 +291,27 @@ export function SessionListPanel(props: SessionListPanelProps) {
             onClear={() => setQuery("")}
           />
         )}
-        <AnimatePresence initial={false}>
-          {shown.map((session) => (
-            <SessionRow
-              key={session.conversation.id}
-              session={session}
-              providerId={cliChats[session.conversation.id]?.providerId ?? null}
-              active={session.conversation.id === props.selectedId}
-              onClick={() => props.onSelect(session.conversation.id)}
-              onRename={props.onRename}
-              onDelete={props.onDelete}
-            />
-          ))}
-        </AnimatePresence>
+        {/*
+          No enter/exit fade here. The list re-sorts on every selection and
+          refresh, and a row whose fade was interrupted by one stayed at
+          opacity 0: present, taking its space, and invisible.
+        */}
+        {shown.map((session) => (
+          <SessionRow
+            key={session.conversation.id}
+            session={session}
+            active={session.conversation.id === props.selectedId}
+            busy={isBusy(session)}
+            docCount={docCounts[session.conversation.id] ?? 0}
+            onOpenDocs={() => {
+              props.onSelect(session.conversation.id);
+              useCliDocsStore.getState().open(session.conversation.id);
+            }}
+            onClick={() => props.onSelect(session.conversation.id)}
+            onRename={props.onRename}
+            onDelete={props.onDelete}
+          />
+        ))}
           </>
         )}
       </div>
@@ -248,28 +345,24 @@ export function StatusDot({
 
 function SessionRow(props: {
   session: SessionVm;
-  providerId: string | null;
   active: boolean;
+  /** A run is in flight — shown as a spinner so progress is visible. */
+  busy: boolean;
+  /** Reports the `document` skill wrote from this session. */
+  docCount: number;
+  onOpenDocs: () => void;
   onClick: () => void;
   onRename: (conversationId: string, title: string) => void;
   onDelete: (conversationId: string) => void;
 }) {
   const { session } = props;
-  const providerLabel = props.providerId === "claude"
-    ? "Claude CLI"
-    : props.providerId === "codex" ? "Codex CLI" : null;
   const id = session.conversation.id;
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const last = session.items[session.items.length - 1];
-  const preview =
-    last?.text.replaceAll("\n", " ").trim() || session.previewText;
-  const subtitle =
-    session.status === "working"
-      ? "Working…"
-      : session.status === "error"
-        ? (session.lastError ?? "Error")
-        : (providerLabel ?? preview ?? "No messages yet");
+  const hint =
+    session.status === "error"
+      ? `${session.conversation.title}\n${session.lastError ?? "Error"}`
+      : session.conversation.title;
 
   // A row that scrolls out of view mid-confirm must not keep a live "delete"
   // armed for whenever it comes back.
@@ -281,52 +374,13 @@ function SessionRow(props: {
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0 }}
-      className={cn(
-        // An inset rounded row, not a full-bleed line: each session is a
-        // separate running agent, so it reads better as an object in a list
-        // than as a line in a tree.
-        "group relative flex w-full items-center gap-2.5 rounded-xl py-2 pl-2 pr-2",
-        "transition-colors",
-        props.active
-          ? "bg-primary/12 shadow-sm ring-1 ring-primary/30"
-          : "hover:bg-accent/60"
-      )}
+      // Position only: a re-sort slides rows, and nothing can strand one.
+      layout="position"
+      // A line in a documentation sidebar: the title and nothing else. State
+      // only speaks up when there is some — a spinner while a run is in
+      // progress, a dot on error.
+      className={cn(NAV_ROW, props.active ? NAV_ROW_ACTIVE : NAV_ROW_IDLE)}
     >
-      {/* The tile carries the identity, the dot on its corner carries the
-          state — one object, two facts, instead of a bare dot in a column. */}
-      <span className="relative shrink-0">
-        <motion.span
-          className={cn(
-            "icon-tile icon-tile-sm",
-            props.active && "bg-primary/15 text-primary ring-1 ring-primary/25"
-          )}
-          animate={
-            props.active
-              ? { rotate: [0, -5, 5, 0], scale: [1, 1.08, 1] }
-              : { rotate: 0, scale: 1 }
-          }
-          transition={
-            props.active
-              ? { duration: 1.8, repeat: Infinity, ease: "easeInOut" }
-              : { duration: 0.16 }
-          }
-        >
-          {props.providerId ? (
-            <CliProviderLogo providerId={props.providerId} className="h-4 w-4" />
-          ) : (
-            <Bot className="h-3.5 w-3.5" />
-          )}
-        </motion.span>
-        <StatusDot
-          status={session.status}
-          className="absolute -bottom-0.5 -right-0.5 rounded-full ring-2 ring-card"
-        />
-      </span>
-
       {renaming ? (
         <RenameField
           initial={session.conversation.title}
@@ -341,28 +395,26 @@ function SessionRow(props: {
           type="button"
           onClick={props.onClick}
           onDoubleClick={() => setRenaming(true)}
-          title={session.conversation.title}
+          title={hint}
           aria-current={props.active}
-          className="min-w-0 flex-1 pr-1 text-left group-hover:pr-14 group-focus-within:pr-14"
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2 text-left",
+            props.docCount > 0
+              ? "group-hover:pr-20 group-focus-within:pr-20"
+              : "group-hover:pr-14 group-focus-within:pr-14"
+          )}
         >
-          <span
-            className={cn(
-              "block truncate text-[13px] leading-snug",
-              props.active ? "font-semibold" : "font-medium"
-            )}
-          >
+          <span className="min-w-0 flex-1 truncate">
             {session.conversation.title}
           </span>
-          <span
-            className={cn(
-              "block truncate text-[11px]",
-              session.status === "error"
-                ? "text-destructive"
-                : "text-muted-foreground"
-            )}
-          >
-            {subtitle}
-          </span>
+          {props.busy ? (
+            <Loader2
+              aria-label="In progress"
+              className="h-3.5 w-3.5 shrink-0 animate-spin text-primary"
+            />
+          ) : (
+            session.status === "error" && <StatusDot status="error" />
+          )}
         </button>
       )}
 
@@ -374,9 +426,8 @@ function SessionRow(props: {
       {!renaming && (
         <span
           className={cn(
-            "absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5",
-            "rounded-lg opacity-0 transition-opacity",
-            props.active ? "bg-primary/10" : "bg-accent",
+            "absolute right-1 top-1/2 flex -translate-y-1/2 items-center",
+            "gap-0.5 opacity-0 transition-opacity",
             "group-hover:opacity-100 group-focus-within:opacity-100",
             confirmDelete && "opacity-100"
           )}
@@ -422,6 +473,21 @@ function SessionRow(props: {
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
+              {props.docCount > 0 && (
+                <button
+                  type="button"
+                  title={
+                    props.docCount === 1
+                      ? "Open documentation"
+                      : `Open documentation (${props.docCount})`
+                  }
+                  aria-label={`Open documentation for ${session.conversation.title}`}
+                  onClick={props.onOpenDocs}
+                  className="tool-btn"
+                >
+                  <BookOpen className="h-3.5 w-3.5" />
+                </button>
+              )}
             </>
           )}
         </span>

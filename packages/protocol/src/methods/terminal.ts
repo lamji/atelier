@@ -27,6 +27,15 @@ export const terminalMethods = {
     }),
     result: z.object({ session: TerminalSession }),
   },
+  /**
+   * Start a shell ahead of the create that is about to ask for one, so that
+   * create finds it already at its prompt. Best-effort and idempotent; an
+   * unused warm shell is ended agent-side after a short while.
+   */
+  "terminal.prewarm": {
+    params: z.object({}).optional(),
+    result: z.object({}),
+  },
   "terminal.write": {
     params: z.object({ termId: z.string(), data: z.string() }),
     result: z.object({}),

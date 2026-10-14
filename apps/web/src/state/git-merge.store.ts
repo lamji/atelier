@@ -62,6 +62,8 @@ export interface GitMergeStore {
 
   /** Conversation the AI resolver runs in (one per merge). */
   aiConversationId: string | null;
+  /** The one-call fast path is running (no conversation, no task). */
+  aiQuick: boolean;
   /** Paths the current AI task was asked to resolve; null when idle. */
   aiPaths: string[] | null;
   /** Files the AI resolved and the app auto-staged — flagged for review. */
@@ -111,6 +113,7 @@ const initial = {
   refsLoading: false,
   lastRun: null as SyncRunResult | null,
   aiConversationId: null,
+  aiQuick: false,
   aiPaths: null,
   aiResolved: [],
   aiSummary: null,

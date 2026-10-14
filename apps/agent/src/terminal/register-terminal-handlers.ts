@@ -1,8 +1,11 @@
-import { freePort, hasCommand } from "@atelier/shared/node";
+import { atelierDataRoot, freePort, hasCommand } from "@atelier/shared/node";
 import type { Router } from "../bridge/router.js";
 import type { CliSessionDiffRepo } from "../storage/repositories/cli-session-diffs.js";
 import type { CliSessionHistoryRepo } from "../storage/repositories/cli-session-history.js";
 import { scanCliHistoryPage, suggestCliSessionTitle } from "./cli-history.js";
+import { listCliDocs } from "./cli-docs.js";
+import { cliSkillPaths } from "./cli-skills.js";
+import { prepareSessionHook } from "./cli-session-hook.js";
 import type { TerminalManager } from "./terminal-manager.js";
 
 export function registerTerminalHandlers(
@@ -33,6 +36,11 @@ export function registerTerminalHandlers(
   router.register("terminal.create", (params) => ({
     session: terminals.create(params),
   }));
+
+  router.register("terminal.prewarm", () => {
+    terminals.prewarm();
+    return {};
+  });
 
   router.register("terminal.write", (params) => {
     terminals.write(params.termId, params.data);
@@ -72,6 +80,25 @@ export function registerTerminalHandlers(
       hasMore: scan.hasMore || sessionHistory.count(workspaceRoot, params?.providerId) > visible,
     };
   });
+
+  // Ready before any CLI starts: the hook's location is in the env every
+  // pty inherits, and Claude's settings file is on disk.
+  const cliSkills = cliSkillPaths();
+  let launch = { claude: "", codex: "" };
+  try {
+    launch = prepareSessionHook({
+      root: cliSkills.root,
+      dataRoot: atelierDataRoot(),
+    });
+  } catch {
+    // No hook, but the skills still load where the CLI can load them.
+    if (cliSkills.root) launch.claude = `--add-dir "${cliSkills.root}"`;
+  }
+  router.register("cli.skills", () => ({ ...cliSkills, launch }));
+
+  router.register("cli.docs.list", async () => ({
+    docs: await listCliDocs(workspaceRoot),
+  }));
 
   router.register("cli.title.autoRename", async ({ providerId, sessionId }) => {
     const title = await suggestCliSessionTitle(workspaceRoot, providerId, sessionId);

@@ -2,6 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { openExternal } from "@/lib/desktop";
 import { retintDarkSurfaces, TuiSurfaceFilter } from "@/lib/tui-surface";
@@ -15,6 +16,8 @@ interface Entry {
   term: Terminal;
   fit: FitAddon;
   search: SearchAddon;
+  /** The GPU renderer, or null while this terminal draws with the DOM. */
+  gpu: WebglAddon | null;
   /** The DOM element the terminal is currently opened into. */
   element: HTMLElement | null;
   /**
@@ -128,6 +131,30 @@ export interface TerminalSearchOptions {
  * Holds live xterm instances outside React state. terminal.data events are
  * written straight to the instance — no re-renders on output streams.
  */
+/**
+ * The WebGL renderer is opt-in: `localStorage["atelier.terminal.gpu"] = "1"`.
+ * It was switched on for everyone once and terminals came up blank in the
+ * running app, though the same options render correctly in isolation. Until
+ * that is understood the DOM renderer, which is known to work, is the default.
+ */
+function gpuRendererEnabled(): boolean {
+  try {
+    return localStorage.getItem("atelier.terminal.gpu") === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The mark a provider CLI draws in front of its composer's first row: Codex
+ * a single angle quote, Claude Code a heavy one. Both draw the same mark in
+ * front of the selected option of a dialog, so finding it is not proof of a
+ * composer - what follows it has to be read.
+ */
+const COMPOSER_PROMPT = /^\s*[\u203a\u276f>]\s(.*)$/;
+/** A composer taller than this is not searched for its prompt mark. */
+const COMPOSER_MAX_ROWS = 12;
+
 class TerminalRegistry {
   private entries = new Map<string, Entry>();
   private searchRequest: (termId: string) => void = () => {};
@@ -172,6 +199,56 @@ class TerminalRegistry {
     return () => {
       if (this.inputInterceptors.get(termId) === interceptor) this.inputInterceptors.delete(termId);
     };
+  }
+
+  /**
+   * Send bytes to the pty as input the user typed: past the interceptor,
+   * which has already had its say, but through the observers.
+   */
+  sendInput(termId: string, data: string): void {
+    void bridge.rpc("terminal.write", { termId, data }).catch(() => {});
+    // Observers see the bytes the provider receives, so a consumed app
+    // command cannot become a topic or a processing event.
+    for (const listener of this.inputListeners.get(termId) ?? []) {
+      try {
+        listener(data);
+      } catch {
+        // a watcher's problem is not the terminal's
+      }
+    }
+  }
+
+  /**
+   * What is sitting in a CLI's composer, read off the screen.
+   *
+   * The keystrokes alone do not say: a command recalled from history, picked
+   * from the CLI's own menu, or completed by it never passes through as the
+   * text that ends up being sent. The screen is the one place that shows
+   * what Enter is about to submit. Walks up from the cursor to the row that
+   * carries the composer's prompt mark; null when there is none in reach.
+   * `maxRows` is how far up to look, for a caller that knows the composer
+   * holds something long.
+   */
+  composerText(
+    termId: string,
+    maxRows: number = COMPOSER_MAX_ROWS
+  ): string | null {
+    const buffer = this.entries.get(termId)?.term.buffer.active;
+    if (!buffer) return null;
+    const cursorRow = buffer.baseY + buffer.cursorY;
+    const rows: string[] = [];
+    const top = Math.max(0, cursorRow - maxRows);
+    for (let row = cursorRow; row >= top; row -= 1) {
+      const text = buffer.getLine(row)?.translateToString(true) ?? "";
+      const first = text.match(COMPOSER_PROMPT);
+      if (!first) {
+        rows.unshift(text.trim());
+        continue;
+      }
+      rows.unshift((first[1] ?? "").trim());
+      return rows.join(" ").replace(/\s+/g, " ").trim();
+    }
+    return null;
   }
 
   /** Observe raw pty output without coupling activity state to xterm mounts. */
@@ -258,16 +335,7 @@ class TerminalRegistry {
           // A failed app command must not swallow ordinary terminal input.
         }
         if (!forwarded) return;
-        void bridge.rpc("terminal.write", { termId, data: forwarded }).catch(() => {});
-        // Observers see the bytes the provider receives, so a consumed app
-        // command cannot become a topic or a processing event.
-        for (const listener of this.inputListeners.get(termId) ?? []) {
-          try {
-            listener(forwarded);
-          } catch {
-            // a watcher's problem is not the terminal's
-          }
-        }
+        this.sendInput(termId, forwarded);
       });
       // Overrides xterm's own OSC 11 answer (see the comment on themeFor)
       // with the colour actually painted behind this terminal. Registered
@@ -285,6 +353,7 @@ class TerminalRegistry {
         term,
         fit,
         search,
+        gpu: null,
         element: null,
         stick: true,
         detach: null,
@@ -319,11 +388,40 @@ class TerminalRegistry {
       entry.term.options.theme = this.themeFor(dark, entry.profile);
       if (entry.term.element) container.appendChild(entry.term.element);
       else entry.term.open(container);
+      this.useGpuRenderer(entry);
       entry.element = container;
       this.watchViewport(entry);
       this.fitAndSync(termId);
     }
     return entry;
+  }
+
+  /**
+   * Draw this terminal on the GPU.
+   *
+   * xterm's default renderer is DOM: every row is a line of spans, and a
+   * scroll or a TUI repaint rebuilds them. A provider CLI repaints its whole
+   * composer on each keystroke, so that renderer is what typing and
+   * scrolling were waiting on. The WebGL one draws the same cells from a
+   * glyph atlas in a single pass.
+   *
+   * Strictly an upgrade: a machine with no WebGL, or a context the browser
+   * takes back (it caps how many a page may hold), leaves the terminal on
+   * the DOM renderer it already had.
+   */
+  private useGpuRenderer(entry: Entry): void {
+    if (entry.gpu || !gpuRendererEnabled()) return;
+    try {
+      const gpu = new WebglAddon();
+      gpu.onContextLoss(() => {
+        gpu.dispose();
+        if (entry.gpu === gpu) entry.gpu = null;
+      });
+      entry.term.loadAddon(gpu);
+      entry.gpu = gpu;
+    } catch {
+      entry.gpu = null;
+    }
   }
 
   /**

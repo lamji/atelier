@@ -33,11 +33,13 @@ interface TerminalStore {
   addSession: (session: TerminalSession) => void;
   removeSession: (termId: string) => void;
   renameSession: (termId: string, name: string) => void;
+  /** The shell moved; returns false when the terminal is not a dock tab. */
+  setCwd: (termId: string, cwd: string) => boolean;
   setProfile: (profile: TerminalProfileId) => void;
   setActive: (termId: string | null) => void;
 }
 
-export const useTerminalStore = create<TerminalStore>((set) => ({
+export const useTerminalStore = create<TerminalStore>((set, get) => ({
   sessions: [],
   activeTermId: null,
   labels: {},
@@ -79,6 +81,14 @@ export const useTerminalStore = create<TerminalStore>((set) => ({
       if (!trimmed) return s;
       return { labels: { ...s.labels, [termId]: trimmed } };
     }),
+
+  setCwd: (termId, cwd) => {
+    if (!get().sessions.some((x) => x.id === termId)) return false;
+    set((s) => ({
+      sessions: s.sessions.map((x) => (x.id === termId ? { ...x, cwd } : x)),
+    }));
+    return true;
+  },
 
   setProfile: (profile) => {
     localStorage.setItem(TERMINAL_PROFILE_KEY, profile);

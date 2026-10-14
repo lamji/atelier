@@ -61,6 +61,7 @@
     "smoke:vec": "tsx scripts/vec-smoke.ts",
     "smoke:impact": "tsx scripts/impact-smoke.ts",
     "smoke:terminal-prompt": "tsx scripts/terminal-prompt-smoke.ts",
+    "smoke:terminal-cwd": "tsx scripts/terminal-cwd-smoke.ts",
     "smoke:terminal-confinement": "tsx scripts/terminal-confinement-smoke.ts",
     "smoke:trivial-chat": "tsx scripts/trivial-chat-smoke.ts",
     "smoke:session-isolation": "tsx scripts/session-isolation-smoke.ts",
