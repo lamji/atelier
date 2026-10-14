@@ -1,6 +1,6 @@
 {
   "name": "@atelier/desktop",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "private": true,
   "description": "Atelier",
   "main": "dist/main.cjs",
