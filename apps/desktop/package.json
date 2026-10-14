@@ -3,6 +3,7 @@
   "version": "1.0.20",
   "private": true,
   "description": "Atelier",
+  "homepage": "https://github.com/lamji/atelier",
   "main": "dist/main.cjs",
   "scripts": {
     "bundle": "node scripts/bundle.mjs",
