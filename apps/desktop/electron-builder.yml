@@ -43,6 +43,27 @@ win:
     signingHashAlgorithms:
       - sha256
     rfc3161TimeStampServer: http://timestamp.digicert.com
+linux:
+  # Built inside a Linux container (scripts/build-linux.mjs) so the native
+  # backend modules are the Linux ones; a cross-build from Windows would
+  # pack the Windows .node files.
+  target:
+    - AppImage
+    - deb
+  artifactName: Atelier-${version}-${arch}.${ext}
+  icon: build/icon.png
+  category: Development
+  maintainer: lamji <lampagojick5@gmail.com>
+  synopsis: AI code editor that runs Claude Code and Codex
+  executableName: atelier
+deb:
+  # git is what the agent shells out to; node is for the projects opened.
+  depends:
+    - git
+    - libnss3
+    - libgtk-3-0
+    - libxss1
+    - libasound2 | libasound2t64
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
