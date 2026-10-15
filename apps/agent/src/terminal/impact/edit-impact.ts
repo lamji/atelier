@@ -10,7 +10,7 @@ import { parseSource } from "../../knowledge/parsing/parser.js";
 /**
  * What an edit to one file can break, found with tree-sitter.
  *
- * Runs before a CLI agent edits a file (the impact-check skill's
+ * Runs before a CLI agent edits a file (the atelier-impact-check skill's
  * PreToolUse hook) and again after a fix (`--diff`). It finds the functions
  * the edit lands in, then every place in the repo that uses them, and
  * reads each of those places with tree-sitter so a name in a comment, a
@@ -386,7 +386,7 @@ export function formatImpact(
           "that no longer fits, then run the tests above."
       : "Keep every site above working: if the signature, return value or " +
           "behaviour changes, update or re-check each one. After the fix, " +
-          "re-check them and run the tests above (impact-check skill)."
+          "re-check them and run the tests above (atelier-impact-check skill)."
   );
   return lines.join("\n");
 }

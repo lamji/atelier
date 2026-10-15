@@ -33,7 +33,14 @@ export const cliMethods = {
     result: z.object({
       /** Holds `.claude/skills/<name>`; null when the app ships none. */
       root: z.string().nullable(),
-      skills: z.array(z.object({ name: z.string(), file: z.string() })),
+      skills: z.array(
+        z.object({
+          name: z.string(),
+          file: z.string(),
+          /** Codex loads it itself (linked into its skills folder). */
+          codexNative: z.boolean().default(false),
+        })
+      ),
       /**
        * What to add to each CLI's launch command, quoted for the pty's
        * shell: the skills folder and the SessionStart hook that loads them.
@@ -43,7 +50,7 @@ export const cliMethods = {
         .default({ claude: "", codex: "" }),
     }),
   },
-  /** The reports the `document` skill saved in this workspace, newest first. */
+  /** The reports the `atelier-init-feature` skill saved in this workspace, newest first. */
   "cli.docs.list": {
     params: z.object({}).optional(),
     result: z.object({ docs: z.array(CliDoc) }),

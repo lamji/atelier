@@ -258,7 +258,7 @@ function ProviderGroup(props: {
 }
 
 /** How long ago, in the resume screen's own shorthand. */
-function since(ms: number): string {
+export function since(ms: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.round(seconds / 60);

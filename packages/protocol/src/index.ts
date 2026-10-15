@@ -20,4 +20,9 @@ export * from "./models/context.js";
 export * from "./models/llm-request.js";
 export * from "./models/wiki.js";
 export * from "./models/fs.js";
-export { Settings, UserRule } from "./methods/settings.js";
+export {
+  MemoryEntry,
+  MemoryType,
+  Settings,
+  UserRule,
+} from "./methods/settings.js";

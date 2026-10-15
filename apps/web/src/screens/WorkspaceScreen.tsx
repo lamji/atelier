@@ -1,14 +1,13 @@
 import { AppShell } from "@/views/shell/AppShell";
 
 /**
- * The IDE itself. Mounted as soon as a workspace is selected — deliberately
- * BEFORE its agent has finished forking, so the app opens onto the workbench
- * instead of a "Starting the agent…" spinner.
+ * The IDE itself. Mounted once the workspace's agent is connected; until
+ * then App shows ConnectingScreen with the open's progress. The chunk is
+ * still warmed early, so it is parsed by the time the agent answers.
  *
- * That means the view-model hooks do see a half-connected state: reads queue
- * inside BridgeClient until the port lands, and anything that acts on the
- * agent is gated on `vm.connected`, so controls arrive disabled and light up
- * when the port does. The status bar carries the connection state.
+ * A later disconnect (the agent dying) keeps it mounted: anything that acts
+ * on the agent is gated on `vm.connected`, and the status bar and alerts
+ * carry the connection state.
  */
 export default function WorkspaceScreen() {
   return <AppShell />;

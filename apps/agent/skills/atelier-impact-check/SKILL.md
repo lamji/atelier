@@ -1,9 +1,9 @@
 ---
-name: impact-check
+name: atelier-impact-check
 description: Prevent regressions when changing code. Before each edit Atelier adds a tree-sitter impact list of every place that uses the code being changed; keep those working, then run the --diff check and the related tests after the fix.
 ---
 
-# Impact Check
+# Atelier Impact Check
 
 Every fix can break the code that depends on what it changes. This skill
 makes that visible before the edit and checks it after.

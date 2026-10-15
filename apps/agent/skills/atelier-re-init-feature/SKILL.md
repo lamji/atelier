@@ -1,16 +1,21 @@
 ---
-name: reference-doc
-description: Read back the flow reports saved under .atelier/doc-agent so their findings are in context again. Use after a compact, a cleared or new session, or to build on a trace another session wrote.
+name: atelier-re-init-feature
+description: Read back the flow reports saved under .atelier/doc-agent so their findings are in context again. Use after a compact or a cleared session, or when the user asks to build on a trace another session wrote. A new session does not need it.
 ---
 
-# Reference Doc
+# Atelier Re-init Feature
 
-Bring the saved flow reports back into this conversation. The `document`
-skill writes them; a compact, a cleared session, or a new session loses
-what they said.
+Bring the saved flow reports back into this conversation. The
+`atelier-init-feature` skill writes them; a compact, a cleared session, or
+a new session loses what they said.
 
 This skill only reads. Do not change source code.
 Do not edit, rewrite, or delete a report.
+
+The reports are in the directory this session was started in. This skill's
+own files ship inside the Atelier app and are not part of the project:
+never search or read the folder they live in. Finding and choosing reports
+is internal; do not narrate it. Reply with what the reports say.
 
 Everything after the command says which reports are wanted. It may be
 empty.

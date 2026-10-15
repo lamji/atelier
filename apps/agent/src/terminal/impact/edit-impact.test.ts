@@ -156,7 +156,7 @@ test("the report names each site and says what to do after the edit", async () =
   assert.match(text, /formatMoney \(function, exported, lines 1-3\)/);
   assert.match(text, /src\/lib\/receipt\.ts:4 .*buildReceipt/);
   assert.match(text, /Tests: src\/lib\/money\.test\.ts/);
-  assert.match(text, /impact-check/);
+  assert.match(text, /atelier-impact-check/);
 });
 
 const here = path.dirname(fileURLToPath(import.meta.url));

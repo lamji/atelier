@@ -19,6 +19,11 @@ import {
   listUserRules,
   setUserRuleEnabled,
 } from "./orchestrator/user-rules.js";
+import {
+  deleteMemory,
+  listMemory,
+  saveMemory,
+} from "./orchestrator/project-memory.js";
 import { pickerRoster } from "./providers/roster.js";
 import { CodexToolBridge } from "./providers/codex/tool-bridge.js";
 import { registerProviderHandlers } from "./providers/register-provider-handlers.js";
@@ -856,6 +861,18 @@ export function createAgentRuntime(
   }));
   router.register("rules.delete", async (params) => {
     await deleteUserRule(config.workspaceRoot, params.path);
+    return { ok: true };
+  });
+  // The workspace's own memory, read into every CLI session (see
+  // cli-hooks/session-start.mjs); Settings shows and edits it.
+  router.register("memory.list", async () => ({
+    entries: await listMemory(config.workspaceRoot),
+  }));
+  router.register("memory.save", async (params) => ({
+    entry: await saveMemory(config.workspaceRoot, params),
+  }));
+  router.register("memory.delete", async (params) => {
+    await deleteMemory(config.workspaceRoot, params.name);
     return { ok: true };
   });
   registerMiscHandlers(

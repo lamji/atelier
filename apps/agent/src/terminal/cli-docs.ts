@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { CliDoc } from "@atelier/protocol";
 
-/** Where the `document` skill saves its reports, under the workspace root. */
+/** Where the `atelier-init-feature` skill saves its reports, under the workspace root. */
 export const CLI_DOCS_DIR = ".atelier/doc-agent";
 
 /** Enough of a report to hold its frontmatter and first heading. */
@@ -107,7 +107,7 @@ async function changesSince(
 }
 
 /**
- * The reports the `document` skill has saved in this workspace, newest first.
+ * The reports the `atelier-init-feature` skill has saved in this workspace, newest first.
  *
  * A report's id is its file name, so it is stable and needs no index; the
  * `session` in its frontmatter is what ties it back to the CLI session that

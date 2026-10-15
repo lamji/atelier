@@ -91,7 +91,7 @@ export function SessionListPanel(props: SessionListPanelProps) {
   useEffect(() => {
     void refreshCliDocs();
   }, []);
-  /** How many `document` reports each session has written. */
+  /** How many `atelier-init-feature` reports each session has written. */
   const docCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     if (cliDocs.length === 0) return counts;
@@ -348,7 +348,7 @@ function SessionRow(props: {
   active: boolean;
   /** A run is in flight — shown as a spinner so progress is visible. */
   busy: boolean;
-  /** Reports the `document` skill wrote from this session. */
+  /** Reports the `atelier-init-feature` skill wrote from this session. */
   docCount: number;
   onOpenDocs: () => void;
   onClick: () => void;

@@ -5,7 +5,8 @@ import type { CliSessionHistoryRepo } from "../storage/repositories/cli-session-
 import { scanCliHistoryPage, suggestCliSessionTitle } from "./cli-history.js";
 import { listCliDocs } from "./cli-docs.js";
 import { cliSkillPaths } from "./cli-skills.js";
-import { prepareSessionHook } from "./cli-session-hook.js";
+import { cliTurnDir, prepareSessionHook } from "./cli-session-hook.js";
+import { linkCodexSkills } from "./codex-skill-links.js";
 import type { TerminalManager } from "./terminal-manager.js";
 
 export function registerTerminalHandlers(
@@ -84,6 +85,16 @@ export function registerTerminalHandlers(
   // Ready before any CLI starts: the hook's location is in the env every
   // pty inherits, and Claude's settings file is on disk.
   const cliSkills = cliSkillPaths();
+  // In Codex's `$` menu like its own skills, by links into the app. A
+  // linked skill is run in Codex by its `$name`, with no path to the app.
+  const codexNative = linkCodexSkills(cliSkills.skills);
+  const offeredSkills = {
+    ...cliSkills,
+    skills: cliSkills.skills.map((skill) => ({
+      ...skill,
+      codexNative: codexNative.has(skill.name),
+    })),
+  };
   let launch = { claude: "", codex: "" };
   try {
     launch = prepareSessionHook({
@@ -94,7 +105,10 @@ export function registerTerminalHandlers(
     // No hook, but the skills still load where the CLI can load them.
     if (cliSkills.root) launch.claude = `--add-dir "${cliSkills.root}"`;
   }
-  router.register("cli.skills", () => ({ ...cliSkills, launch }));
+  // The turn-end hook's markers say when a CLI turn ended; without the hook
+  // (no app skills) nothing is written and the UI reads the screen instead.
+  terminals.watchTurnEnds(cliTurnDir(atelierDataRoot()));
+  router.register("cli.skills", () => ({ ...offeredSkills, launch }));
 
   router.register("cli.docs.list", async () => ({
     docs: await listCliDocs(workspaceRoot),

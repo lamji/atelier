@@ -27,7 +27,11 @@ import {
   frontendReviewRequest,
   frontendReviewTimelineContext,
 } from "@/lib/frontend-review";
-import { isCliConsoleSession, useCliConsoleStore } from "./cli-console.js";
+import {
+  cliTurnEnded,
+  isCliConsoleSession,
+  useCliConsoleStore,
+} from "./cli-console.js";
 import { terminalRegistry } from "./terminal-registry.js";
 import { syncRoster } from "./terminal-roster.js";
 import { useConnectionStore } from "@/state/connection.store";
@@ -793,6 +797,9 @@ function dispatch(frame: EventFrame): void {
       if (moved) syncRoster();
       break;
     }
+    case "terminal.turn.ended":
+      cliTurnEnded(String(payload.termId));
+      break;
     case "terminal.session.closed": {
       const termId = String(payload.termId);
       // If this was a CLI-mode session, drop its row from that list too —

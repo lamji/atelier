@@ -33,7 +33,7 @@ export const CliSessionChange = z.object({
 export type CliSessionChange = z.infer<typeof CliSessionChange>;
 
 /**
- * One report written by the `document` skill into `.atelier/doc-agent`.
+ * One report written by the `atelier-init-feature` skill into `.atelier/doc-agent`.
  * The id is the report's file name without `.md`.
  */
 export const CliDoc = z.object({

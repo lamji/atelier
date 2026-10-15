@@ -3,7 +3,7 @@ import type { CliDoc } from "@atelier/protocol";
 import { bridge } from "./bridge-client.js";
 
 /**
- * The reports the `document` skill has written into this workspace's
+ * The reports the `atelier-init-feature` skill has written into this workspace's
  * `.atelier/doc-agent`, and which session's reports are open in the main
  * view. Each report names the session that wrote it, which is how a row in
  * the Agents list knows it has documentation to show.

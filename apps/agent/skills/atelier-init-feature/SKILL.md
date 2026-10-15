@@ -1,13 +1,22 @@
 ---
-name: document
+name: atelier-init-feature
 description: Trace a code flow end-to-end with file:line evidence, including which branches this environment runs, and save the report under .atelier/doc-agent. Use for "what calls what", login, checkout, API handler, button click, or background job questions, and before naming the cause of a wrong value or bug, so the answer rests on the trace instead of a guess.
 ---
 
-# Document
+# Atelier Init Feature
 
 Build an evidence-backed trace of the requested flow and save it as a
 markdown report in the project. This is investigation only: do not change
 source code.
+
+The project is the directory this session was started in. This skill's own
+files ship inside the Atelier app and are not part of the project: never
+search, read, or trace the folder they live in.
+
+Start investigating the flow straight away. Where the report goes, which
+reports exist, the session id, and the frontmatter are internal: handle
+them silently and do not narrate them. The user sees progress on the flow
+itself, and the report's path once, in the final reply.
 
 Everything after the command is the flow to document. If nothing was given,
 ask which flow to trace before reading anything.

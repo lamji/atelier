@@ -36,6 +36,31 @@ export const UserRule = z.object({
 });
 export type UserRule = z.infer<typeof UserRule>;
 
+/** What kind of fact a workspace memory holds. */
+export const MemoryType = z.enum([
+  "correction",
+  "environment",
+  "naming",
+  "preference",
+  "fact",
+]);
+export type MemoryType = z.infer<typeof MemoryType>;
+
+/**
+ * One entry of the workspace's own memory: a file under .atelier/memory,
+ * read into every CLI session Atelier starts.
+ */
+export const MemoryEntry = z.object({
+  /** The file stem, kebab-case: `.atelier/memory/<name>.md`. */
+  name: z.string(),
+  /** One line: what the entry is about, shown in the list. */
+  description: z.string(),
+  type: MemoryType,
+  body: z.string(),
+  updatedAt: z.number(),
+});
+export type MemoryEntry = z.infer<typeof MemoryEntry>;
+
 export const settingsMethods = {
   "settings.get": {
     params: z.object({}).optional(),
@@ -61,6 +86,26 @@ export const settingsMethods = {
   },
   "rules.delete": {
     params: z.object({ path: z.string() }),
+    result: z.object({ ok: z.boolean() }),
+  },
+  /** The workspace's own memory, newest first. */
+  "memory.list": {
+    params: z.object({}).optional(),
+    result: z.object({ entries: z.array(MemoryEntry) }),
+  },
+  /** Create or edit; a changed name renames the file. */
+  "memory.save": {
+    params: z.object({
+      name: z.string(),
+      description: z.string(),
+      type: MemoryType,
+      body: z.string(),
+      previousName: z.string().optional(),
+    }),
+    result: z.object({ entry: MemoryEntry }),
+  },
+  "memory.delete": {
+    params: z.object({ name: z.string() }),
     result: z.object({ ok: z.boolean() }),
   },
 } as const;

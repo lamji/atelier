@@ -341,6 +341,11 @@ export const eventPayloads = {
   "terminal.cwd": z.object({ termId: z.string(), cwd: z.string() }),
   "terminal.data": z.object({ termId: z.string(), data: z.string() }),
   "terminal.exit": z.object({ termId: z.string(), exitCode: z.number().nullable() }),
+  /**
+   * A Claude or Codex turn in this terminal ended, as reported by the CLI's
+   * own Stop hook: what keeps the session's reports current.
+   */
+  "terminal.turn.ended": z.object({ termId: z.string() }),
 
   // git
   "git.state.changed": z.object({

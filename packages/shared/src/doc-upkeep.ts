@@ -1,5 +1,5 @@
 /**
- * Keeping a session's `document` reports current.
+ * Keeping a session's `atelier-init-feature` reports current.
  *
  * A report is a snapshot of the code at the moment it was written. When a
  * file it cites changes later in the session, Atelier asks the same CLI

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef } from "react";
+import { ConnectingScreen } from "@/screens/ConnectingScreen";
 import { OpeningScreen } from "@/screens/OpeningScreen";
 import { LoginScreen } from "@/screens/LoginScreen";
 import { SessionConflictModal } from "@/screens/SessionConflictModal";
@@ -12,6 +13,7 @@ import {
 } from "@/services/project-switch";
 import { useProjectsStore } from "@/state/projects.store";
 import { useAuthStore } from "@/state/auth.store";
+import { useConnectionStore } from "@/state/connection.store";
 
 /**
  * The workspace carries Monaco, xterm and the graph stack — lazy so the
@@ -50,6 +52,8 @@ export function App() {
   const projects = useProjectsStore((s) => s.projects);
   const activeId = useProjectsStore((s) => s.activeId);
   const loaded = useProjectsStore((s) => s.loaded);
+  const switching = useProjectsStore((s) => s.switching);
+  const connection = useConnectionStore((s) => s.state);
 
   useEffect(() => initializeAuth(), [initializeAuth]);
 
@@ -97,6 +101,10 @@ export function App() {
     if (projects.length > 0) return <OpeningScreen />;
     return <WelcomeScreen />;
   }
+  // The agent is coming up: the window is the progress, not the workbench.
+  // "disconnected" is not gated — a dead agent keeps the shell, which
+  // carries the alert that offers to reopen it.
+  if (switching || connection === "connecting") return <ConnectingScreen />;
   return (
     <ErrorBoundary where="Workspace">
       {/* The workbench's own frame, not a spinner: the chunk being fetched

@@ -41,7 +41,7 @@ const options = {
     "embed-worker": path.join(root, "src", "knowledge", "embeddings", "embed-worker.mjs"),
     // Stdio MCP server Codex spawns; must sit beside utility-main.mjs.
     "codex-mcp": path.join(root, "src", "providers", "codex", "mcp-main.ts"),
-    // The impact-check hook the CLIs run before an edit. Written after
+    // The atelier-impact-check hook the CLIs run before an edit. Written after
     // copySkills has laid out cli-skills/, next to the other hooks.
     "cli-skills/hooks/edit-impact": path.join(
       root, "src", "terminal", "impact", "edit-impact-main.ts",

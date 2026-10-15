@@ -4,7 +4,7 @@ import path from "node:path";
 import { analyzeEdit, formatImpact, type EditImpact } from "./edit-impact.js";
 
 /**
- * The impact-check hook and command, bundled into the app as
+ * The atelier-impact-check hook and command, bundled into the app as
  * `cli-skills/hooks/edit-impact.mjs` and run on the app's own runtime.
  *
  *   edit-impact.mjs claude|codex   PreToolUse / PostToolUse hook: event

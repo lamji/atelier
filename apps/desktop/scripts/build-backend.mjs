@@ -103,9 +103,9 @@ fs.copyFileSync(
   path.join(agentSrc, "storage", "schema.sql"),
   path.join(agentOut, "schema.sql"),
 );
-// App skills: /debugging, /document, and the tree the provider CLIs load.
+// App skills: /debugging, /atelier-init-feature, and the tree the provider CLIs load.
 copySkills(path.join(repoRoot, "apps", "agent"), agentOut);
-// The impact-check hook the CLIs run before an edit; after copySkills,
+// The atelier-impact-check hook the CLIs run before an edit; after copySkills,
 // which clears cli-skills/ before laying it out.
 await esbuild({
   ...shared,

@@ -13,7 +13,7 @@ import {
 } from "@/services/cli-docs";
 
 /**
- * The documentation a session wrote with `/document` or `$document`, laid
+ * The documentation a session wrote with `/atelier-init-feature` or `$atelier-init-feature`, laid
  * over the main view.
  *
  * A report is a markdown file in the workspace, so it is shown by the same
@@ -139,8 +139,9 @@ export function CliDocViewer(props: { conversationId: string }) {
         <div className="min-w-0 flex-1">
           {!selected ? (
             <p className="px-6 py-4 text-sm text-muted-foreground">
-              This session has no documentation yet. Run /document in Claude
-              or $document in Codex to write some.
+              This session has no documentation yet. Run
+              /atelier-init-feature in Claude or $atelier-init-feature in
+              Codex to write some.
             </p>
           ) : error ? (
             <p className="m-4 rounded-lg bg-destructive/10 px-2 py-1 text-xs text-destructive">

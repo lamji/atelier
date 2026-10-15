@@ -1,0 +1,4 @@
+interface:
+  display_name: "Atelier Remember"
+  short_description: "Save a lasting project fact to workspace memory"
+  default_prompt: "Use $atelier-remember to save this as a workspace memory entry under .atelier/memory."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Atelier Re-init Feature"
+  short_description: "Read saved flow reports back into context"
+  default_prompt: "Use $atelier-re-init-feature to read this session's reports under .atelier/doc-agent back into context, and check what they cite before relying on it."

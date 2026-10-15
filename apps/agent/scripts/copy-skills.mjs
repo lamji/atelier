@@ -13,7 +13,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 /** App skills that are also offered inside the Claude and Codex CLIs. */
-const CLI_SKILLS = ["document", "impact-check", "reference-doc"];
+const CLI_SKILLS = [
+  "atelier-init-feature",
+  "atelier-impact-check",
+  "atelier-re-init-feature",
+  "atelier-remember",
+];
 
 export function copySkills(agentRoot, outDir) {
   const source = path.join(agentRoot, "skills");

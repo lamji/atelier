@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Search,
   Scale,
+  Brain,
   Settings as SettingsIcon,
   Sparkles,
   Terminal,
@@ -27,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { WorkspacePageHeader } from "@/components/ui/workspace-page";
 import { RulesTab } from "./RulesTab";
+import { MemoryTab } from "./MemoryTab";
 import { AccountTab } from "./AccountTab";
 import { McpTab } from "./McpTab";
 import { SkillsTab } from "./SkillsTab";
@@ -115,6 +117,7 @@ export function SettingsPanel({ modal = false }: { modal?: boolean }) {
             {tab === "mcp" && <McpTab />}
             {tab === "skills" && <SkillsTab />}
             {tab === "rules" && <RulesTab />}
+            {tab === "memory" && <MemoryTab />}
           </div>
         </main>
       </div>
@@ -128,7 +131,14 @@ type ProviderTab =
   | "grok"
   | "codex"
   | "claude";
-type Tab = "account" | "general" | "providers" | "mcp" | "skills" | "rules";
+type Tab =
+  | "account"
+  | "general"
+  | "providers"
+  | "mcp"
+  | "skills"
+  | "rules"
+  | "memory";
 
 const SETTINGS_TABS: Array<{
   id: Tab;
@@ -142,6 +152,12 @@ const SETTINGS_TABS: Array<{
   { id: "mcp", label: "MCP Servers", description: "Configure external tools and context servers available to agents.", icon: Plug },
   { id: "skills", label: "Skills & Commands", description: "Review reusable workflows and commands discovered for this workspace.", icon: Wand2 },
   { id: "rules", label: "Agent Rules", description: "Define the instructions agents must follow while working in this project.", icon: Scale },
+  {
+    id: "memory",
+    label: "Memory",
+    description: "What this workspace's agents remember: corrections and lasting project facts.",
+    icon: Brain,
+  },
 ];
 
 interface ProviderDef {
@@ -426,7 +442,7 @@ function ProviderRow({
   vm: ProvidersVm;
 }) {
   const [editing, setEditing] = useState(false);
-  const [showModels, setShowModels] = useState(false);
+  const [open, setOpen] = useState(false);
   const [helpFor, setHelpFor] = useState<string | null>(null);
   const check = vm.checks[provider.id];
   const busy = vm.checking === provider.id;
@@ -434,25 +450,30 @@ function ProviderRow({
   const loadingModels = vm.loadingCatalog === provider.id;
   const { loadCatalog } = vm;
 
-  // Pull the catalog once the provider is on screen; the toggles are the
-  // point of this row, so they shouldn't wait for a click to appear.
+  // Pull the catalog once the provider is on screen, so the enabled count
+  // in the closed row is real before anyone opens it.
   useEffect(() => {
     if (vm.connected && provider.configured && models === undefined) {
       loadCatalog(provider.id);
     }
   }, [vm.connected, provider.configured, models, loadCatalog, provider.id]);
 
-  // Usage is only rendered inside the accordion, so it is fetched when the
-  // accordion opens — and refetched each time, since it moves with every call.
+  // Usage is only rendered inside the open row, so it is fetched when the
+  // row opens — and refetched each time, since it moves with every call.
   const { loadUsage } = vm;
   useEffect(() => {
-    if (vm.connected && provider.configured && showModels) {
+    if (vm.connected && provider.configured && open) {
       loadUsage(provider.id);
     }
-  }, [vm.connected, provider.configured, showModels, loadUsage, provider.id]);
+  }, [vm.connected, provider.configured, open, loadUsage, provider.id]);
 
   const enabledCount = models?.filter((m) => m.enabled).length ?? 0;
   const Icon = definition.icon;
+  const summary = !provider.configured
+    ? "Not connected"
+    : provider.enabled
+      ? `${enabledCount} in chat`
+      : "Off";
 
   return (
     <div className="bg-card">
@@ -464,258 +485,325 @@ function ProviderRow({
         ready={check ? check.ok : (models?.length ?? 0) > 0}
         onClose={() => setHelpFor(null)}
       />
+      {/* The closed row is just the provider and its switch. The header is
+          a container, not a button: Switch renders its own button, and the
+          two stay siblings so each is reachable on its own. */}
       <div className="flex items-center gap-3 px-4 py-3">
-        <Icon
-          className={cn(
-            "h-4 w-4 shrink-0",
-            provider.enabled ? "text-primary/80" : "text-muted-foreground/50"
-          )}
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium">{provider.label}</p>
-          {/* A hostless provider has nothing to say here — it signs in
-              through its own session, so there is no key or host to show. */}
-          {!provider.keyless && provider.configured && (
-            <p className="mt-0.5 break-all font-mono text-[10px] text-muted-foreground/70">
-              key {provider.keyHint ?? "stored"}
-              {provider.host ? ` · ${provider.host}` : ""}
-            </p>
-          )}
-          {provider.id === "ollama-local" && (
-            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground/70">
-              127.0.0.1:11434
-            </p>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            title="How this provider connects"
-            onClick={() => setHelpFor(provider.id)}
-            className="!h-6 !w-6 text-muted-foreground hover:text-foreground"
-          >
-            <HelpCircle className="h-3 w-3" />
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={busy || !vm.connected || !provider.configured}
-            onClick={() => vm.check(provider.id)}
-            className="!h-5 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-          >
-            {busy ? "Checking…" : "Test"}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            // A keyless provider cannot be removed, only reset: it is a
-            // program on this machine, and it comes back on the next list.
-            title={
-              provider.hostless
-                ? "Reset model choices"
-                : provider.keyless
-                  ? "Reset host and model choices"
-                  : "Remove"
-            }
-            disabled={vm.saving || !provider.configured}
-            onClick={() => vm.remove(provider.id)}
-            className="!h-6 !w-6 text-muted-foreground hover:text-destructive"
-          >
-            <Trash2 className="h-3 w-3" />
-          </Button>
-          {/* The whole provider, in one move. Kept beside the label rather
-              than inside the model list: it decides whether that list means
-              anything at all. Model choices survive being switched off. */}
-          <Switch
-            checked={provider.enabled}
-            disabled={!vm.connected || !provider.configured}
-            // Switching on is the moment the user expects models to appear;
-            // if this provider needs a CLI sign-in or a key, that is the
-            // moment to say so rather than let the list come back empty.
-            onChange={(next) => {
-              vm.setProviderEnabled(provider.id, next);
-              if (next) setHelpFor(provider.id);
-            }}
-            label={`${provider.label} models in chat`}
-            className="ml-0.5"
-          />
-        </div>
-      </div>
-
-      {check && (
-        <p
-          className={cn(
-            "flex items-start gap-1.5 px-2.5 pb-2 text-[10px] leading-relaxed",
-            check.ok ? "text-success" : "text-destructive"
-          )}
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 flex-1 items-center gap-3 rounded text-left"
         >
-          {check.ok ? (
-            <Check className="mt-0.5 h-3 w-3 shrink-0" />
-          ) : (
-            <X className="mt-0.5 h-3 w-3 shrink-0" />
-          )}
-          <span className="break-all">{check.detail}</span>
-        </p>
-      )}
-
-      {/* Dimmed rather than hidden while the provider is off: the model
-          choices still stand and are worth being able to set up before
-          switching the provider back on. */}
-      <div
-        className={cn(
-          "border-t border-border-subtle bg-muted/20 transition-opacity",
-          (!provider.enabled || !provider.configured) && "opacity-50"
-        )}
-      >
-        {/* Collapsed by default: a provider can offer dozens of models and
-            the list would otherwise own the whole panel. The enabled count
-            stays visible while closed, which is the part worth glancing at. */}
-        <div className="flex items-center gap-1 px-2.5 py-1.5">
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => setShowModels((v) => !v)}
-            className="!h-auto min-w-0 flex-1 justify-start gap-1.5 p-0 text-left hover:bg-transparent"
-          >
-            <ChevronRight
-              className={cn(
-                "h-3 w-3 shrink-0 text-muted-foreground/60 transition-transform",
-                showModels && "rotate-90"
-              )}
-            />
-            <span className="text-[11px] font-semibold text-muted-foreground/60">
-              Models
-            </span>
-            <span className="text-[10px] text-muted-foreground/50">
-              {!provider.configured
-                ? "connect to load"
-                : provider.enabled
-                  ? `${enabledCount} in chat`
-                  : "none in chat"}
-            </span>
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            disabled={loadingModels || !vm.connected || !provider.configured}
-            onClick={() => loadCatalog(provider.id)}
-            className="!h-6 !w-6 shrink-0 text-muted-foreground hover:text-foreground"
-            title="Refresh model list"
-          >
-            <RefreshCw
-              className={cn("h-3 w-3", loadingModels && "animate-spin")}
-            />
-          </Button>
-        </div>
-
-        {showModels && (
-          <UsageBlock usage={vm.usage[provider.id]} provider={provider.label} />
-        )}
-
-        {!showModels ? null : !provider.configured ? (
-          <p className="px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/60">
-            Connect {provider.label} to discover the models available to this API key.
-          </p>
-        ) : loadingModels && models === undefined ? (
-          <p className="px-2.5 py-2 text-[10px] text-muted-foreground/60">
-            Loading models…
-          </p>
-        ) : models && models.length > 0 ? (
-          <>
-            <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-muted-foreground/60">
-              {provider.enabled
-                ? "Switched-on models appear in the chat model picker."
-                : "This provider is switched off, so none of these reach the chat model picker. These choices are kept for when you switch it back on."}
-            </p>
-            <ul className="max-h-64 overflow-y-auto px-1 pb-1">
-              {models.map((model) => (
-                <li key={model.name}>
-                  {/* Switch is itself a role=switch button, so this row is a
-                      plain container — a <label> around it would forward the
-                      click and toggle twice. */}
-                  <div
-                    className={cn(
-                      "flex items-center gap-2 rounded-md px-1.5 py-1",
-                      "hover:bg-accent/50"
-                    )}
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span className="block break-all font-mono text-[11px]">
-                        {model.name}
-                      </span>
-                      {model.subscriptionRequired && (
-                        <Badge
-                          variant="destructive"
-                          className="mt-1 px-1.5 py-0 text-[9px]"
-                        >
-                          Subscription required
-                        </Badge>
-                      )}
-                      {model.detail && (
-                        <span className="block text-[10px] text-muted-foreground/60">
-                          {model.detail}
-                        </span>
-                      )}
-                    </span>
-                    <Switch
-                      checked={model.enabled}
-                      onChange={(next) =>
-                        vm.setModelEnabled(provider.id, model.name, next)
-                      }
-                      label={model.name}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : (
-          <p className="px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/60">
-            {provider.hostless
-              ? "No models returned. Run Test to check you are signed in to this CLI."
-              : provider.keyless
-                ? "No models returned. Run Test to check the local Ollama daemon."
-                : `No models returned. Run Test to check the ${provider.label} API key.`}
-          </p>
-        )}
+          <ChevronRight
+            className={cn(
+              "h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform",
+              open && "rotate-90"
+            )}
+          />
+          <Icon
+            className={cn(
+              "h-4 w-4 shrink-0",
+              provider.enabled ? "text-primary/80" : "text-muted-foreground/50"
+            )}
+          />
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">
+            {provider.label}
+          </span>
+          <span className="shrink-0 text-[10px] text-muted-foreground/60">
+            {summary}
+          </span>
+        </button>
+        {/* The whole provider, in one move. Model choices survive being
+            switched off. */}
+        <Switch
+          checked={provider.enabled}
+          disabled={!vm.connected || !provider.configured}
+          // Switching on is the moment the user expects models to appear;
+          // if this provider needs a CLI sign-in or a key, that is the
+          // moment to say so rather than let the list come back empty.
+          onChange={(next) => {
+            vm.setProviderEnabled(provider.id, next);
+            if (next) setHelpFor(provider.id);
+          }}
+          label={`${provider.label} models in chat`}
+        />
       </div>
 
-      {/* Nothing to edit on a signed-in CLI: no key of ours, no endpoint. */}
-      {provider.keyless ? null : !provider.configured ? (
-        <div className="border-t border-border/60 p-2">
-          <ProviderForm
-            id={provider.id}
-            label={definition.connectLabel}
-            hint={definition.connectHint}
+      {open && (
+        <div className="space-y-2 border-t border-border-subtle bg-muted/20 px-4 py-3">
+          <ProviderDetails
+            provider={provider}
+            vm={vm}
+            busy={busy}
+            onHelp={() => setHelpFor(provider.id)}
+          />
+
+          {check && (
+            <p
+              className={cn(
+                "flex items-start gap-1.5 text-[10px] leading-relaxed",
+                check.ok ? "text-success" : "text-destructive"
+              )}
+            >
+              {check.ok ? (
+                <Check className="mt-0.5 h-3 w-3 shrink-0" />
+              ) : (
+                <X className="mt-0.5 h-3 w-3 shrink-0" />
+              )}
+              <span className="break-all">{check.detail}</span>
+            </p>
+          )}
+
+          <ModelsSection
+            provider={provider}
+            models={models}
+            loading={loadingModels}
+            enabledCount={enabledCount}
             vm={vm}
           />
+
+          <UsageBlock usage={vm.usage[provider.id]} provider={provider.label} />
+
+          {/* Nothing to edit on a signed-in CLI: no key of ours, no endpoint. */}
+          {provider.keyless ? null : !provider.configured ? (
+            <ProviderForm
+              id={provider.id}
+              label={definition.connectLabel}
+              hint={definition.connectHint}
+              vm={vm}
+            />
+          ) : editing ? (
+            <ProviderForm
+              id={provider.id}
+              label={provider.label}
+              hint={`Enter a replacement ${provider.label} API key.`}
+              vm={vm}
+              onDone={() => setEditing(false)}
+            />
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setEditing(true)}
+              className={cn(
+                "!h-auto px-0 py-0.5 text-[10px] text-muted-foreground",
+                "hover:bg-transparent hover:text-foreground"
+              )}
+            >
+              Edit API key
+            </Button>
+          )}
         </div>
-      ) : editing ? (
-        <div className="space-y-1.5 border-t border-border/60 p-2">
-          <ProviderForm
-            id={provider.id}
-            label={provider.label}
-            hint={`Enter a replacement ${provider.label} API key.`}
-            vm={vm}
-            onDone={() => setEditing(false)}
-          />
-        </div>
-      ) : (
+      )}
+    </div>
+  );
+}
+
+/** Where the provider connects, and its help, Test and remove actions. */
+function ProviderDetails({
+  provider,
+  vm,
+  busy,
+  onHelp,
+}: {
+  provider: ProviderCredential;
+  vm: ProvidersVm;
+  busy: boolean;
+  onHelp: () => void;
+}) {
+  // A hostless provider signs in through its own session, so there is no
+  // key or host to show.
+  const where =
+    provider.id === "ollama-local"
+      ? "127.0.0.1:11434"
+      : !provider.keyless && provider.configured
+        ? `key ${provider.keyHint ?? "stored"}` +
+          (provider.host ? ` · ${provider.host}` : "")
+        : null;
+  // A keyless provider cannot be removed, only reset: it is a program on
+  // this machine, and it comes back on the next list.
+  const removeTitle = provider.hostless
+    ? "Reset model choices"
+    : provider.keyless
+      ? "Reset host and model choices"
+      : "Remove";
+
+  return (
+    <div className="flex items-center gap-2">
+      <p className="min-w-0 flex-1 break-all font-mono text-[10px] text-muted-foreground/70">
+        {where}
+      </p>
+      <div className="flex shrink-0 items-center gap-1">
         <Button
           type="button"
           variant="ghost"
-          onClick={() => setEditing(true)}
-          className="!h-auto w-full justify-start rounded-none border-t border-border/60 px-2.5 py-1.5 text-left text-[10px] text-muted-foreground hover:text-foreground"
+          size="icon"
+          title="How this provider connects"
+          onClick={onHelp}
+          className="!h-6 !w-6 text-muted-foreground hover:text-foreground"
         >
-          Edit API key
+          <HelpCircle className="h-3 w-3" />
         </Button>
-      )}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy || !vm.connected || !provider.configured}
+          onClick={() => vm.check(provider.id)}
+          className={cn(
+            "!h-5 px-1.5 py-0.5 text-[10px] text-muted-foreground",
+            "hover:text-foreground"
+          )}
+        >
+          {busy ? "Checking…" : "Test"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          title={removeTitle}
+          disabled={vm.saving || !provider.configured}
+          onClick={() => vm.remove(provider.id)}
+          className="!h-6 !w-6 text-muted-foreground hover:text-destructive"
+        >
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      </div>
     </div>
+  );
+}
+
+/**
+ * The provider's models, each with its own switch. Dimmed rather than
+ * hidden while the provider is off: the choices still stand and are worth
+ * setting up before switching it back on.
+ */
+function ModelsSection({
+  provider,
+  models,
+  loading,
+  enabledCount,
+  vm,
+}: {
+  provider: ProviderCredential;
+  models: ProvidersVm["catalog"][string];
+  loading: boolean;
+  enabledCount: number;
+  vm: ProvidersVm;
+}) {
+  const dimmed = !provider.enabled || !provider.configured;
+  return (
+    <div
+      className={cn(
+        "rounded-lg bg-background/40 transition-opacity",
+        dimmed && "opacity-50"
+      )}
+    >
+      <div className="flex items-center gap-1.5 px-2.5 py-1.5">
+        <span className="text-[11px] font-semibold text-muted-foreground/60">
+          Models
+        </span>
+        <span className="flex-1 text-[10px] text-muted-foreground/50">
+          {provider.configured && provider.enabled
+            ? `${enabledCount} in chat`
+            : ""}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          disabled={loading || !vm.connected || !provider.configured}
+          onClick={() => vm.loadCatalog(provider.id)}
+          className="!h-6 !w-6 shrink-0 text-muted-foreground hover:text-foreground"
+          title="Refresh model list"
+        >
+          <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
+        </Button>
+      </div>
+      <ModelsBody
+        provider={provider}
+        models={models}
+        loading={loading}
+        vm={vm}
+      />
+    </div>
+  );
+}
+
+function ModelsBody({
+  provider,
+  models,
+  loading,
+  vm,
+}: {
+  provider: ProviderCredential;
+  models: ProvidersVm["catalog"][string];
+  loading: boolean;
+  vm: ProvidersVm;
+}) {
+  const note = "px-2.5 pb-2 text-[10px] leading-relaxed text-muted-foreground/60";
+  if (!provider.configured) {
+    return (
+      <p className={note}>
+        Connect {provider.label} to discover the models available to this API key.
+      </p>
+    );
+  }
+  if (loading && models === undefined) {
+    return <p className={note}>Loading models…</p>;
+  }
+  if (!models || models.length === 0) {
+    return (
+      <p className={note}>
+        {provider.hostless
+          ? "No models returned. Run Test to check you are signed in to this CLI."
+          : provider.keyless
+            ? "No models returned. Run Test to check the local Ollama daemon."
+            : `No models returned. Run Test to check the ${provider.label} API key.`}
+      </p>
+    );
+  }
+  return (
+    <>
+      <p className={note}>
+        {provider.enabled
+          ? "Switched-on models appear in the chat model picker."
+          : "This provider is switched off, so none of these reach the chat " +
+            "model picker. These choices are kept for when you switch it back on."}
+      </p>
+      <ul className="max-h-64 overflow-y-auto px-1 pb-1">
+        {models.map((model) => (
+          <li key={model.name}>
+            {/* Switch is itself a role=switch button, so this row is a
+                plain container — a <label> around it would forward the
+                click and toggle twice. */}
+            <div className="flex items-center gap-2 rounded-md px-1.5 py-1 hover:bg-accent/50">
+              <span className="min-w-0 flex-1">
+                <span className="block break-all font-mono text-[11px]">
+                  {model.name}
+                </span>
+                {model.subscriptionRequired && (
+                  <Badge variant="destructive" className="mt-1 px-1.5 py-0 text-[9px]">
+                    Subscription required
+                  </Badge>
+                )}
+                {model.detail && (
+                  <span className="block text-[10px] text-muted-foreground/60">
+                    {model.detail}
+                  </span>
+                )}
+              </span>
+              <Switch
+                checked={model.enabled}
+                onChange={(next) => vm.setModelEnabled(provider.id, model.name, next)}
+                label={model.name}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -733,7 +821,7 @@ function UsageBlock({
   if (!usage || usage.windows.length === 0) return null;
 
   return (
-    <div className="mx-1 mb-1 rounded-lg bg-background/40 p-2">
+    <div className="rounded-lg bg-background/40 p-2">
       <div className="flex items-center gap-1.5">
         <Gauge className="h-3 w-3 text-primary/70" />
         <span className="text-[11px] font-semibold text-muted-foreground/60">

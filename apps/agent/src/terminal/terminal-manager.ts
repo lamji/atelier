@@ -13,6 +13,7 @@ import {
   sameDir,
   shellLaunch,
 } from "./shell-cwd.js";
+import { watchTurnMarkers } from "./turn-markers.js";
 
 /**
  * Output arriving closer together than this is coalesced into one frame. A
@@ -73,6 +74,7 @@ export class TerminalManager {
   /** A shell started ahead of the create that will claim it. */
   private warm: ManagedTerminal | null = null;
   private warmTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopTurnWatch: (() => void) | null = null;
 
   constructor(
     private db: Db,
@@ -142,19 +144,36 @@ export class TerminalManager {
     }
   }
 
+  /**
+   * Report CLI turns that end in this workspace's terminals, from the
+   * markers the CLIs' turn-end hook writes into `dir`. The host is shared
+   * by every open workspace, so a marker for another one's terminal is
+   * left alone.
+   */
+  watchTurnEnds(dir: string): void {
+    this.stopTurnWatch?.();
+    this.stopTurnWatch = watchTurnMarkers(dir, (termId) => {
+      if (!this.terminals.has(termId)) return;
+      this.bus.publish("terminal.turn.ended", { termId });
+    });
+  }
+
   /** Starts a shell and wires its output; nothing is announced yet. */
   private launch(cwd: string, cols: number, rows: number): ManagedTerminal {
     const shell = shellLaunch();
+    const id = newId("term");
     const proc = pty.spawn(shell.file, shell.args, {
       name: "xterm-256color",
       cols,
       rows,
       cwd,
-      env: { ...process.env } as Record<string, string>,
+      // A CLI started in this shell hands it to its turn-end hook, which is
+      // how Atelier learns whose turn ended.
+      env: { ...process.env, ATELIER_TERM_ID: id } as Record<string, string>,
     });
 
     const session: TerminalSession = {
-      id: newId("term"),
+      id,
       name: "",
       cwd,
       cols,
@@ -408,6 +427,7 @@ export class TerminalManager {
     if (this.saveTimer) clearInterval(this.saveTimer);
     this.saveDirtyHistory();
     this.shuttingDown = true;
+    this.stopTurnWatch?.();
     this.dropWarm();
     for (const managed of this.terminals.values()) {
       try {

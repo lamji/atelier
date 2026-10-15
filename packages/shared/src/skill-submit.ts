@@ -33,9 +33,9 @@ function paste(text: string): string {
 /**
  * The keys that leave the skill's prompt in the composer, ready for Enter.
  *
- * `token` is the command word as typed (`$document`), `lead` what replaces
- * it, `request` the rest of the line, and `shown` the composer as the
- * screen shows it. Each key was checked against the real Codex TUI.
+ * `token` is the command word as typed (`$atelier-init-feature`), `lead`
+ * what replaces it, `request` the rest of the line, and `shown` the
+ * composer as the screen shows it. Each key was checked against the real Codex TUI.
  */
 export function skillSubmitKeys(args: {
   token: string;

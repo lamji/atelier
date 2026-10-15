@@ -75,10 +75,13 @@ test("the request is only sent into an idle, empty composer", () => {
 });
 
 test("Enter follows only a request the composer is seen to hold", () => {
-  const request = "/document update login-flow; changed: src/auth/login.ts";
+  const request =
+    "/atelier-init-feature update login-flow; changed: src/auth/login.ts";
   assert.equal(composerShows(request, request), true);
   // A narrow pane wraps the request, and the footer rows trail after it.
-  const wrapped = "/document update login-flow; chan ged: src/auth/login.ts ? for help";
+  const wrapped =
+    "/atelier-init-feature update login-flow; chan ged: src/auth/login.ts" +
+    " ? for help";
   assert.equal(composerShows(wrapped, request), true);
   // A dialog had the keyboard: the paste went nowhere, and its selected
   // option is what sits behind the mark.

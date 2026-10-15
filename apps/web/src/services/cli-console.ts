@@ -551,7 +551,8 @@ async function autoRenameCliSession(termId: string, providerId: string): Promise
 export interface CliSkills {
   /** Holds `.claude/skills/<name>` inside the app; null when it ships none. */
   root: string | null;
-  skills: Array<{ name: string; file: string }>;
+  /** `codexNative`: Codex loads it itself, so `$name` alone runs it. */
+  skills: Array<{ name: string; file: string; codexNative?: boolean }>;
   /** Added to each CLI's launch command; empty when there is nothing to load. */
   launch: { claude: string; codex: string };
 }
@@ -563,7 +564,7 @@ const NO_SKILLS: CliSkills = {
 };
 
 /**
- * The app skills the CLIs can run (`/document`, `$document`), as paths into
+ * The app skills the CLIs can run (`/atelier-init-feature`, `$atelier-init-feature`), as paths into
  * the installed app. Nothing is copied into ~/.claude or ~/.codex, so the
  * skills go when Atelier is uninstalled. Asked for once: the app does not
  * move while it is running.
@@ -599,18 +600,6 @@ async function withAppSkills(
 }
 
 /**
- * Other spellings that mean an app skill inside Atelier.
- *
- * `$documents:documents` is what Codex's own menu turns `$document` into: it
- * is Codex's Word-file skill, and accepting the suggestion (or recalling it
- * from history) sent every request for a report there instead. In an Atelier
- * session that spelling runs the app's `document` skill.
- */
-const SKILL_ALIASES: Record<string, string> = {
-  "documents:documents": "document",
-};
-
-/**
  * The prompt a typed skill command stands for, or null when `line` is not
  * one. Only for a CLI that cannot load the app's skills itself (Codex has no
  * launch option for an extra skill folder): Atelier swaps the command for a
@@ -635,14 +624,18 @@ export function expandSkillCommand(
   const typed = line.slice(provider.skillSigil.length).split(" ");
   const [command = "", ...rest] = typed;
   const wanted = command.toLowerCase();
-  const name = SKILL_ALIASES[wanted] ?? wanted;
-  const skill = skills.find((item) => item.name === name);
+  const skill = skills.find(
+    (item) => item.name === wanted || shortSkillName(item.name) === wanted
+  );
   if (!skill) return null;
   const subject = rest.join(" ").trim();
   const request = subject || "(none given)";
-  const lead =
-    `Run the Atelier "${skill.name}" skill: read "${skill.file}" and ` +
-    `follow it exactly. Session: ${session}. Request:`;
+  // A skill Codex loads itself runs from its `$name`: no path into the app
+  // in the prompt, which an agent took for part of the project to search.
+  const lead = skill.codexNative
+    ? `$${skill.name} Session: ${session}. Request:`
+    : `Run the Atelier "${skill.name}" skill: read "${skill.file}" and ` +
+      `follow it exactly. Session: ${session}. Request:`;
   return {
     name: skill.name,
     subject,
@@ -683,12 +676,13 @@ const MIN_SKILL_PREFIX = 3;
  * What to type instead of the Tab or Enter that would accept the CLI's own
  * suggestion, or null to let the key through.
  *
- * Codex opens a menu on `$`, and the app's skills are not in it — but its own
- * are, so `$doc` + Enter picked Codex's "Documents" skill and wrote a Word
- * file where the user had asked for `$document`. While what is typed is the
- * start of exactly one app skill, the accepting key finishes that name here,
- * and the trailing space closes Codex's menu. Typing a Codex skill's full
- * name still reaches it: `$documents` is not the start of `document`.
+ * Codex opens a menu on `$`. The app skills are in it through links in
+ * Codex's skills folder (see codex-skill-links.ts in the agent), but where
+ * those could not be made, accepting a suggestion picks one of Codex's own.
+ * While what is typed is the start of exactly one app skill, the accepting
+ * key finishes that name here, and the trailing space closes Codex's menu.
+ * The start of several is left to the menu. Typing a Codex skill's full
+ * name still reaches it.
  */
 export function skillCompletion(
   provider: CliProvider,
@@ -709,6 +703,13 @@ export function skillCompletion(
   // The whole name and Enter is a command to run, not a name to finish.
   if (prefix === name && key === "\r") return null;
   return `${name.slice(prefix.length)} `;
+}
+
+/** What every app skill name starts with; the part after it is the short form. */
+const SKILL_FAMILY = "atelier-";
+
+function shortSkillName(name: string): string | null {
+  return name.startsWith(SKILL_FAMILY) ? name.slice(SKILL_FAMILY.length) : null;
 }
 
 /** The bytes that put `text` into a cleared composer, as one paste. */
@@ -804,15 +805,62 @@ interface ProcessingWatcher {
 const processingWatchers = new Map<string, ProcessingWatcher>();
 const CURSOR_VISIBILITY = /\x1b\[\?25([hl])/g;
 
-function setProcessing(termId: string, processing: boolean): void {
+/**
+ * Terminals whose CLI has reported a turn end through its Stop hook. From
+ * then on only the hook says when a turn ended there: the cursor coming
+ * back can also happen mid-turn (an approval prompt, a redraw), and a
+ * report update sent then lands while the agent is still working.
+ */
+const hookTurnEnds = new Set<string>();
+
+/**
+ * `fromHook` marks a turn end the CLI itself reported. A screen-read end
+ * still stops the spinner, but checks the reports only where no hook
+ * has ever reported.
+ */
+function setProcessing(
+  termId: string,
+  processing: boolean,
+  fromHook = false
+): void {
   useCliConsoleStore.getState().setProcessing(termId, processing);
-  // A turn just ended, which is when a `document` run has saved its report,
-  // and when a report written earlier may have fallen behind the code.
-  if (!processing) void keepDocsCurrent(termId);
+  if (processing) return;
+  // A turn just ended, which is when an `atelier-init-feature` run has
+  // saved its report, and when a report written earlier may have fallen
+  // behind the code.
+  if (fromHook) void keepDocsCurrentSoon(termId);
+  else if (!hookTurnEnds.has(termId)) void keepDocsCurrent(termId);
+}
+
+/**
+ * A Claude or Codex turn in `termId` ended, reported by the CLI's own Stop
+ * hook (the `terminal.turn.ended` event).
+ */
+export function cliTurnEnded(termId: string): void {
+  if (!processingWatchers.has(termId)) return;
+  hookTurnEnds.add(termId);
+  setProcessing(termId, false, true);
+}
+
+/** Looks for an idle composer after a hook-reported turn end. */
+const UPKEEP_RETRIES = 10;
+const UPKEEP_RETRY_MS = 300;
+
+/**
+ * The Stop hook runs just before the CLI redraws its composer, so the
+ * session is not yet ready to take a request. Look again a few times; a
+ * new turn starting in the meantime ends the wait.
+ */
+async function keepDocsCurrentSoon(termId: string): Promise<void> {
+  for (let attempt = 0; attempt < UPKEEP_RETRIES; attempt++) {
+    if (useCliConsoleStore.getState().processing[termId]) return;
+    if ((await keepDocsCurrent(termId)) !== "not-ready") return;
+    await new Promise((resolve) => setTimeout(resolve, UPKEEP_RETRY_MS));
+  }
 }
 
 /** The skill that writes the reports, and that `update` is asked of. */
-const DOCUMENT_SKILL = "document";
+const DOCUMENT_SKILL = "atelier-init-feature";
 
 /** Per report, the change its session was last asked to document. */
 const upkeepAsked = new Map<string, number>();
@@ -878,8 +926,10 @@ function reportKeys(termId: string): string[] {
  * when its request is pasted, so one that could not be sent is not pasted
  * over and over; it is asked about again when a cited file next changes.
  */
-async function keepDocsCurrent(termId: string): Promise<void> {
-  if (upkeepChecks.has(termId)) return;
+async function keepDocsCurrent(
+  termId: string
+): Promise<"done" | "not-ready"> {
+  if (upkeepChecks.has(termId)) return "done";
   upkeepChecks.add(termId);
   try {
     const [docs, { skills }] = await Promise.all([
@@ -888,16 +938,16 @@ async function keepDocsCurrent(termId: string): Promise<void> {
     ]);
     const state = useCliConsoleStore.getState();
     const session = state.sessions.find((item) => item.termId === termId);
-    if (!session) return;
+    if (!session) return "done";
     const mine = docsForSession(docs, reportKeys(termId));
     const plan = planDocUpkeep(mine, upkeepAsked);
-    if (!plan) return;
+    if (!plan) return "done";
     const ready = canSendDocUpkeep({
       processing: Boolean(state.processing[termId]),
       typed: processingWatchers.get(termId)?.lines.current ?? "",
       composer: terminalRegistry.composerText(termId, UPKEEP_COMPOSER_ROWS),
     });
-    if (!ready) return;
+    if (!ready) return "not-ready";
     const provider = cliProvider(session.providerId);
     const line = `${provider.skillSigil}${DOCUMENT_SKILL} ${plan.request}`;
     // Claude runs the command itself; Codex is handed the skill's prompt.
@@ -905,10 +955,13 @@ async function keepDocsCurrent(termId: string): Promise<void> {
       ? line
       : expandSkillCommand(provider, line, skills, skillSessionKey(termId))
           ?.prompt;
-    if (!text || !skills.some((skill) => skill.name === DOCUMENT_SKILL)) return;
+    if (!text || !skills.some((skill) => skill.name === DOCUMENT_SKILL)) {
+      return "done";
+    }
     for (const [id, at] of Object.entries(plan.asked)) upkeepAsked.set(id, at);
     terminalRegistry.sendInput(termId, pasteInto(text));
     await submitPasted(termId, text);
+    return "done";
   } finally {
     upkeepChecks.delete(termId);
   }
@@ -926,6 +979,7 @@ function beginProcessing(termId: string): void {
 function unwatchProcessing(termId: string): void {
   processingWatchers.get(termId)?.stop();
   processingWatchers.delete(termId);
+  hookTurnEnds.delete(termId);
 }
 
 /**

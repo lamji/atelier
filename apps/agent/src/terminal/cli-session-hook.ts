@@ -5,7 +5,8 @@ import path from "node:path";
  * The hooks Claude and Codex sessions started from the app run: at
  * SessionStart, the app skills and the session's reports; before each file
  * edit (PreToolUse), a tree-sitter impact check of what the edit can break
- * (the impact-check skill). Neither ever blocks anything.
+ * (the atelier-impact-check skill); when a turn ends (Stop), a marker that
+ * tells Atelier which terminal's turn it was. None ever blocks anything.
  *
  * Nothing goes into ~/.claude or ~/.codex: each CLI is handed the hook on
  * its own command line. Claude reads it from a settings file passed with
@@ -35,6 +36,8 @@ function hookFiles(root: string, platform: Platform) {
     codexCmd: join(root, "hooks", "codex-session-start.cmd"),
     impact: join(root, "hooks", "edit-impact.mjs"),
     codexImpactCmd: join(root, "hooks", "codex-edit-impact.cmd"),
+    turnEnd: join(root, "hooks", "turn-end.mjs"),
+    codexTurnCmd: join(root, "hooks", "codex-turn-end.cmd"),
   };
 }
 
@@ -48,7 +51,7 @@ function hookFiles(root: string, platform: Platform) {
  */
 function codexHookValue(
   platform: Platform,
-  event: "SessionStart" | "PreToolUse" | "PostToolUse",
+  event: "SessionStart" | "PreToolUse" | "Stop",
   vars: { windows: string; script: string }
 ): string {
   if (platform === "win32") {
@@ -84,18 +87,22 @@ export function cliLaunchFlags(args: {
     windows: "ATELIER_SESSION_HOOK",
     script: "ATELIER_HOOK_SCRIPT",
   });
-  // No matcher: Codex's patch tool is told apart by its input, in the script,
-  // which also reads from the event whether the edit is about to happen or
-  // has just happened.
+  // No matcher: Codex's patch tool is told apart by its input, in the
+  // script. Before an edit only: the check is what the edit can break.
   const impact = { windows: "ATELIER_EDIT_HOOK", script: "ATELIER_IMPACT_SCRIPT" };
   const preToolUse = codexHookValue(platform, "PreToolUse", impact);
-  const postToolUse = codexHookValue(platform, "PostToolUse", impact);
-  const hooks = [sessionStart, preToolUse, postToolUse]
+  const stop = codexHookValue(platform, "Stop", {
+    windows: "ATELIER_TURN_HOOK",
+    script: "ATELIER_TURN_SCRIPT",
+  });
+  const hooks = [sessionStart, preToolUse, stop]
     .map((value) => `-c ${shellQuote(value, platform)}`)
     .join(" ");
   return {
     claude: `--add-dir "${root}" --settings "${claudeSettings}"`,
-    codex: `-c features.codex_hooks=true ${hooks}`,
+    // Codex's own memory is global, so one project's facts reached sessions
+    // in another; Atelier's sessions use the workspace's memory instead.
+    codex: `-c features.codex_hooks=true -c features.memories=false ${hooks}`,
   };
 }
 
@@ -107,16 +114,20 @@ function bashPath(file: string): string {
 /** Claude's tools that write a file, which the impact check runs before. */
 const CLAUDE_EDIT_TOOLS = "Edit|MultiEdit|Write";
 
-/** The settings Claude is launched with: the SessionStart and edit hooks. */
+/**
+ * The settings Claude is launched with: the SessionStart, edit, and
+ * turn-end hooks.
+ */
 export function claudeHookSettings(args: {
   node: string;
   script: string;
   impact: string;
+  turnEnd: string;
 }) {
   const run = (script: string) =>
     `ELECTRON_RUN_AS_NODE=1 "${bashPath(args.node)}" ` +
     `"${bashPath(script)}" claude`;
-  // Before an edit: what it can break. After it: the code just written.
+  // Before an edit, and only then: what the edit can break.
   const impact = [
     {
       matcher: CLAUDE_EDIT_TOOLS,
@@ -127,7 +138,7 @@ export function claudeHookSettings(args: {
     hooks: {
       SessionStart: [{ hooks: [{ type: "command", command: run(args.script) }] }],
       PreToolUse: impact,
-      PostToolUse: impact,
+      Stop: [{ hooks: [{ type: "command", command: run(args.turnEnd) }] }],
     },
   };
 }
@@ -141,6 +152,7 @@ export function sessionHookEnv(args: {
   platform: Platform;
   node: string;
   root: string | null;
+  turnDir: string;
 }): Record<string, string> {
   if (!args.root) return {};
   const files = hookFiles(args.root, args.platform);
@@ -149,9 +161,14 @@ export function sessionHookEnv(args: {
     ATELIER_HOOK_SCRIPT: files.script,
   };
   if (args.platform === "win32") env.ATELIER_SESSION_HOOK = files.codexCmd;
-  // Also how the impact-check skill runs its --diff check by hand.
+  // Also how the atelier-impact-check skill runs its --diff check by hand.
   env.ATELIER_IMPACT_SCRIPT = files.impact;
   if (args.platform === "win32") env.ATELIER_EDIT_HOOK = files.codexImpactCmd;
+  // Where the turn-end hook leaves its markers; each pty adds its own
+  // ATELIER_TERM_ID, which names the marker.
+  env.ATELIER_TURN_SCRIPT = files.turnEnd;
+  env.ATELIER_TURN_DIR = args.turnDir;
+  if (args.platform === "win32") env.ATELIER_TURN_HOOK = files.codexTurnCmd;
   return env;
 }
 
@@ -172,12 +189,28 @@ export function prepareSessionHook(args: {
   if (!args.root || !fs.existsSync(hookFiles(args.root, platform).script)) {
     return { claude: args.root ? `--add-dir "${args.root}"` : "", codex: "" };
   }
-  const { script, impact } = hookFiles(args.root, platform);
+  const { script, impact, turnEnd } = hookFiles(args.root, platform);
   fs.mkdirSync(path.dirname(claudeSettings), { recursive: true });
   fs.writeFileSync(
     claudeSettings,
-    JSON.stringify(claudeHookSettings({ node, script, impact }), null, 2)
+    JSON.stringify(
+      claudeHookSettings({ node, script, impact, turnEnd }),
+      null,
+      2
+    )
   );
-  Object.assign(process.env, sessionHookEnv({ platform, node, root: args.root }));
+  const turnDir = cliTurnDir(args.dataRoot);
+  Object.assign(
+    process.env,
+    sessionHookEnv({ platform, node, root: args.root, turnDir })
+  );
   return cliLaunchFlags({ platform, root: args.root, claudeSettings });
+}
+
+/**
+ * Where the turn-end hook leaves one marker per terminal, named by its
+ * ATELIER_TERM_ID. The agent watches it to learn that a CLI turn ended.
+ */
+export function cliTurnDir(dataRoot: string): string {
+  return path.join(dataRoot, "cli", "turns");
 }
