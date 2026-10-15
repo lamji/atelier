@@ -144,3 +144,19 @@ test("atelier-remember writes one memory entry and touches nothing else", () => 
   assert.match(body, /Do not change source code/);
   assert.match(body, /forget/);
 });
+
+test("app skills name real tools for each CLI, never generic 'file tools'", () => {
+  for (const name of [
+    "atelier-init-feature",
+    "atelier-re-init-feature",
+    "atelier-remember",
+  ]) {
+    const body = skillBody(name);
+    // Codex has no "file tools": told to use them, it searched its tool
+    // list and MCP resources for one.
+    assert.doesNotMatch(body, /your\s+file\s+tools/, name);
+    assert.match(body, /Codex/, name);
+    assert.match(body, /MCP resources/, name);
+  }
+  assert.match(skillBody("atelier-remember"), /\*\*\* Add File:/);
+});

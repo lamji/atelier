@@ -200,8 +200,9 @@ export function sessionsTouching(path: string): string[] {
 export async function captureSessionChanges(
   sessionId: string,
   now: number = Date.now()
-): Promise<SessionChange[]> {
+): Promise<{ changes: SessionChange[]; dirty: Set<string> }> {
   const files = await readStatus();
+  const dirty = new Set(files.map((file) => file.path));
   const baseline =
     read<Baseline>(BASELINES_KEY)[sessionId] ??
     rememberBaseline(sessionId, files);
@@ -231,7 +232,7 @@ export async function captureSessionChanges(
   write(LEDGERS_KEY, ledgers);
 
   const others = Object.entries(ledgers).filter(([id]) => id !== sessionId);
-  return Promise.all(
+  const changes = await Promise.all(
     mine.slice(0, MAX_TRACKED_FILES).map(async (file) => ({
       path: file.path,
       ...(await loadDiff(file)),
@@ -242,6 +243,7 @@ export async function captureSessionChanges(
         .map(([id]) => id),
     }))
   );
+  return { changes, dirty };
 }
 
 /** Load the last reviewable snapshot saved for a provider session. */
@@ -256,14 +258,23 @@ export async function loadSessionChanges(
   return changes;
 }
 
-/** Merge the latest live capture into durable provider-session review data. */
+/**
+ * Merge the latest live capture into durable provider-session review data.
+ * With `dirty`, saved changes on paths that are clean again are dropped.
+ */
 export async function saveSessionChanges(
   providerId: string,
   sessionId: string,
-  changes: SessionChange[]
+  changes: SessionChange[],
+  dirty?: Set<string>
 ): Promise<void> {
-  if (changes.length === 0) return;
-  await bridge.rpc("cli.diff.save", { providerId, sessionId, changes });
+  if (changes.length === 0 && !dirty) return;
+  await bridge.rpc("cli.diff.save", {
+    providerId,
+    sessionId,
+    changes,
+    dirtyPaths: dirty ? [...dirty] : undefined,
+  });
 }
 
 /**
@@ -290,12 +301,21 @@ export async function seedResumedSessionChanges(
   await saveSessionChanges(providerId, sessionId, changes);
 }
 
-/** Live content wins for a path; stored-only paths stay reviewable. */
+/**
+ * Live content wins for a path; stored-only paths stay reviewable while the
+ * working tree still differs on them. A path that is clean again (committed
+ * or reverted) is dropped: there is nothing left to review, and keeping it
+ * left committed files in the rail for good.
+ */
 export function mergeSessionChanges(
   stored: SessionChange[],
-  live: SessionChange[]
+  live: SessionChange[],
+  dirty?: Set<string>
 ): SessionChange[] {
-  const merged = new Map(stored.map((change) => [change.path, change]));
+  const current = dirty
+    ? stored.filter((change) => dirty.has(change.path))
+    : stored;
+  const merged = new Map(current.map((change) => [change.path, change]));
   for (const change of live) merged.set(change.path, change);
   return [...merged.values()].sort(
     (a, b) => b.lastTouchedAt - a.lastTouchedAt || a.path.localeCompare(b.path)

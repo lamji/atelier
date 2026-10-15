@@ -31,9 +31,10 @@ Each opens with a frontmatter block: `id`, `session`, `title`, and
 `updated` once it has been brought up to date.
 
 1. List the folder and read only the frontmatter of every report. If the
-   folder is missing or empty, say so and stop. List and read with your
-   file tools, not a shell command: a shell command stops to ask the user
-   for permission.
+   folder is missing or empty, say so and stop. In Claude, list and read
+   with Glob and Read, not Bash (a Bash command stops to ask the user for
+   permission). In Codex, use a plain shell command. Do not look for other
+   tools or MCP resources.
 2. Work out this session's id: when the request carries `Session: <id>`,
    use that id. Otherwise use `${CLAUDE_SESSION_ID}`.
 3. Pick the reports:

@@ -87,8 +87,9 @@ Asking for the same flow again must not leave two files. Before writing:
 
 1. List `.atelier/doc-agent/` and read the frontmatter and "Trigger Point"
    of every report whose `session` is this session's id (see below for the
-   id). List and read with your file tools, not a shell command: a shell
-   command stops to ask the user for permission.
+   id). In Claude, list and read with Glob and Read, not Bash (a Bash
+   command stops to ask the user for permission). In Codex, use a plain
+   shell command. Do not look for other tools or MCP resources.
 2. One of them covers this flow when it starts from the same trigger point,
    or traces the same feature under a different wording, a narrower scope,
    or a wider one. A different title or slug does not make it a different

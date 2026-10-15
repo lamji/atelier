@@ -126,7 +126,12 @@ export function registerTerminalHandlers(
   }));
 
   router.register("cli.diff.save", (params) => {
-    sessionDiffs.save(params.providerId, params.sessionId, params.changes);
+    sessionDiffs.save(
+      params.providerId,
+      params.sessionId,
+      params.changes,
+      params.dirtyPaths
+    );
     return { ok: true };
   });
 }

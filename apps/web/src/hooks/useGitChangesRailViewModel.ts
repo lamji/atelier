@@ -84,6 +84,8 @@ export function useGitChangesRailViewModel(
     void (async () => {
       let stored: SessionChange[] = [];
       let captured: SessionChange[] = [];
+      // Null when git could not be read: then nothing is pruned on a guess.
+      let dirty: Set<string> | undefined;
       if (providerSession) {
         try {
           stored = await loadSessionChanges(
@@ -95,16 +97,17 @@ export function useGitChangesRailViewModel(
         }
       }
       try {
-        captured = await captureSessionChanges(sessionId);
+        ({ changes: captured, dirty } = await captureSessionChanges(sessionId));
       } catch {
         // Stored review data remains useful when git is temporarily unavailable.
       }
-      if (providerSession && captured.length > 0) {
+      if (providerSession && (captured.length > 0 || dirty)) {
         try {
           await saveSessionChanges(
             providerSession.providerId,
             providerSession.sessionId,
-            captured
+            captured,
+            dirty
           );
         } catch {
           // Persistence failure must not hide the live diff from this window.
@@ -113,7 +116,7 @@ export function useGitChangesRailViewModel(
       // Persistence above remains valid even if another update superseded
       // this request. Discard its rendering work once it is no longer current.
       if (cancelled) return;
-      const loaded = mergeSessionChanges(stored, captured).map((change) => {
+      const loaded = mergeSessionChanges(stored, captured, dirty).map((change) => {
         const previous = previousChanges.current.get(change.path);
         const stat = previous?.before === change.before && previous.after === change.after
           ? { added: previous.added, removed: previous.removed }

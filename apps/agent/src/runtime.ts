@@ -22,6 +22,7 @@ import {
 import {
   deleteMemory,
   listMemory,
+  rememberFact,
   saveMemory,
 } from "./orchestrator/project-memory.js";
 import { pickerRoster } from "./providers/roster.js";
@@ -875,6 +876,9 @@ export function createAgentRuntime(
     await deleteMemory(config.workspaceRoot, params.name);
     return { ok: true };
   });
+  router.register("memory.remember", async (params) =>
+    rememberFact(config.workspaceRoot, params.text)
+  );
   registerMiscHandlers(
     router,
     knowledge,

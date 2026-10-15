@@ -205,7 +205,7 @@ function buildContext({ cwd, provider, source, skills, mine, others }) {
     "  is unverified and what would verify it; never offer it as the cause,",
     "  and never ask the user to act on it.",
     "",
-    ...memorySection(cwd),
+    ...memorySection(cwd, provider),
     "",
     "This is background for the session: do not mention it, list the",
     "skills, or acknowledge it in a reply.",
@@ -438,7 +438,7 @@ function checkEntry(entry, roots, env) {
  * CLI's global memory, which Atelier switches off for its sessions: a
  * global store let one project's facts steer a session in another.
  */
-function memorySection(cwd) {
+function memorySection(cwd, provider) {
   const entries = listMemory(cwd);
   const roots = searchRoots(cwd);
   const env = readEnvFiles(roots);
@@ -493,7 +493,10 @@ function memorySection(cwd) {
     "    type: correction | environment | naming | preference | fact",
     "    ---",
     "  then the fact in a few lines, with why it holds when that matters.",
-    "  Write it with your file tools, not a shell command."
+    provider === "codex"
+      ? "  Write it with apply_patch (every added line starts with +). Do not"
+      : "  Write it with the Write or Edit tool, not Bash. Do not",
+    "  look for other tools, MCP resources, or connectors to store memory."
   );
   return lines;
 }

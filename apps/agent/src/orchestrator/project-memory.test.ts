@@ -7,6 +7,7 @@ import {
   deleteMemory,
   listMemory,
   memorySlug,
+  rememberFact,
   saveMemory,
 } from "./project-memory.js";
 
@@ -59,4 +60,39 @@ test("workspace memory: save, edit, rename, delete, one file per fact", async ()
 test("a memory name cannot reach outside the memory folder", () => {
   assert.equal(memorySlug("../../etc/passwd"), "etc-passwd");
   assert.throws(() => memorySlug("../"), /needs a name/);
+});
+
+test("remember writes a fact with no model: name, type, update, forget", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-remember-"));
+  try {
+    const saved = await rememberFact(root, "no Redis in the local environment");
+    assert.equal(saved.action, "saved");
+    assert.ok(saved.action === "saved" && saved.entry);
+    if (saved.action !== "saved") return;
+    assert.equal(saved.entry.name, "no-redis-local-environment");
+    assert.equal(saved.entry.type, "environment");
+    assert.equal(saved.entry.description, "No Redis in the local environment");
+
+    // The same subject again updates the entry instead of adding one.
+    const again = await rememberFact(
+      root,
+      "no Redis in the local environment, it was removed in October"
+    );
+    assert.equal(again.action, "updated");
+    assert.equal((await listMemory(root)).length, 1);
+
+    const naming = await rememberFact(root, "Tiger means the finops-crystal-lens frontend");
+    assert.ok(naming.action === "saved" && naming.entry.type === "naming");
+
+    assert.deepEqual(await rememberFact(root, "forget zebra"), {
+      action: "not-found",
+      candidates: [],
+    });
+    const forgot = await rememberFact(root, "forget redis");
+    assert.deepEqual(forgot, { action: "forgot", name: "no-redis-local-environment" });
+    assert.equal((await listMemory(root)).length, 1);
+    await assert.rejects(rememberFact(root, "   "), /Nothing to remember/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

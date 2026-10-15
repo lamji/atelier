@@ -34,10 +34,17 @@ export class CliSessionDiffRepo {
     }));
   }
 
+  /**
+   * Upsert `changes`. With `dirtyPaths`, also drop every saved change whose
+   * path the working tree no longer differs on (committed or reverted):
+   * kept, it stayed in the rail forever and came back if the path was
+   * changed again for another reason.
+   */
   save(
     providerId: string,
     sessionId: string,
-    changes: CliSessionChange[]
+    changes: CliSessionChange[],
+    dirtyPaths?: readonly string[]
   ): void {
     const upsert = this.db.prepare(
       "INSERT INTO cli_session_diffs(" +
@@ -51,7 +58,17 @@ export class CliSessionDiffRepo {
         "last_touched_at = excluded.last_touched_at, " +
         "also_touched_by = excluded.also_touched_by"
     );
+    const drop = this.db.prepare(
+      "DELETE FROM cli_session_diffs " +
+        "WHERE provider_id = ? AND session_id = ? AND path = ?"
+    );
     const saveAll = this.db.transaction(() => {
+      if (dirtyPaths) {
+        const dirty = new Set(dirtyPaths);
+        for (const { path } of this.get(providerId, sessionId)) {
+          if (!dirty.has(path)) drop.run(providerId, sessionId, path);
+        }
+      }
       for (const change of changes) {
         upsert.run(
           providerId,

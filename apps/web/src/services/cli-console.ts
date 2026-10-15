@@ -9,6 +9,7 @@ import {
 } from "@atelier/shared";
 import { PtyInputLines } from "@/lib/pty-input-lines";
 import { bridge } from "./bridge-client.js";
+import { alert } from "@/state/alerts.store";
 import {
   docsForSession,
   refreshCliDocs,
@@ -753,6 +754,57 @@ function runSkillCommand(
   });
 }
 
+/** `$atelier-remember ...` or `/atelier-remember ...`, in either CLI. */
+const REMEMBER_COMMAND = /^[/$]atelier-remember(?:\s+([\s\S]*))?$/i;
+
+/** What follows the remember command, or null when `line` is not one. */
+export function rememberCommandText(line: string): string | null {
+  const match = line.trim().match(REMEMBER_COMMAND);
+  return match ? (match[1] ?? "").trim() : null;
+}
+
+/**
+ * Save a fact to the workspace memory, in Atelier, and clear the composer.
+ *
+ * Not handed to the CLI: run as a skill, the model spent the turn searching
+ * its tool list and MCP resources for a way to write a file. Writing down a
+ * fact the user states needs no model at all.
+ */
+function runRemember(text: string): string {
+  if (!text) {
+    alert.warning("Nothing to remember", "Add the fact after the command.");
+    return "\x15";
+  }
+  void bridge
+    .rpc("memory.remember", { text })
+    .then((result) => {
+      if (result.action === "forgot") {
+        alert.success("Forgot", result.name);
+      } else if (result.action === "not-found") {
+        alert.warning("Nothing to forget", `No memory matches "${text}".`);
+      } else if (result.action === "ambiguous") {
+        alert.warning(
+          "Which one?",
+          `Several memories match: ${(result.candidates ?? []).join(", ")}`
+        );
+      } else if (result.entry) {
+        const verb = result.action === "updated" ? "Updated" : "Remembered";
+        alert.success(
+          `${verb}: ${result.entry.name}`,
+          `${result.entry.type} · ${result.entry.description}`
+        );
+      }
+    })
+    .catch((error: unknown) =>
+      alert.danger(
+        "Could not save the memory",
+        error instanceof Error ? error.message : String(error)
+      )
+    );
+  // Ctrl+U: the command leaves the composer, and nothing is sent.
+  return "\x15";
+}
+
 /**
  * Consume Atelier's own commands at submit, before the provider sees Enter:
  * /rename, and the app skills of a CLI that cannot load them itself. Ctrl+U
@@ -774,15 +826,21 @@ function watchRenameCommand(termId: string, providerId: string): void {
         void autoRenameCliSession(termId, providerId);
         return "\x15";
       }
+      const fact = rememberCommandText(line);
+      if (fact !== null) return runRemember(fact);
       const typed = runSkillCommand(termId, provider, line);
       if (typed) return typed;
     }
     // Enter on a line the keystrokes did not spell out: recalled from
     // history, or filled in by the CLI's own menu. The screen has it.
-    if (data === "\r" && !provider.loadsSkills) {
+    if (data === "\r") {
       const shown = terminalRegistry.composerText(termId);
-      const recalled = shown ? runSkillCommand(termId, provider, shown) : null;
-      if (recalled) return recalled;
+      const fact = shown ? rememberCommandText(shown) : null;
+      if (fact !== null) return runRemember(fact);
+      if (!provider.loadsSkills) {
+        const recalled = shown ? runSkillCommand(termId, provider, shown) : null;
+        if (recalled) return recalled;
+      }
     }
     return data;
   }));

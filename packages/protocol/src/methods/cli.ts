@@ -68,6 +68,12 @@ export const cliMethods = {
       providerId: z.string(),
       sessionId: z.string(),
       changes: z.array(CliSessionChange),
+      /**
+       * Every path the working tree still differs on. When given, a saved
+       * change whose path is not in it is dropped: it was committed or
+       * reverted, so there is nothing left to review.
+       */
+      dirtyPaths: z.array(z.string()).optional(),
     }),
     result: z.object({ ok: z.boolean() }),
   },

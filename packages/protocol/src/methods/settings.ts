@@ -108,4 +108,17 @@ export const settingsMethods = {
     params: z.object({ name: z.string() }),
     result: z.object({ ok: z.boolean() }),
   },
+  /**
+   * `$atelier-remember <fact>` / `forget <what>`, done by Atelier itself
+   * rather than by a model turn.
+   */
+  "memory.remember": {
+    params: z.object({ text: z.string() }),
+    result: z.object({
+      action: z.enum(["saved", "updated", "forgot", "not-found", "ambiguous"]),
+      entry: MemoryEntry.optional(),
+      name: z.string().optional(),
+      candidates: z.array(z.string()).optional(),
+    }),
+  },
 } as const;
